@@ -100,6 +100,16 @@ export function Sidebar() {
           <FolderKanban className="h-4 w-4" />
           Projects
         </Link>
+        <Link
+          href="/tasks"
+          className={cn(
+            "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground",
+            pathname.startsWith("/tasks") && "bg-accent font-medium text-foreground",
+          )}
+        >
+          <ListTodo className="h-4 w-4" />
+          Tasks
+        </Link>
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 pb-3">
@@ -133,16 +143,6 @@ export function Sidebar() {
       </div>
 
       <div className="space-y-3 border-t border-border p-3">
-        <Link
-          href="/tasks"
-          className={cn(
-            "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground",
-            pathname.startsWith("/tasks") && "bg-accent font-medium text-foreground",
-          )}
-        >
-          <ListTodo className="h-4 w-4" />
-          Tasks
-        </Link>
         <BackendStatus />
         <Show when="signed-out">
           <div className="flex flex-col gap-2">

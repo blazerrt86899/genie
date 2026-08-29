@@ -10,6 +10,51 @@ import { useChat } from "@/hooks/useChat";
 import { useProjects } from "@/hooks/useProjects";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
+import { GreetingHeadline } from "./GreetingHeadline";
+
+function Composer({
+  input,
+  setInput,
+  onSend,
+  isStreaming,
+  autoFocus,
+}: {
+  input: string;
+  setInput: (v: string) => void;
+  onSend: () => void;
+  isStreaming: boolean;
+  autoFocus?: boolean;
+}) {
+  return (
+    <div className="flex items-end gap-2">
+      <textarea
+        // eslint-disable-next-line jsx-a11y/no-autofocus
+        autoFocus={autoFocus}
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onSend();
+          }
+        }}
+        rows={1}
+        placeholder="Message Genie…"
+        disabled={isStreaming}
+        className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+      />
+      <Button
+        variant="brand"
+        size="icon"
+        onClick={onSend}
+        disabled={isStreaming || !input.trim()}
+        aria-label="Send"
+      >
+        <SendHorizontal className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
 
 export function ChatView({ conversationId }: { conversationId?: string }) {
   const projectParam = useSearchParams().get("project");
@@ -45,6 +90,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     void send(text);
   }
 
+  const isEmpty = messages.length === 0;
+
   return (
     <div className="flex h-full flex-col">
       {activeProject && (
@@ -59,56 +106,58 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         </div>
       )}
 
-      <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
-        {messages.length === 0 && (
-          <div className="m-auto max-w-md text-center">
-            <h1 className="text-xl font-semibold">
-              {activeProject
-                ? `New chat in ${activeProject.name}`
-                : "What can Genie do for you?"}
-            </h1>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {activeProject
-                ? "Genie will follow this project's instructions here."
-                : "Ask anything — Genie routes it to the right specialists and streams back one answer."}
+      {isEmpty ? (
+        /* Centered welcome — greeting + composer, like a fresh chat window */
+        <div className="flex flex-1 flex-col items-center justify-center gap-8 overflow-y-auto p-6">
+          {activeProject ? (
+            <div className="text-center">
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                New chat in {activeProject.name}
+              </h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Genie will follow this project&apos;s instructions here.
+              </p>
+            </div>
+          ) : (
+            <GreetingHeadline />
+          )}
+          <div className="w-full max-w-2xl">
+            <Composer
+              input={input}
+              setInput={setInput}
+              onSend={handleSend}
+              isStreaming={isStreaming}
+              autoFocus
+            />
+            <p className="mt-2 text-center text-xs text-muted-foreground">
+              Genie routes your message to the right specialists and streams back
+              one answer.
             </p>
           </div>
-        )}
-        {messages.map((m) => (
-          <Message key={m.id} message={m} userName={userName} />
-        ))}
-        <div ref={endRef} />
-      </div>
-
-      <AgentActivity />
-
-      <div className="border-t border-border">
-        <div className="flex items-end gap-2 p-3 sm:px-6">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-            rows={1}
-            placeholder="Message Genie…"
-            disabled={isStreaming}
-            className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
-          />
-          <Button
-            variant="brand"
-            size="icon"
-            onClick={handleSend}
-            disabled={isStreaming || !input.trim()}
-            aria-label="Send"
-          >
-            <SendHorizontal className="h-4 w-4" />
-          </Button>
         </div>
-      </div>
+      ) : (
+        <>
+          <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
+            {messages.map((m) => (
+              <Message key={m.id} message={m} userName={userName} />
+            ))}
+            <div ref={endRef} />
+          </div>
+
+          <AgentActivity />
+
+          <div className="border-t border-border">
+            <div className="p-3 sm:px-6">
+              <Composer
+                input={input}
+                setInput={setInput}
+                onSend={handleSend}
+                isStreaming={isStreaming}
+              />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
