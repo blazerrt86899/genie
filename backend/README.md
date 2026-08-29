@@ -19,9 +19,12 @@ Bring up infra from the repo root first:
 ```bash
 supabase start                   # Postgres + pgvector on :54322
 docker compose up -d             # redis :6379, localstack :4566
-docker exec supabase_db_server psql -U postgres -c "CREATE DATABASE genie;"
-docker exec -i supabase_db_server psql -U postgres -d genie < ../scripts/setup_supabase.sql
+# create the `genie` schema + hybrid-search RPCs in the default `postgres` db:
+docker exec -i supabase_db_server psql -U postgres -d postgres < ../scripts/setup_supabase.sql
 ```
+
+Genie's tables (and the LangGraph checkpointer tables) live in the **`genie`
+schema**, not `public` — visible in Supabase Studio's schema switcher.
 
 ## Database migrations (app tables only — never checkpointer tables)
 

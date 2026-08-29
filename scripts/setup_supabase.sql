@@ -1,20 +1,26 @@
 -- ============================================================================
 -- Genie — one-time database setup (CLAUDE.md §8)
 --
--- Run once against the target Postgres (local pgvector container OR Supabase):
---   psql "postgres://postgres:postgres@localhost:5432/genie" -f scripts/setup_supabase.sql
+-- Run once against the target Postgres's default database:
+--   docker exec -i supabase_db_server psql -U postgres -d postgres < scripts/setup_supabase.sql
+--   (or Supabase Cloud's `postgres` db)
 --
--- Safe to re-run. Sections 2–4 self-skip until the Phase 2 tables
--- (document_chunks, user_memory) exist, then take effect on the next run.
--- LangGraph checkpointer tables are NOT managed here — created by
--- `checkpointer.setup()` at FastAPI startup (§8.2).
+-- Genie's tables live in the dedicated `genie` SCHEMA (Alembic + models target
+-- it). This script creates the schema, the hybrid-search RPCs, and — once the
+-- Phase 2 tables exist — their indexes / FTS triggers / RLS. Safe to re-run.
+-- LangGraph checkpointer tables are NOT managed here (created by
+-- `checkpointer.setup()` at FastAPI startup, also into the `genie` schema — §8.2).
 -- ============================================================================
 
--- ─── 1. Extensions (runs now) ───────────────────────────────────────────────
+CREATE SCHEMA IF NOT EXISTS genie;
+
+-- ─── 1. Extensions ─────────────────────────────────────────────────────────
 CREATE EXTENSION IF NOT EXISTS vector;        -- pgvector
 CREATE EXTENSION IF NOT EXISTS pg_trgm;       -- trigram / FTS support
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";   -- uuid_generate_v4()
 
+-- Everything below resolves into the genie schema.
+SET search_path = genie, public, extensions;
 -- Allow creating functions that reference tables which don't exist yet.
 SET check_function_bodies = off;
 
@@ -37,6 +43,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET search_path = genie, public, extensions
 AS $$
   WITH full_text AS (
     SELECT dc.id,
@@ -87,6 +94,7 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 STABLE
+SET search_path = genie, public, extensions
 AS $$
   WITH full_text AS (
     SELECT id,

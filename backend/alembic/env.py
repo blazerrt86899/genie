@@ -11,7 +11,8 @@ from logging.config import fileConfig
 from alembic import context
 from app.config import settings
 from app.db.models import Base  # noqa: F401  (imports all active models)
-from sqlalchemy import pool
+from app.db.models.base import DB_SCHEMA
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -24,20 +25,39 @@ config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_DIRECT)
 target_metadata = Base.metadata
 
 
+def _include_name(name, type_, parent_names):  # noqa: ARG001
+    """Only ever look at the genie schema — never touch public/auth/storage/etc."""
+    if type_ == "schema":
+        return name == DB_SCHEMA
+    return True
+
+
+_CONFIGURE = dict(
+    target_metadata=target_metadata,
+    compare_type=True,
+    version_table_schema=DB_SCHEMA,  # keep alembic_version inside the genie schema
+    include_schemas=True,
+    include_name=_include_name,
+)
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=settings.DATABASE_URL_DIRECT,
-        target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        compare_type=True,
+        **_CONFIGURE,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def _do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    # Commit the schema immediately: alembic's begin_transaction() won't manage a
+    # transaction that's already open, so the migration would never be committed.
+    connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {DB_SCHEMA}"))
+    connection.commit()
+    context.configure(connection=connection, **_CONFIGURE)
     with context.begin_transaction():
         context.run_migrations()
 

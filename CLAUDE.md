@@ -99,6 +99,15 @@ DATABASE_URL_SESSION="postgresql+asyncpg://postgres.REF:PASSWORD@aws-0-REGION.po
 ```
 **Rule**: FastAPI uses `DATABASE_URL_POOL`. LangGraph checkpointer uses `DATABASE_URL_SESSION`. Alembic uses `DATABASE_URL_DIRECT`.
 
+**Schema**: all Genie tables (and the checkpointer tables) live in a dedicated
+**`genie` Postgres schema**, never `public`. `Base.metadata = MetaData(schema="genie")`
+(`db/models/base.py:DB_SCHEMA`); the async engine sets `search_path=genie,public,extensions`;
+Alembic uses `version_table_schema="genie"` + an `include_name` filter so it only
+ever touches the `genie` schema; `main.py` pins the checkpointer connection's
+`search_path` to `genie`. `scripts/setup_supabase.sql` creates the schema.
+Locally this means one shared `postgres` database, `genie`-schema isolation, and
+Supabase Studio shows the tables via its schema switcher.
+
 ### Frontend
 | Component | Choice | Notes |
 |-----------|--------|-------|
@@ -736,7 +745,11 @@ Before running the app:
 
 ## 8. Supabase Setup (One-Time)
 
-Run `scripts/setup_supabase.sql` once against the Supabase project. This creates:
+Run `scripts/setup_supabase.sql` once against the target's **`postgres`** database
+(`docker exec -i supabase_db_server psql -U postgres -d postgres < scripts/setup_supabase.sql`).
+It creates the **`genie` schema** first, then everything below lands in it
+(`SET search_path = genie, …`; the RPCs also pin their own `search_path`). All
+Genie objects — app tables, checkpointer tables, RPCs — live in `genie`, never `public`.
 
 ### 8.1 Required Extensions
 ```sql
@@ -754,8 +767,12 @@ await checkpointer.setup()  # called once in FastAPI lifespan startup
 ```
 
 ### 8.3 Hybrid Search Function — document_chunks
+> Lives in the `genie` schema. To call it via `supabase.rpc(...)` (PostgREST),
+> add `genie` to the project's exposed schemas (Supabase: *API → Exposed schemas*,
+> or `PGRST_DB_SCHEMAS`); otherwise call it over SQLAlchemy as
+> `SELECT * FROM genie.hybrid_search_documents(...)`. Phase 2 decision.
 ```sql
--- Create this function in Supabase SQL Editor or setup_supabase.sql
+-- Created by setup_supabase.sql (CREATE OR REPLACE FUNCTION genie.hybrid_search_documents ...)
 -- Called via: supabase.rpc('hybrid_search_documents', {...})
 
 CREATE OR REPLACE FUNCTION hybrid_search_documents(
@@ -1187,7 +1204,7 @@ DELETE /api/v1/documents/{id}          → 204
 
 **Database tasks**:
 - [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
-- [x] Alembic migration: users, conversations, messages (`5badea5fbffd`)
+- [x] Alembic migration: users, conversations, messages (`1c61bba11678`)
 - [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
 **Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload.
@@ -1385,7 +1402,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — real Clerk user verified on the backend._
+_Last updated: 2026-08-29 — Genie moved to its own `genie` Postgres schema._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1408,7 +1425,7 @@ _Last updated: 2026-08-29 — real Clerk user verified on the backend._
 - ✅ `POST /webhooks/clerk` — Svix-verified; `user.created/updated/deleted` → `UserRepository`. Local: `clerk webhooks --forward-to …`. `user_repo` Clerk helpers all implemented.
 - ✅ Dev user row seeded on startup **only when Clerk is unconfigured**
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
-- ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`5badea5fbffd`, applied). Phase 2+ models are inert placeholder files.
+- ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
 - ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, LangSmith, rate limiting
 
@@ -1425,8 +1442,8 @@ _Last updated: 2026-08-29 — real Clerk user verified on the backend._
 - ✅ Backend verifies the Clerk JWT and owns each conversation with the **real** internal user id. Needs `CLERK_PUBLISHABLE_KEY` (JWKS domain) + `CLERK_SECRET_KEY` (profile/webhook) in `backend/.env`; `CLERK_WEBHOOK_SECRET` for the webhook. Missing/expired token → `401`. With none of these set, the dev-user fallback keeps local work frictionless.
 
 **Infra / local dev**
-- ✅ `docker-compose.yml` → Redis (`:6379`) + LocalStack (`:4566`). Postgres/pgvector comes from the **Supabase CLI** stack (`supabase start`, `:54322`), dedicated **`genie`** database.
-- ✅ `scripts/setup_supabase.sql` — extensions + hybrid-search RPCs now; indexes/FTS triggers/RLS self-skip until Phase 2 tables exist.
+- ✅ `docker-compose.yml` → Redis (`:6379`) + LocalStack (`:4566`). Postgres/pgvector comes from the **Supabase CLI** stack (`supabase start`, `:54322`); `DATABASE_URL_*` point at the default `postgres` db, Genie's tables live in the **`genie` schema** (visible in Studio).
+- ✅ `scripts/setup_supabase.sql` — `CREATE SCHEMA genie` + hybrid-search RPCs (in `genie`, `SET search_path`); indexes/FTS triggers/RLS self-skip until Phase 2 tables exist.
 - ⬜ `infrastructure/terraform` (Phase 4), SQS/S3 wiring, CI/CD.
 
 ### 19.2 Next up (Phase 1)

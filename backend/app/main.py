@@ -20,9 +20,18 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.core.redis import close_redis, get_redis_client
+from app.db.models.base import DB_SCHEMA
 from app.db.session import dispose_engine, get_engine
 
 logger = structlog.get_logger(__name__)
+
+
+def _checkpointer_conn_string() -> str:
+    """Session-mode URL for psycopg, pinned to the genie schema so the LangGraph
+    checkpointer tables land there too (it creates them unqualified)."""
+    url = settings.DATABASE_URL_SESSION.replace("+asyncpg", "")
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}options=-csearch_path%3D{DB_SCHEMA}%2Cpublic"
 
 
 async def _seed_dev_user() -> None:
@@ -31,7 +40,7 @@ async def _seed_dev_user() -> None:
     async with get_engine().begin() as conn:
         await conn.execute(
             text(
-                "INSERT INTO users "
+                f"INSERT INTO {DB_SCHEMA}.users "
                 "(id, clerk_id, email, full_name, email_verified, token_budget, metadata) "
                 "VALUES (:id, :clerk_id, :email, 'Local Dev', true, 1000000, '{}'::jsonb) "
                 "ON CONFLICT (id) DO NOTHING"
@@ -66,9 +75,8 @@ async def lifespan(app: FastAPI):
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-            conn_string = settings.DATABASE_URL_SESSION.replace("+asyncpg", "")
             checkpointer = await stack.enter_async_context(
-                AsyncPostgresSaver.from_conn_string(conn_string)
+                AsyncPostgresSaver.from_conn_string(_checkpointer_conn_string())
             )
             await checkpointer.setup()
             set_runtime_graph(build_chat_graph().compile(checkpointer=checkpointer))

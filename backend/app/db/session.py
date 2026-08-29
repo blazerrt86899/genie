@@ -16,9 +16,14 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config import settings
+from app.db.models.base import DB_SCHEMA
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
+
+# Genie tables live in the `genie` schema; `extensions` is where Supabase keeps
+# pgvector etc. Models are schema-qualified, but this keeps ad-hoc SQL sane too.
+_SEARCH_PATH = f"{DB_SCHEMA},public,extensions"
 
 
 def get_engine() -> AsyncEngine:
@@ -30,6 +35,7 @@ def get_engine() -> AsyncEngine:
             pool_size=5,
             max_overflow=10,
             echo=False,
+            connect_args={"server_settings": {"search_path": _SEARCH_PATH}},
         )
         _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine

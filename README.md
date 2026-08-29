@@ -42,10 +42,13 @@ npm i -g supabase                   # or: brew install supabase/tap/supabase
 supabase start                      # Postgres + pgvector on :54322, Studio :54323
 docker compose up -d                # Redis :6379, LocalStack :4566
 
-# one-time: dedicated Genie database + extensions/functions
-docker exec supabase_db_server psql -U postgres -c "CREATE DATABASE genie;"
-docker exec -i supabase_db_server psql -U postgres -d genie < scripts/setup_supabase.sql
+# one-time: create the `genie` schema + hybrid-search functions (in the default `postgres` db)
+docker exec -i supabase_db_server psql -U postgres -d postgres < scripts/setup_supabase.sql
 ```
+
+Genie's tables live in a dedicated **`genie` schema** of the `postgres`
+database, so they show up in Supabase Studio (schema switcher, top-left) and
+don't collide with anything else in the local stack.
 
 ### 2. Backend
 
