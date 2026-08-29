@@ -26,8 +26,10 @@ clerk init --app app_3Ia08IpcDiBIMwI1FykjqEgLCMm   # links the app, writes .env.
 clerk doctor
 ```
 
-- `ClerkProvider` (with the `@clerk/ui` shadcn theme) wraps the app in
-  `src/app/layout.tsx`, inside `<body>`.
+- `ClerkProvider` wraps the app in `src/app/layout.tsx`, inside `<body>`,
+  themed via the `appearance` prop (`src/lib/clerk-appearance.ts`). The
+  `@clerk/ui` shadcn theme is **not** used — it requires Tailwind v4 (this
+  project is v3) and renders Clerk components unstyled.
 - `src/middleware.ts` runs bare `clerkMiddleware()` (enables `auth()` + the
   `/__clerk/*` proxy). Route protection is **resource-based**:
   `src/app/(app)/layout.tsx` calls `await auth()` and redirects to `/sign-in`.

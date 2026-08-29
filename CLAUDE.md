@@ -107,7 +107,7 @@ DATABASE_URL_SESSION="postgresql+asyncpg://postgres.REF:PASSWORD@aws-0-REGION.po
 | State | Zustand | Global chat/task/agent state |
 | Streaming | Native `EventSource` API | SSE — no third-party lib needed |
 | Data Fetching | TanStack Query v5 | REST endpoints + cache invalidation |
-| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. `@clerk/ui` shadcn theme. |
+| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. Themed via `appearance` prop (not `@clerk/ui` — that needs Tailwind v4). |
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
 | Icons | Lucide React | Consistent icon set |
 | Animations | Framer Motion | Agent activity indicators only |
@@ -609,19 +609,21 @@ app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), which links the repo to the Clerk app and
 writes `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` + `CLERK_SECRET_KEY` to
 `frontend/.env.local`. Frontend runs `@clerk/nextjs` **v7** (needs Next 15+).
 
-`ClerkProvider` goes **inside `<body>`**, not wrapping `<html>`:
+`ClerkProvider` goes **inside `<body>`**, not wrapping `<html>`. Theme the
+prebuilt components with the CSS-free `appearance` prop
+(`src/lib/clerk-appearance.ts`) — the `@clerk/ui` shadcn theme needs Tailwind v4
+and this project is on v3, so it renders unstyled if used.
 
 ```tsx
 // frontend/src/app/layout.tsx
 import { ClerkProvider } from '@clerk/nextjs'
-import { shadcn } from '@clerk/ui/themes'
-import '@clerk/ui/themes/shadcn.css'
+import { clerkAppearance } from '@/lib/clerk-appearance'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <ClerkProvider appearance={{ theme: shadcn }}>
+        <ClerkProvider appearance={clerkAppearance}>
           <QueryProvider>{children}</QueryProvider>
         </ClerkProvider>
       </body>
@@ -1378,7 +1380,8 @@ migration, Next.js 15 shell (chat + tasks pages, Zustand stores, `api.ts`/`sse.t
 
 **Clerk:** frontend is fully set up via the Clerk CLI — `@clerk/nextjs` v7 linked
 to app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm` (dev instance), keys in
-`frontend/.env.local`, `ClerkProvider` + `@clerk/ui` shadcn theme, sign-in/up
+`frontend/.env.local`, `ClerkProvider` themed via the `appearance` prop
+(`src/lib/clerk-appearance.ts`; `@clerk/ui` skipped — needs Tailwind v4), sign-in/up
 pages, `UserButton`/`SignInButton` in the sidebar, `(app)/*` gated by
 `await auth()` in the group layout. `clerk doctor` passes. **Backend** Clerk is
 still Phase 1 — `core/clerk.py` returns a fixed dev user until
