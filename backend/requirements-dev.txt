@@ -1,0 +1,9 @@
+# Genie backend — development-only dependencies.
+# Installed as the `dev` extra:  uv sync --extra dev
+# or with pip:  pip install -r requirements.txt -r requirements-dev.txt
+
+pytest>=8.3
+pytest-asyncio>=0.24
+anyio>=4.6
+ruff>=0.8
+mypy>=1.13

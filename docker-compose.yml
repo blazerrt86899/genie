@@ -1,0 +1,28 @@
+# Local dev infrastructure for Genie — the pieces the Supabase CLI stack
+# does NOT provide.
+#
+#   supabase start        # Postgres + pgvector on :54322, Studio on :54323
+#   docker compose up -d   # Redis + LocalStack (this file)
+#
+# Production uses ElastiCache / Supabase Cloud / real AWS — see CLAUDE.md §3.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:3
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs,s3
+      DEBUG: 0
+    volumes:
+      - "./.localstack:/var/lib/localstack"
