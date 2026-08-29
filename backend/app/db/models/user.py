@@ -19,6 +19,7 @@ from app.db.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.db.models.conversation import Conversation
+    from app.db.models.project import Project
 
 
 class User(Base, TimestampMixin):
@@ -35,6 +36,11 @@ class User(Base, TimestampMixin):
     user_metadata: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
 
     conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    projects: Mapped[list[Project]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

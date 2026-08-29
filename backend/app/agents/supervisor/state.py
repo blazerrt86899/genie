@@ -21,6 +21,7 @@ class GenieState(TypedDict):
     messages: Annotated[list, add_messages]  # append-only
     user_id: str
     conversation_id: str
+    project_instructions: str | None  # prepended to the system prompt when set
     intent: str | None
     active_agents: list[str]
     intermediate_results: dict[str, Any]  # keyed by agent name

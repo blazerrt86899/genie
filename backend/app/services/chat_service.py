@@ -23,6 +23,7 @@ from app.core.streaming import format_sse_event, sse_done, sse_error
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.message_repo import MessageRepository
+from app.db.repositories.project_repo import ProjectRepository
 from app.services.title_service import generate_title
 
 logger = structlog.get_logger(__name__)
@@ -40,6 +41,7 @@ async def create_turn(
     user: User,
     message: str,
     conversation_id: str | None,
+    project_id: str | None = None,
 ) -> tuple[str, str]:
     """Persist the user message, return ``(run_id, conversation_id)``."""
     conv_repo = ConversationRepository(db)
@@ -50,7 +52,15 @@ async def create_turn(
         if conversation is None:
             raise ValueError("conversation not found")
     else:
-        conversation = await conv_repo.create(user.id, title=None)
+        pid: uuid.UUID | None = None
+        if project_id:
+            project = await ProjectRepository(db).get_for_user(
+                uuid.UUID(project_id), user.id
+            )
+            if project is None:
+                raise ValueError("project not found")
+            pid = project.id
+        conversation = await conv_repo.create(user.id, title=None, project_id=pid)
 
     await msg_repo.add_message(conversation.id, user.id, "user", message)
     await conv_repo.touch(conversation.id)
@@ -94,12 +104,19 @@ async def _generate(
         yield sse_error("OPENAI_API_KEY is not set", "llm_not_configured"), None
         return
 
+    project_instructions: str | None = None
+    if conversation.project_id is not None:
+        project = await ProjectRepository(db).get_for_user(conversation.project_id, user.id)
+        if project is not None:
+            project_instructions = project.instructions
+
     graph = get_runtime_graph()
     config = {"configurable": {"thread_id": conversation_id}}
     state = {
         "messages": [HumanMessage(content=message)],
         "user_id": str(user.id),
         "conversation_id": conversation_id,
+        "project_instructions": project_instructions,
     }
 
     total_tokens = 0

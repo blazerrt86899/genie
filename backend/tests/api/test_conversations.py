@@ -17,9 +17,11 @@ from httpx import ASGITransport, AsyncClient
 _USER = SimpleNamespace(id=uuid.uuid4())
 _NOW = datetime.now(UTC)
 
-_A = SimpleNamespace(id=uuid.uuid4(), title="Older", created_at=_NOW - timedelta(hours=2),
+_A = SimpleNamespace(id=uuid.uuid4(), title="Older", project_id=None,
+                     created_at=_NOW - timedelta(hours=2),
                      last_message_at=_NOW - timedelta(hours=2))
-_B = SimpleNamespace(id=uuid.uuid4(), title="Newer", created_at=_NOW - timedelta(hours=1),
+_B = SimpleNamespace(id=uuid.uuid4(), title="Newer", project_id=None,
+                     created_at=_NOW - timedelta(hours=1),
                      last_message_at=_NOW - timedelta(minutes=1))
 
 

@@ -25,13 +25,22 @@ def get_chat_model() -> ChatOpenAI:
 
 
 async def chat_node(state: GenieState) -> dict:
-    """Single-node chat: prepend the system prompt, call the model.
+    """Single-node chat: prepend the system prompt (+ project instructions when
+    the chat belongs to a project), call the model.
 
     Token streaming is surfaced by ``graph.astream_events(version="v2")`` at the
     call site — see ``app.services.chat_service``.
     """
+    system = CHAT_SYSTEM_PROMPT
+    instructions = state.get("project_instructions")
+    if instructions:
+        system = (
+            f"{CHAT_SYSTEM_PROMPT}\n\n---\n"
+            f"Project instructions (follow these for this conversation):\n{instructions}"
+        )
+
     model = get_chat_model()
-    messages = [SystemMessage(content=CHAT_SYSTEM_PROMPT), *state["messages"]]
+    messages = [SystemMessage(content=system), *state["messages"]]
     response = await model.ainvoke(messages)
     return {"messages": [response]}
 

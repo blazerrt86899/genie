@@ -28,15 +28,19 @@ class FakeRedis:
         self.store.pop(key, None)
 
 
+def _conv(*, title=None, project_id=None, **kw):
+    return SimpleNamespace(id=uuid.uuid4(), title=title, project_id=project_id, **kw)
+
+
 class FakeConvRepo:
-    conv = SimpleNamespace(id=uuid.uuid4(), title=None)
+    conv = _conv()
     touched: int = 0
     titled: str | None = None
 
     def __init__(self, _db) -> None: ...
 
-    async def create(self, user_id, title=None):
-        FakeConvRepo.conv = SimpleNamespace(id=uuid.uuid4(), user_id=user_id, title=title)
+    async def create(self, user_id, title=None, project_id=None):
+        FakeConvRepo.conv = _conv(user_id=user_id, title=title, project_id=project_id)
         return FakeConvRepo.conv
 
     async def get_for_user(self, conversation_id, user_id):
@@ -62,14 +66,25 @@ class FakeMsgRepo:
         return SimpleNamespace(id=uuid.uuid4())
 
 
+class FakeProjectRepo:
+    instructions: str | None = None
+
+    def __init__(self, _db) -> None: ...
+
+    async def get_for_user(self, project_id, user_id):
+        return SimpleNamespace(id=project_id, instructions=FakeProjectRepo.instructions)
+
+
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     FakeMsgRepo.added = []
     FakeConvRepo.touched = 0
     FakeConvRepo.titled = None
-    FakeConvRepo.conv = SimpleNamespace(id=uuid.uuid4(), title=None)
+    FakeConvRepo.conv = _conv()
+    FakeProjectRepo.instructions = None
     monkeypatch.setattr(chat_service, "ConversationRepository", FakeConvRepo)
     monkeypatch.setattr(chat_service, "MessageRepository", FakeMsgRepo)
+    monkeypatch.setattr(chat_service, "ProjectRepository", FakeProjectRepo)
     monkeypatch.setattr(chat_service, "settings", SimpleNamespace(llm_configured=True))
 
     async def _fake_title(_u, _a):
@@ -146,3 +161,26 @@ async def test_stream_turn_unknown_run_emits_error_then_done():
     ]
     assert [f["type"] for f in frames] == ["error", "done"]
     assert frames[0]["code"] == "run_not_found"
+
+
+async def test_project_instructions_reach_the_graph(monkeypatch):
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="hi", conversation_id=None
+    )
+    FakeConvRepo.conv.project_id = uuid.uuid4()
+    FakeProjectRepo.instructions = "Always reply in French."
+
+    seen: dict = {}
+
+    async def fake_events(state, config, version):  # noqa: ARG001
+        seen["state"] = state
+        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="ok")}}
+
+    monkeypatch.setattr(
+        chat_service, "get_runtime_graph", lambda: SimpleNamespace(astream_events=fake_events)
+    )
+
+    _ = [f async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)]
+    assert seen["state"]["project_instructions"] == "Always reply in French."

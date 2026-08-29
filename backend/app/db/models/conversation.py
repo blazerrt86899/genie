@@ -13,6 +13,7 @@ from app.db.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.db.models.message import Message
+    from app.db.models.project import Project
     from app.db.models.user import User
 
 
@@ -27,11 +28,15 @@ class Conversation(Base, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), index=True
+    )
     title: Mapped[str | None] = mapped_column(String(255))
     # Bumped on every message — the chat sidebar sorts by this (recency).
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="conversations")
+    project: Mapped[Project | None] = relationship(back_populates="conversations")
     messages: Mapped[list[Message]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",

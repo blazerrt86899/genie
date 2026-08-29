@@ -17,7 +17,7 @@ const CONVERSATIONS_KEY = ["conversations"] as const;
  * On the first message of a new chat we POST, learn the id, and
  * `router.replace('/chat/<id>')` (messages already in the store, so no flash).
  */
-export function useChat(conversationId?: string) {
+export function useChat(conversationId?: string, projectId?: string | null) {
   const { getToken } = useAuth();
   const router = useRouter();
   const qc = useQueryClient();
@@ -39,6 +39,7 @@ export function useChat(conversationId?: string) {
         const conv = await getConversation(conversationId, await getToken());
         if (cancelled) return;
         s.setConversationId(conv.id);
+        s.setProject(conv.project);
         s.setMessages(
           conv.messages.map((m) => ({
             id: m.id,
@@ -73,11 +74,15 @@ export function useChat(conversationId?: string) {
           message,
           existingCid,
           token,
+          existingCid ? null : projectId,
         );
         s.setRunId(run_id);
         s.setConversationId(conversation_id);
         if (!existingCid) {
           qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+          if (projectId) {
+            qc.invalidateQueries({ queryKey: ["project", projectId] });
+          }
           router.replace(`/chat/${conversation_id}`);
         }
 
@@ -106,12 +111,13 @@ export function useChat(conversationId?: string) {
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
       }
     },
-    [getToken, router, qc],
+    [getToken, router, qc, projectId],
   );
 
   return {
     messages: store.messages,
     isStreaming: store.runId !== null,
+    project: store.project,
     send,
   };
 }

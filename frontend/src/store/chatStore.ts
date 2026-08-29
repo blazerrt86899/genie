@@ -7,11 +7,17 @@ export interface ChatMessage {
   pending?: boolean;
 }
 
+export interface ProjectRef {
+  id: string;
+  name: string;
+}
+
 interface ChatState {
   messages: ChatMessage[];
   activeAgents: string[];
   runId: string | null;
   conversationId: string | null;
+  project: ProjectRef | null;
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
   appendToken: (id: string, token: string) => void;
@@ -21,6 +27,7 @@ interface ChatState {
   agentEnded: (agent: string) => void;
   setRunId: (runId: string | null) => void;
   setConversationId: (conversationId: string | null) => void;
+  setProject: (project: ProjectRef | null) => void;
   reset: () => void;
 }
 
@@ -29,6 +36,7 @@ export const useChatStore = create<ChatState>((set) => ({
   activeAgents: [],
   runId: null,
   conversationId: null,
+  project: null,
   addMessage: (message) =>
     set((s) => ({ messages: [...s.messages, message] })),
   setMessages: (messages) => set({ messages }),
@@ -53,6 +61,13 @@ export const useChatStore = create<ChatState>((set) => ({
     set((s) => ({ activeAgents: s.activeAgents.filter((a) => a !== agent) })),
   setRunId: (runId) => set({ runId }),
   setConversationId: (conversationId) => set({ conversationId }),
+  setProject: (project) => set({ project }),
   reset: () =>
-    set({ messages: [], activeAgents: [], runId: null, conversationId: null }),
+    set({
+      messages: [],
+      activeAgents: [],
+      runId: null,
+      conversationId: null,
+      project: null,
+    }),
 }));

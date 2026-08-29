@@ -60,11 +60,16 @@ export function postChat(
   message: string,
   conversationId: string | null,
   token?: string | null,
+  projectId?: string | null,
 ): Promise<ChatAccepted> {
   return apiFetch<ChatAccepted>("/api/v1/chat", {
     method: "POST",
     token,
-    body: JSON.stringify({ message, conversation_id: conversationId }),
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId,
+      project_id: projectId ?? null,
+    }),
   });
 }
 
@@ -80,9 +85,11 @@ export interface ConversationSummary {
   title: string | null;
   created_at: string;
   last_message_at: string | null;
+  project_id: string | null;
 }
 
 export interface ConversationDetail extends ConversationSummary {
+  project: { id: string; name: string } | null;
   messages: ConversationMessage[];
 }
 
@@ -107,6 +114,72 @@ export function deleteConversation(
     method: "DELETE",
     token,
   });
+}
+
+// ─── Projects ──────────────────────────────────────────────────────────────
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  instructions: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectSummary extends Project {
+  conversation_count: number;
+}
+
+export interface ProjectDetail extends Project {
+  conversations: ConversationSummary[];
+}
+
+export interface ProjectInput {
+  name?: string;
+  description?: string | null;
+  instructions?: string | null;
+}
+
+export function listProjects(token?: string | null): Promise<ProjectSummary[]> {
+  return apiFetch<ProjectSummary[]>("/api/v1/projects", { token });
+}
+
+export function getProject(
+  id: string,
+  token?: string | null,
+): Promise<ProjectDetail> {
+  return apiFetch<ProjectDetail>(`/api/v1/projects/${id}`, { token });
+}
+
+export function createProject(
+  body: ProjectInput,
+  token?: string | null,
+): Promise<Project> {
+  return apiFetch<Project>("/api/v1/projects", {
+    method: "POST",
+    token,
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateProject(
+  id: string,
+  body: ProjectInput,
+  token?: string | null,
+): Promise<Project> {
+  return apiFetch<Project>(`/api/v1/projects/${id}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteProject(
+  id: string,
+  token?: string | null,
+): Promise<void> {
+  return apiFetch<void>(`/api/v1/projects/${id}`, { method: "DELETE", token });
 }
 
 export function chatStreamUrl(conversationId: string, runId: string): string {

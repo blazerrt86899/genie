@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { ChatView } from "@/components/chat/ChatView";
 
 export default async function ConversationPage({
@@ -6,5 +7,9 @@ export default async function ConversationPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  return <ChatView conversationId={id} />;
+  return (
+    <Suspense fallback={null}>
+      <ChatView conversationId={id} />
+    </Suspense>
+  );
 }

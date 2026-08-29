@@ -13,8 +13,15 @@ from app.db.repositories.base import BaseRepository
 class ConversationRepository(BaseRepository[Conversation]):
     model = Conversation
 
-    async def create(self, user_id: uuid.UUID, title: str | None = None) -> Conversation:
-        return await self.add(Conversation(user_id=user_id, title=title))
+    async def create(
+        self,
+        user_id: uuid.UUID,
+        title: str | None = None,
+        project_id: uuid.UUID | None = None,
+    ) -> Conversation:
+        return await self.add(
+            Conversation(user_id=user_id, title=title, project_id=project_id)
+        )
 
     async def get_for_user(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID
@@ -36,6 +43,22 @@ class ConversationRepository(BaseRepository[Conversation]):
                 Conversation.created_at.desc(),
             )
             .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_for_project(
+        self, project_id: uuid.UUID, user_id: uuid.UUID
+    ) -> list[Conversation]:
+        result = await self.db.execute(
+            select(Conversation)
+            .where(
+                Conversation.project_id == project_id,
+                Conversation.user_id == user_id,
+            )
+            .order_by(
+                Conversation.last_message_at.desc().nulls_last(),
+                Conversation.created_at.desc(),
+            )
         )
         return list(result.scalars().all())
 

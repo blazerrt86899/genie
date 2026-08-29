@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
-import { ListTodo, Plus, Trash2 } from "lucide-react";
+import { FolderKanban, ListTodo, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { BackendStatus } from "@/components/BackendStatus";
@@ -17,11 +17,13 @@ import { Wordmark } from "@/components/landing/Wordmark";
 function ConversationRow({
   id,
   title,
+  inProject,
   active,
   onDelete,
 }: {
   id: string;
   title: string | null;
+  inProject: boolean;
   active: boolean;
   onDelete: () => void;
 }) {
@@ -30,11 +32,14 @@ function ConversationRow({
       <Link
         href={`/chat/${id}`}
         className={cn(
-          "block truncate rounded-md py-2 pl-2 pr-8 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+          "flex items-center gap-1.5 truncate rounded-md py-2 pl-2 pr-8 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
           active && "bg-accent font-medium text-foreground",
         )}
       >
-        {title || "New chat"}
+        {inProject && (
+          <FolderKanban className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+        )}
+        <span className="truncate">{title || "New chat"}</span>
       </Link>
       <button
         type="button"
@@ -77,7 +82,7 @@ export function Sidebar() {
 
   return (
     <aside className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-card">
-      <div className="space-y-3 p-3">
+      <div className="space-y-2 p-3">
         <Link href="/" className="flex px-1">
           <Wordmark />
         </Link>
@@ -85,6 +90,16 @@ export function Sidebar() {
           <Plus className="h-4 w-4" />
           New chat
         </Button>
+        <Link
+          href="/projects"
+          className={cn(
+            "flex items-center gap-2 rounded-md px-2 py-2 text-sm text-muted-foreground hover:bg-accent hover:text-foreground",
+            pathname.startsWith("/projects") && "bg-accent font-medium text-foreground",
+          )}
+        >
+          <FolderKanban className="h-4 w-4" />
+          Projects
+        </Link>
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 pb-3">
@@ -104,6 +119,7 @@ export function Sidebar() {
                 key={c.id}
                 id={c.id}
                 title={c.title}
+                inProject={c.project_id !== null}
                 active={pathname === `/chat/${c.id}`}
                 onDelete={() => handleDelete(c.id)}
               />

@@ -228,7 +228,7 @@ genie/
 │       │   └── repositories/
 │       │       ├── base.py
 │       │       ├── user_repo.py
-│       │       ├── conversation_repo.py
+│       │       ├── conversation_repo.py  ← + project_repo.py
 │       │       ├── message_repo.py
 │       │       ├── task_repo.py
 │       │       ├── document_repo.py
@@ -270,11 +270,13 @@ genie/
 │       │   └── (app)/
 │       │       ├── layout.tsx         ← auth() gate (redirect to /sign-in) + Sidebar
 │       │       ├── chat/page.tsx      ← new chat  ·  chat/[id]/page.tsx ← a conversation
+│       │       ├── projects/page.tsx  ← project grid  ·  projects/[id]/page.tsx ← a project
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
-│       │   ├── Sidebar.tsx            ← nav + BackendStatus + Clerk sign-in/user buttons
+│       │   ├── Sidebar.tsx            ← New chat · Projects link · all-conversations list · account
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
+│       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
 │       │   ├── landing/               ← SiteHeader, Hero, CallOrb (hero animation),
 │       │   │                              ThemeToggle, LogoMarquee, HowItWorks, Features,
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
@@ -291,6 +293,7 @@ genie/
 │       ├── hooks/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
 │       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
+│       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
 │       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
 │       │
 │       ├── providers/
@@ -974,6 +977,7 @@ class GenieState(TypedDict):
     messages:             Annotated[list, add_messages]   # append-only
     user_id:              str
     conversation_id:      str
+    project_instructions: Optional[str]                   # prepended to the system prompt (Projects)
     intent:               Optional[str]                   # extracted by supervisor
     active_agents:        list[str]                       # currently running
     intermediate_results: dict[str, Any]                  # keyed by agent name
@@ -1155,14 +1159,21 @@ GET    /api/v1/users/me                → {id, email, full_name, avatar_url, to
                                          Use this to confirm user is synced after sign-up
 
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
-POST   /api/v1/chat                    → {run_id, conversation_id}
+POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?)
 GET    /api/v1/chat/{conv_id}/stream   → SSE stream  (query param: run_id)
 POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
 
 # ── Conversations ─────────────────────────────────────────────────────────────
-GET    /api/v1/conversations           → [{id,title,created_at,last_message_at}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages
+GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id}], newest-activity first
+GET    /api/v1/conversations/{id}      → conversation + messages + project{id,name}
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
+
+# ── Projects ─────────────────────────────────────────────────────────────────
+POST   /api/v1/projects                → 201 {id,name,description,instructions,...}
+GET    /api/v1/projects                → [{...project, conversation_count}]
+GET    /api/v1/projects/{id}           → project + its conversations
+PATCH  /api/v1/projects/{id}           → update name/description/instructions
+DELETE /api/v1/projects/{id}           → 204 (CASCADE: deletes its chats + messages + threads)
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 GET    /api/v1/tasks                   → list (filter: status, date)
@@ -1218,7 +1229,7 @@ DELETE /api/v1/documents/{id}          → 204
 
 **Database tasks**:
 - [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
-- [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at)
+- [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at), `84a8e112e61f` (projects + conversations.project_id)
 - [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
 **Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload.
@@ -1416,7 +1427,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — conversation sidebar, per-chat URLs, auto-titles._
+_Last updated: 2026-08-29 — Projects (Claude-style: shared instructions, isolated chats)._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1442,7 +1453,8 @@ _Last updated: 2026-08-29 — conversation sidebar, per-chat URLs, auto-titles._
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
-- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event. ORM relations (`User.conversations`, `Conversation.messages`, `Message.conversation`).
+- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
+- ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → `chat_node` prepends them to `CHAT_SYSTEM_PROMPT`. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, rate limiting
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
@@ -1453,7 +1465,8 @@ _Last updated: 2026-08-29 — conversation sidebar, per-chat URLs, auto-titles._
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
 - ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
-- ⬜ `useTasks` (enabled), conversation rename/search, document upload UI, Projects
+- ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).
+- ⬜ `useTasks` (enabled), conversation rename/search, per-project model settings, project knowledge docs
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.
