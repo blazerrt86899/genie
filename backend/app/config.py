@@ -6,10 +6,24 @@ elsewhere.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from functools import lru_cache
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _domain_from_publishable_key(pk: str | None) -> str | None:
+    """`pk_test_<base64>` / `pk_live_<base64>` decodes to `<frontend-api-host>$`."""
+    if not pk or not pk.startswith(("pk_test_", "pk_live_")):
+        return None
+    encoded = pk.split("_", 2)[2]
+    try:
+        decoded = base64.b64decode(encoded + "==").decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
+        return None
+    return decoded.rstrip("$") or None
 
 
 class Settings(BaseSettings):
@@ -86,8 +100,20 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.CORS_ALLOW_ORIGINS.split(",") if o.strip()]
 
     @property
+    def clerk_domain(self) -> str | None:
+        """Clerk Frontend API host — for the JWKS endpoint.
+        Explicit ``CLERK_DOMAIN`` wins; otherwise derived from the publishable key."""
+        return self.CLERK_DOMAIN or _domain_from_publishable_key(self.CLERK_PUBLISHABLE_KEY)
+
+    @property
     def clerk_configured(self) -> bool:
-        return bool(self.CLERK_SECRET_KEY and self.CLERK_DOMAIN)
+        """True once the backend can verify Clerk JWTs (has a JWKS domain)."""
+        return bool(self.clerk_domain)
+
+    @property
+    def clerk_backend_api_enabled(self) -> bool:
+        """True when the Clerk Backend API can be called (profile enrichment, webhook)."""
+        return bool(self.CLERK_SECRET_KEY)
 
     @property
     def llm_configured(self) -> bool:

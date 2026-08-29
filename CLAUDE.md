@@ -235,7 +235,11 @@ genie/
 │       │   └── document_ingestion.py
 │       │
 │       └── core/
-│           ├── clerk.py               ← JWKS fetch+cache, verify_clerk_jwt(), get_current_user()
+│           ├── clerk.py               ← JWKS fetch+cache, RS256 verify, get_current_user()
+│           ├── clerk_api.py           ← thin Clerk Backend API client (profile enrichment)
+│           ├── redis.py               ← async Redis client singleton
+│           ├── streaming.py           ← SSE frame helpers (§11)
+│           ├── logging.py             ← structlog JSON config
 │           ├── middleware.py          ← request_id injection, timing
 │           └── exceptions.py          ← Custom HTTP exception classes
 │
@@ -270,7 +274,7 @@ genie/
 │       │   └── ui/                    ← shadcn/ui primitives (button)
 │       │
 │       ├── hooks/
-│       │   ├── useChat.ts             ← POST /chat + SSE connection lifecycle (stub)
+│       │   ├── useChat.ts             ← POST /chat + SSE stream + localStorage rehydrate
 │       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
 │       │
 │       ├── providers/
@@ -1152,10 +1156,10 @@ DELETE /api/v1/documents/{id}          → 204
 **Backend tasks**:
 - [x] FastAPI app factory with lifespan (startup: Redis ping, DB engine, checkpointer.setup())
 - [x] `config.py` with pydantic-settings loading all env vars (including all CLERK_* vars)
-- [ ] `core/clerk.py`: `_get_jwks()` with Redis cache + `get_current_user()` dependency — _dev-user bypass only; real JWT verify still 501_
-- [ ] `POST /webhooks/clerk`: Svix signature verification + user.created/updated/deleted handlers
-- [x] `GET /users/me` — _returns the dev user; real Clerk-token resolution lands with `core/clerk.py`_
-- [ ] `UserRepository.create_from_clerk()` + `create_from_clerk_token()` + `update_from_clerk()` + `soft_delete_by_clerk_id()` — _signatures only_
+- [x] `core/clerk.py`: `_get_jwks()` Redis-cached + `get_current_user()` — real RS256 verify; JWKS domain derived from `CLERK_PUBLISHABLE_KEY`; dev-user only when Clerk is unconfigured
+- [x] `POST /webhooks/clerk`: Svix signature verification + user.created/updated/deleted handlers
+- [x] `GET /users/me` — resolves the Clerk token → real internal user (auto-provisions, email from Clerk Backend API)
+- [x] `UserRepository.create_from_clerk()` + `create_from_clerk_token()` + `update_from_clerk()` + `soft_delete_by_clerk_id()` + `touch_last_active()`
 - [x] `request_id` middleware injected on all requests
 - [x] Alembic: `users` (with `clerk_id` column, no `password_hash`), `conversations`, `messages` tables
 - [x] `GenieState` TypedDict + `RouteDecision` Pydantic model
@@ -1381,12 +1385,12 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — basic streaming chat wired end-to-end._
+_Last updated: 2026-08-29 — real Clerk user verified on the backend._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
-| Phase 1 — Foundation | 🟡 In Progress | ~35% |
+| Phase 1 — Foundation | 🟡 In Progress | ~50% |
 | Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
@@ -1400,12 +1404,13 @@ _Last updated: 2026-08-29 — basic streaming chat wired end-to-end._
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
 - ✅ **Chat**: `POST /chat` (persist user msg + stash run in Redis) → `GET /chat/{id}/stream` SSE (`token`/`error`/`done`). Single-node LangGraph `chat` graph (`build_chat_graph`) → OpenAI `gpt-4o-2024-08-06`, compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id` gives multi-turn memory. Both messages persist to `messages`.
 - ✅ `GET /conversations`, `GET /conversations/{id}` (conversation + messages); `conversation_repo` / `message_repo` real methods
-- ✅ Dev user row seeded on startup (dev only) so chat FKs resolve
-- ✅ Remaining §14 endpoints still return **501** (`/webhooks/clerk`, `/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
+- ✅ **Clerk auth** (`core/clerk.py`): JWKS fetched from the Frontend API host (derived from `CLERK_PUBLISHABLE_KEY`, or explicit `CLERK_DOMAIN`), Redis-cached (`clerk:jwks`); `RS256` verify; `sub` → internal user via Redis `user_by_clerk:{id}` → `UserRepository` → auto-provision (`create_from_clerk_token`, email/name enriched from the Clerk Backend API). `touch_last_active`. Dev-user fallback **only when no Clerk domain is configured**.
+- ✅ `POST /webhooks/clerk` — Svix-verified; `user.created/updated/deleted` → `UserRepository`. Local: `clerk webhooks --forward-to …`. `user_repo` Clerk helpers all implemented.
+- ✅ Dev user row seeded on startup **only when Clerk is unconfigured**
+- ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`5badea5fbffd`, applied). Phase 2+ models are inert placeholder files.
 - ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
-- 🟡 `core/clerk.py` — dev-user bypass works; real JWKS/JWT verification raises **501**
-- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), `user_repo` Clerk helpers, workers, `POST /webhooks/clerk`
+- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, LangSmith, rate limiting
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ App Router shell: `/` → `/chat`; `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
@@ -1416,8 +1421,8 @@ _Last updated: 2026-08-29 — basic streaming chat wired end-to-end._
 - ⬜ `useTasks` (enabled), conversation sidebar list, document upload UI
 
 **Auth end-to-end**
-- ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`
-- 🟡 Backend does **not** verify the Clerk JWT yet → every API caller is treated as the fixed dev user (`00000000-0000-0000-0000-000000000001`). Set `CLERK_SECRET_KEY` + `CLERK_DOMAIN` and implement `core/clerk.py` to close this.
+- ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.
+- ✅ Backend verifies the Clerk JWT and owns each conversation with the **real** internal user id. Needs `CLERK_PUBLISHABLE_KEY` (JWKS domain) + `CLERK_SECRET_KEY` (profile/webhook) in `backend/.env`; `CLERK_WEBHOOK_SECRET` for the webhook. Missing/expired token → `401`. With none of these set, the dev-user fallback keeps local work frictionless.
 
 **Infra / local dev**
 - ✅ `docker-compose.yml` → Redis (`:6379`) + LocalStack (`:4566`). Postgres/pgvector comes from the **Supabase CLI** stack (`supabase start`, `:54322`), dedicated **`genie`** database.
@@ -1426,11 +1431,11 @@ _Last updated: 2026-08-29 — basic streaming chat wired end-to-end._
 
 ### 19.2 Next up (Phase 1)
 
-Real Clerk JWT verify + `POST /webhooks/clerk` (`user_repo` Clerk helpers) →
-grow `build_chat_graph()` into the supervisor: `with_structured_output(RouteDecision)`
+Grow `build_chat_graph()` into the supervisor: `with_structured_output(RouteDecision)`
 routing → `prompt_enhancer` + `web_search` agents → synthesiser (emit
 `agent_start`/`agent_end` SSE) → Redis `recent_messages` / `rate_limit` +
-token-budget check → conversation sidebar list.
+token-budget check → conversation sidebar list. Frontend `GET /users/me` gate
+after sign-up (webhook race guard, §7.8).
 
 > **Interim note (CLAUDE.md §9/§11):** the running graph is a single `chat` node,
 > not the supervisor. SSE currently emits only `token` / `error` / `done`.
