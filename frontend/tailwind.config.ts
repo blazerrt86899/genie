@@ -28,6 +28,12 @@ const config: Config = {
           DEFAULT: "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
+        brand: {
+          DEFAULT: "hsl(var(--brand))",
+          foreground: "hsl(var(--brand-foreground))",
+        },
+        "brand-2": "hsl(var(--brand-2))",
+        glow: "hsl(var(--glow))",
       },
     },
   },

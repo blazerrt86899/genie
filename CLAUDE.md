@@ -112,14 +112,15 @@ Supabase Studio shows the tables via its schema switcher.
 | Component | Choice | Notes |
 |-----------|--------|-------|
 | Framework | Next.js 15 | App Router only (no Pages Router). React 19. |
-| Styling | Tailwind CSS v3 | + custom CSS variables for theming |
+| Styling | Tailwind CSS v3 | `darkMode: "class"` + CSS-var tokens (incl. `--brand` violet→indigo) |
+| Theme | `next-themes` | Global light/dark toggle (`attribute="class"`, `defaultTheme="system"`), `<ThemeProvider>` outermost in `layout.tsx` |
 | State | Zustand | Global chat/task/agent state |
 | Streaming | Native `EventSource` API | SSE — no third-party lib needed |
 | Data Fetching | TanStack Query v5 | REST endpoints + cache invalidation |
-| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. Themed via `appearance` prop (not `@clerk/ui` — that needs Tailwind v4). |
+| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. Themed via `appearance` prop (not `@clerk/ui` — that needs Tailwind v4). Core-3: use `<Show when="signed-in">`, not `<SignedIn>`. |
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
-| Icons | Lucide React | Consistent icon set |
-| Animations | Framer Motion | Agent activity indicators only |
+| Icons | Lucide React (v1 — no brand icons; inline SVG for X/GitHub/LinkedIn) | Consistent icon set |
+| Animations | Framer Motion | Agent activity + the landing hero animation |
 
 ### Infrastructure (AWS)
 | Service | Role |
@@ -260,8 +261,9 @@ genie/
 │   └── src/
 │       ├── middleware.ts              ← bare clerkMiddleware() + /__clerk/:path* matcher
 │       ├── app/                       ← App Router pages
-│       │   ├── layout.tsx             ← <ClerkProvider> (in <body>) + QueryProvider
-│       │   ├── page.tsx               ← Redirects to /chat
+│       │   ├── layout.tsx             ← ThemeProvider › ClerkProvider (in <body>) › QueryProvider
+│       │   ├── globals.css            ← Tailwind + light/dark CSS-var tokens + marquee keyframes
+│       │   ├── page.tsx               ← Marketing landing (SiteHeader/Hero/…/Footer)
 │       │   ├── sign-in/[[...sign-in]]/page.tsx   ← Clerk hosted <SignIn />
 │       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp />
 │       │   └── (app)/
@@ -272,6 +274,9 @@ genie/
 │       ├── components/
 │       │   ├── Sidebar.tsx            ← nav + BackendStatus + Clerk sign-in/user buttons
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
+│       │   ├── landing/               ← SiteHeader, Hero, CallOrb (hero animation),
+│       │   │                              ThemeToggle, LogoMarquee, HowItWorks, Features,
+│       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
 │       │   │   ├── ChatWindow.tsx     ← Message list + input
 │       │   │   ├── Message.tsx        ← Renders user/assistant messages
@@ -287,7 +292,8 @@ genie/
 │       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
 │       │
 │       ├── providers/
-│       │   └── query-provider.tsx     ← TanStack QueryClientProvider
+│       │   ├── query-provider.tsx     ← TanStack QueryClientProvider
+│       │   └── theme-provider.tsx     ← next-themes ThemeProvider
 │       │
 │       ├── store/
 │       │   ├── chatStore.ts           ← Zustand: messages, active agents, run_id
@@ -1402,7 +1408,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — Genie moved to its own `genie` Postgres schema._
+_Last updated: 2026-08-29 — marketing landing page + light/dark theme._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1430,7 +1436,9 @@ _Last updated: 2026-08-29 — Genie moved to its own `genie` Postgres schema._
 - ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, LangSmith, rate limiting
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
-- ✅ App Router shell: `/` → `/chat`; `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
+- ✅ **Landing page** at `/` (`components/landing/*`) — voice-AI-concierge positioning, sticky blur nav w/ placeholder links, Framer-Motion hero "live call" animation (`CallOrb`: waveform → spoken request → agent chips → completed actions, loops; static under `prefers-reduced-motion`), logo marquee, how-it-works, features grid, "voice coming soon" band, CTA, 4-col footer. **`/` no longer redirects to `/chat`.**
+- ✅ **Light/dark theme** — `next-themes` (`ThemeProvider` outermost in `layout.tsx`, `attribute="class"`, system default); `ThemeToggle` in the nav; global (also themes `/chat`, `/tasks`, Clerk pages). Dark palette = deep violet-black + violet glow.
+- ✅ `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
 - ✅ `/chat` — real streaming chat: `useChat` hook (POST `/chat` → `fetch` the SSE stream → `parseSseStream` → `chatStore`), `ChatWindow` renders tokens live and disables input while streaming; conversation id in `localStorage`, rehydrated from `GET /conversations/{id}` on reload. `AgentActivity` present (no agent events emitted yet).
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
 - ✅ Zustand `chatStore` (messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`

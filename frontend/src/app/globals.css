@@ -3,7 +3,18 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
   :root {
+    color-scheme: light;
+
     --background: 0 0% 100%;
     --foreground: 222 47% 11%;
     --muted: 210 40% 96%;
@@ -15,22 +26,35 @@
     --primary-foreground: 210 40% 98%;
     --accent: 210 40% 96%;
     --accent-foreground: 222 47% 11%;
-    --ring: 222 47% 11%;
+    --ring: 262 83% 58%;
+
+    /* brand — violet → indigo "magic" */
+    --brand: 262 83% 58%;
+    --brand-2: 243 75% 59%;
+    --brand-foreground: 0 0% 100%;
+    --glow: 262 90% 62%;
   }
 
   .dark {
-    --background: 222 47% 7%;
-    --foreground: 210 40% 98%;
-    --muted: 217 33% 17%;
-    --muted-foreground: 215 20% 65%;
-    --card: 222 47% 9%;
-    --border: 217 33% 20%;
-    --input: 217 33% 20%;
+    color-scheme: dark;
+
+    --background: 250 30% 5%;
+    --foreground: 220 20% 96%;
+    --muted: 250 20% 13%;
+    --muted-foreground: 245 12% 62%;
+    --card: 250 24% 8%;
+    --border: 250 18% 18%;
+    --input: 250 18% 18%;
     --primary: 210 40% 98%;
     --primary-foreground: 222 47% 11%;
-    --accent: 217 33% 17%;
+    --accent: 250 20% 15%;
     --accent-foreground: 210 40% 98%;
-    --ring: 213 27% 84%;
+    --ring: 263 80% 68%;
+
+    --brand: 263 82% 68%;
+    --brand-2: 245 80% 70%;
+    --brand-foreground: 250 30% 6%;
+    --glow: 265 90% 65%;
   }
 
   * {
@@ -39,5 +63,28 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  /* Infinite logo marquee */
+  @keyframes genie-marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+  .animate-marquee {
+    animation: genie-marquee 32s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .animate-marquee {
+      animation: none;
+    }
   }
 }
