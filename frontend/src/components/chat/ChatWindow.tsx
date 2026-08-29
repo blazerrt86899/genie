@@ -33,7 +33,7 @@ export function ChatWindow() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 overflow-y-auto p-4">
+      <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
         {messages.length === 0 && (
           <p className="mt-10 text-center text-sm text-muted-foreground">
             Ask Genie anything to get started.
@@ -48,7 +48,7 @@ export function ChatWindow() {
       <AgentActivity />
 
       <div className="border-t border-border">
-        <div className="mx-auto flex w-full max-w-3xl items-end gap-2 p-3">
+        <div className="flex items-end gap-2 p-3 sm:px-6">
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
