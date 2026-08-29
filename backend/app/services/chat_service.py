@@ -68,28 +68,29 @@ async def _generate(
     user: User,
     conversation_id: str,
     run_id: str,
-) -> AsyncIterator[tuple[str, int]]:
-    """Yield ``(sse_frame, total_tokens)`` for the assistant turn (no ``done``)."""
+) -> AsyncIterator[tuple[str, dict | None]]:
+    """Yield ``(sse_frame, done_info)`` — ``done_info`` is set only on the final
+    yield: ``{"total_tokens", "langsmith_run_id"}``."""
     raw = await redis.get(_run_key(run_id))
     if raw is None:
-        yield sse_error("unknown or expired run", "run_not_found"), 0
+        yield sse_error("unknown or expired run", "run_not_found"), None
         return
     payload = json.loads(raw)
     message: str = payload["message"]
 
     if payload["conversation_id"] != conversation_id:
-        yield sse_error("run does not belong to this conversation", "run_mismatch"), 0
+        yield sse_error("run does not belong to this conversation", "run_mismatch"), None
         return
 
     conversation = await ConversationRepository(db).get_for_user(
         uuid.UUID(conversation_id), user.id
     )
     if conversation is None:
-        yield sse_error("conversation not found", "not_found"), 0
+        yield sse_error("conversation not found", "not_found"), None
         return
 
     if not settings.llm_configured:
-        yield sse_error("OPENAI_API_KEY is not set", "llm_not_configured"), 0
+        yield sse_error("OPENAI_API_KEY is not set", "llm_not_configured"), None
         return
 
     graph = get_runtime_graph()
@@ -101,14 +102,20 @@ async def _generate(
     }
 
     total_tokens = 0
+    langsmith_run_id: str | None = None
     answer_parts: list[str] = []
     async for event in graph.astream_events(state, config=config, version="v2"):
+        # The first event with no parent is the root graph run — its id is the
+        # LangSmith trace id (when tracing is enabled).
+        if langsmith_run_id is None and not event.get("parent_ids"):
+            langsmith_run_id = event.get("run_id")
+
         kind = event["event"]
         if kind == "on_chat_model_stream":
             chunk = event["data"]["chunk"].content
             if chunk:
                 answer_parts.append(chunk)
-                yield format_sse_event("token", content=chunk), 0
+                yield format_sse_event("token", content=chunk), None
         elif kind == "on_chat_model_end":
             usage = getattr(event["data"].get("output"), "usage_metadata", None)
             if usage:
@@ -116,9 +123,20 @@ async def _generate(
 
     answer = "".join(answer_parts)
     if answer:
-        await MessageRepository(db).add_message(conversation.id, user.id, "assistant", answer)
+        meta: dict = {}
+        if langsmith_run_id:
+            meta["langsmith_run_id"] = langsmith_run_id
+        await MessageRepository(db).add_message(
+            conversation.id, user.id, "assistant", answer, metadata=meta
+        )
     await redis.delete(_run_key(run_id))
-    yield "", total_tokens
+    logger.info(
+        "chat_turn_completed",
+        run_id=run_id,
+        langsmith_run_id=langsmith_run_id,
+        total_tokens=total_tokens,
+    )
+    yield "", {"total_tokens": total_tokens, "langsmith_run_id": langsmith_run_id}
 
 
 async def stream_turn(
@@ -130,14 +148,19 @@ async def stream_turn(
 ) -> AsyncIterator[str]:
     """Yield SSE frames for one assistant turn. Always ends with a ``done`` event
     (error event first if something failed — CLAUDE.md §16)."""
-    total_tokens = 0
+    done_info: dict = {}
     try:
-        async for frame, tokens in _generate(db, redis, user, conversation_id, run_id):
+        async for frame, info in _generate(db, redis, user, conversation_id, run_id):
             if frame:
                 yield frame
-            total_tokens = tokens or total_tokens
+            if info:
+                done_info = info
     except Exception as exc:  # noqa: BLE001
         logger.exception("chat_stream_failed", run_id=run_id)
         yield sse_error(str(exc), "chat_error")
 
-    yield sse_done(total_tokens=total_tokens, run_id=run_id)
+    yield sse_done(
+        total_tokens=done_info.get("total_tokens", 0),
+        run_id=run_id,
+        langsmith_run_id=done_info.get("langsmith_run_id"),
+    )

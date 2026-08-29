@@ -26,8 +26,9 @@ def format_sse_event(event_type: SSEEventType, **data: Any) -> str:
     return f"data: {json.dumps(payload, default=str)}\n\n"
 
 
-def sse_done(total_tokens: int, run_id: str) -> str:
-    return format_sse_event("done", total_tokens=total_tokens, run_id=run_id)
+def sse_done(total_tokens: int, run_id: str, **extra: Any) -> str:
+    clean = {k: v for k, v in extra.items() if v is not None}
+    return format_sse_event("done", total_tokens=total_tokens, run_id=run_id, **clean)
 
 
 def sse_error(message: str, code: str = "internal_error") -> str:

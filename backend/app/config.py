@@ -11,6 +11,7 @@ import binascii
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -66,10 +67,23 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # ─── LangSmith ─────────────────────────────────────────────────────────
-    LANGCHAIN_TRACING_V2: bool = False
-    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
-    LANGCHAIN_API_KEY: str | None = None
-    LANGCHAIN_PROJECT: str = "genie-dev"
+    # Accept both the current LANGSMITH_* names and the legacy LANGCHAIN_* ones.
+    LANGSMITH_TRACING: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2"),
+    )
+    LANGSMITH_ENDPOINT: str = Field(
+        default="https://api.smith.langchain.com",
+        validation_alias=AliasChoices("LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT"),
+    )
+    LANGSMITH_API_KEY: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
+    )
+    LANGSMITH_PROJECT: str = Field(
+        default="genie-dev",
+        validation_alias=AliasChoices("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"),
+    )
 
     # ─── Search ────────────────────────────────────────────────────────────
     TAVILY_API_KEY: str | None = None
@@ -118,6 +132,10 @@ class Settings(BaseSettings):
     @property
     def llm_configured(self) -> bool:
         return bool(self.OPENAI_API_KEY)
+
+    @property
+    def langsmith_enabled(self) -> bool:
+        return bool(self.LANGSMITH_TRACING and self.LANGSMITH_API_KEY)
 
 
 @lru_cache

@@ -10,7 +10,12 @@ export type SseEvent =
   | { type: "task_created"; task: Record<string, unknown> }
   | { type: "interrupt"; reason: string; details: Record<string, unknown> }
   | { type: "error"; message: string; code: string }
-  | { type: "done"; total_tokens: number; run_id: string };
+  | {
+      type: "done";
+      total_tokens: number;
+      run_id: string;
+      langsmith_run_id?: string;
+    };
 
 export type SseHandler = (event: SseEvent) => void;
 

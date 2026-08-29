@@ -43,11 +43,13 @@ class FakeConvRepo:
 
 class FakeMsgRepo:
     added: list[tuple[str, str]] = []
+    last_metadata: dict | None = None
 
     def __init__(self, _db) -> None: ...
 
-    async def add_message(self, conversation_id, user_id, role, content):
+    async def add_message(self, conversation_id, user_id, role, content, metadata=None):
         FakeMsgRepo.added.append((role, content))
+        FakeMsgRepo.last_metadata = metadata
         return SimpleNamespace(id=uuid.uuid4())
 
 
@@ -82,13 +84,17 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
     )
 
     async def fake_events(_state, config, version):  # noqa: ARG001
+        yield {"event": "on_chain_start", "run_id": "trace-123", "parent_ids": [], "data": {}}
         for piece in ("Hel", "lo"):
             yield {
                 "event": "on_chat_model_stream",
+                "run_id": "child",
+                "parent_ids": ["trace-123"],
                 "data": {"chunk": SimpleNamespace(content=piece)},
             }
         yield {
             "event": "on_chat_model_end",
+            "parent_ids": ["trace-123"],
             "data": {"output": SimpleNamespace(usage_metadata={"total_tokens": 7})},
         }
 
@@ -103,7 +109,9 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
     assert [f["type"] for f in frames] == ["token", "token", "done"]
     assert [f["content"] for f in frames if f["type"] == "token"] == ["Hel", "lo"]
     assert frames[-1]["total_tokens"] == 7
+    assert frames[-1]["langsmith_run_id"] == "trace-123"
     assert ("assistant", "Hello") in FakeMsgRepo.added
+    assert FakeMsgRepo.last_metadata == {"langsmith_run_id": "trace-123"}
     assert f"run:{run_id}" not in redis.store  # consumed
 
 

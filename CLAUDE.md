@@ -249,6 +249,7 @@ genie/
 │           ├── clerk_api.py           ← thin Clerk Backend API client (profile enrichment)
 │           ├── redis.py               ← async Redis client singleton
 │           ├── streaming.py           ← SSE frame helpers (§11)
+│           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
 │           ├── logging.py             ← structlog JSON config
 │           ├── middleware.py          ← request_id injection, timing
 │           └── exceptions.py          ← Custom HTTP exception classes
@@ -370,10 +371,13 @@ OPENAI_CHAT_MODEL=gpt-4o-2024-08-06   # ALWAYS pin the model version — never u
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # ─── LangSmith (observability) ───────────────────────────────────────────────
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_API_KEY=
-LANGCHAIN_PROJECT=genie-prod  # or genie-dev
+# `app/core/observability.py:configure_tracing()` copies these into os.environ at
+# startup — LangChain reads them from there, not from Settings. Legacy
+# LANGCHAIN_* names still accepted (AliasChoices).
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=
+LANGSMITH_PROJECT=genie-prod  # or genie-dev
 
 # ─── Search ──────────────────────────────────────────────────────────────────
 TAVILY_API_KEY=
@@ -1193,7 +1197,7 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] `POST /chat` + `GET /chat/{id}/stream` SSE endpoints — _single-node `chat` graph, no supervisor yet_
 - [x] SSE event protocol: `token`, `error`, `done` emitted — _`agent_start`/`agent_end` await the agent layer_
 - [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat_
-- [ ] LangSmith tracing enabled (set env vars, verify traces appear)
+- [x] LangSmith tracing — `configure_tracing()` in the lifespan pushes `LANGSMITH_*` into `os.environ`; each chat turn's root run id is stored on the assistant message's `metadata.langsmith_run_id` and echoed in the SSE `done` event. Verified: traces land in the LangSmith project.
 - [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
 
 **Frontend tasks**:
@@ -1408,7 +1412,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — dark-mode fixes, sign-in→/chat, IPv6 API-url fix._
+_Last updated: 2026-08-29 — LangSmith tracing wired + run id captured._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1424,6 +1428,7 @@ _Last updated: 2026-08-29 — dark-mode fixes, sign-in→/chat, IPv6 API-url fix
 **Backend** (`@clerk/…` n/a — FastAPI + uv; deps in `backend/requirements.txt`)
 - ✅ App factory + lifespan (`main.py`): Redis ping, DB `SELECT 1`, `AsyncPostgresSaver.setup()` (non-fatal in dev)
 - ✅ `config.py` (pydantic-settings, all §6 vars), `core/logging.py` (structlog JSON), `core/middleware.py` (`request_id` + timing), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
+- ✅ **LangSmith tracing** — `core/observability.py:configure_tracing()` (called first in the lifespan) copies `LANGSMITH_*` from Settings into `os.environ` so LangChain actually traces; each chat turn's root run id → `messages.metadata.langsmith_run_id` + the SSE `done` event.
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
 - ✅ **Chat**: `POST /chat` (persist user msg + stash run in Redis) → `GET /chat/{id}/stream` SSE (`token`/`error`/`done`). Single-node LangGraph `chat` graph (`build_chat_graph`) → OpenAI `gpt-4o-2024-08-06`, compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id` gives multi-turn memory. Both messages persist to `messages`.
 - ✅ `GET /conversations`, `GET /conversations/{id}` (conversation + messages); `conversation_repo` / `message_repo` real methods

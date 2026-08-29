@@ -19,6 +19,7 @@ class MessageRepository(BaseRepository[Message]):
         user_id: uuid.UUID,
         role: str,
         content: str,
+        metadata: dict | None = None,
     ) -> Message:
         return await self.add(
             Message(
@@ -26,6 +27,7 @@ class MessageRepository(BaseRepository[Message]):
                 user_id=user_id,
                 role=role,
                 content=content,
+                message_metadata=metadata or {},
             )
         )
 

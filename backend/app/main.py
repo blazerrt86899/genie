@@ -19,6 +19,7 @@ from app.core.clerk import DEV_CLERK_ID, DEV_USER_ID
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
+from app.core.observability import configure_tracing
 from app.core.redis import close_redis, get_redis_client
 from app.db.models.base import DB_SCHEMA
 from app.db.session import dispose_engine, get_engine
@@ -52,6 +53,7 @@ async def _seed_dev_user() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    configure_tracing()  # must run before the graph is compiled / any chain runs
     logger.info("startup_begin", env=settings.APP_ENV)
 
     # Redis — required
