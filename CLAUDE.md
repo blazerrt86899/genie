@@ -239,22 +239,26 @@ genie/
 │           ├── middleware.py          ← request_id injection, timing
 │           └── exceptions.py          ← Custom HTTP exception classes
 │
-├── frontend/
+├── frontend/                          ← Next.js 15, React 19, Tailwind v3, npm
 │   ├── package.json
-│   ├── next.config.js
+│   ├── next.config.mjs
 │   ├── tailwind.config.ts
-│   ├── middleware.ts                   ← Clerk route protection (/(app)/* requires auth)
+│   ├── components.json                ← shadcn/ui conventions
 │   └── src/
+│       ├── middleware.ts              ← bare clerkMiddleware() + /__clerk/:path* matcher
 │       ├── app/                       ← App Router pages
-│       │   ├── layout.tsx             ← Wraps entire app in <ClerkProvider>
+│       │   ├── layout.tsx             ← <ClerkProvider> (in <body>) + QueryProvider
 │       │   ├── page.tsx               ← Redirects to /chat
 │       │   ├── sign-in/[[...sign-in]]/page.tsx   ← Clerk hosted <SignIn />
 │       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp />
 │       │   └── (app)/
+│       │       ├── layout.tsx         ← auth() gate (redirect to /sign-in) + Sidebar
 │       │       ├── chat/page.tsx      ← Main chat interface
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
+│       │   ├── Sidebar.tsx            ← nav + BackendStatus + Clerk sign-in/user buttons
+│       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── chat/
 │       │   │   ├── ChatWindow.tsx     ← Message list + input
 │       │   │   ├── Message.tsx        ← Renders user/assistant messages
@@ -263,11 +267,14 @@ genie/
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← Kanban: todo/in-progress/done
 │       │   │   └── TaskCard.tsx
-│       │   └── ui/                    ← shadcn/ui components
+│       │   └── ui/                    ← shadcn/ui primitives (button)
 │       │
 │       ├── hooks/
-│       │   ├── useChat.ts             ← POST /chat + SSE connection lifecycle
-│       │   └── useTasks.ts            ← TanStack Query for tasks
+│       │   ├── useChat.ts             ← POST /chat + SSE connection lifecycle (stub)
+│       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
+│       │
+│       ├── providers/
+│       │   └── query-provider.tsx     ← TanStack QueryClientProvider
 │       │
 │       ├── store/
 │       │   ├── chatStore.ts           ← Zustand: messages, active agents, run_id
@@ -275,7 +282,8 @@ genie/
 │       │
 │       └── lib/
 │           ├── api.ts                 ← Typed fetch wrapper (injects Clerk Bearer token)
-│           └── sse.ts                 ← SSE event parser + dispatcher
+│           ├── sse.ts                 ← SSE event parser + dispatcher
+│           └── clerk-appearance.ts    ← CSS-free Clerk theme (appearance prop)
 │
 ├── infrastructure/
 │   └── terraform/
@@ -1131,41 +1139,41 @@ DELETE /api/v1/documents/{id}          → 204
 **Goal**: Single working end-to-end: user types → web search → streamed response.
 
 **Backend tasks**:
-- [ ] FastAPI app factory with lifespan (startup: Redis ping, DB engine, checkpointer.setup())
-- [ ] `config.py` with pydantic-settings loading all env vars (including all CLERK_* vars)
-- [ ] `core/clerk.py`: `_get_jwks()` with Redis cache + `get_current_user()` dependency
+- [x] FastAPI app factory with lifespan (startup: Redis ping, DB engine, checkpointer.setup())
+- [x] `config.py` with pydantic-settings loading all env vars (including all CLERK_* vars)
+- [ ] `core/clerk.py`: `_get_jwks()` with Redis cache + `get_current_user()` dependency — _dev-user bypass only; real JWT verify still 501_
 - [ ] `POST /webhooks/clerk`: Svix signature verification + user.created/updated/deleted handlers
-- [ ] `GET /users/me`: resolves Clerk token → internal user (used by frontend post sign-up)
-- [ ] `UserRepository.create_from_clerk()` + `create_from_clerk_token()` + `update_from_clerk()` + `soft_delete_by_clerk_id()`
-- [ ] `request_id` middleware injected on all requests
-- [ ] Alembic: `users` (with `clerk_id` column, no `password_hash`), `conversations`, `messages` tables
-- [ ] `GenieState` TypedDict + `RouteDecision` Pydantic model
+- [x] `GET /users/me` — _returns the dev user; real Clerk-token resolution lands with `core/clerk.py`_
+- [ ] `UserRepository.create_from_clerk()` + `create_from_clerk_token()` + `update_from_clerk()` + `soft_delete_by_clerk_id()` — _signatures only_
+- [x] `request_id` middleware injected on all requests
+- [x] Alembic: `users` (with `clerk_id` column, no `password_hash`), `conversations`, `messages` tables
+- [x] `GenieState` TypedDict + `RouteDecision` Pydantic model
 - [ ] Supervisor node with `with_structured_output(RouteDecision)` (no hardcoded routing)
 - [ ] Web Search agent (Tavily) + Prompt Enhancer agent
 - [ ] Synthesiser node
-- [ ] `AsyncPostgresSaver` checkpointer wired (session-mode URL)
+- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — _`.setup()` runs at startup; graph `compile()` pending_
 - [ ] `POST /chat` + `GET /chat/{id}/stream` SSE endpoints
-- [ ] SSE event protocol: `agent_start`, `token`, `agent_end`, `done`
-- [ ] Redis L1: `recent_messages`, `rate_limit`
+- [ ] SSE event protocol: `agent_start`, `token`, `agent_end`, `done` — _`core/streaming.py` helper + `lib/sse.ts` parser exist; nothing emits yet_
+- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only_
 - [ ] LangSmith tracing enabled (set env vars, verify traces appear)
 - [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
 
 **Frontend tasks**:
-- [ ] Next.js 14 App Router scaffold + Tailwind + shadcn/ui
-- [ ] Install `@clerk/nextjs`, add `NEXT_PUBLIC_CLERK_*` env vars, wrap `layout.tsx` in `<ClerkProvider>`
-- [ ] `middleware.ts`: protect `/(app)/*` routes with Clerk, allow `/sign-in`, `/sign-up`, `/webhooks/*`
-- [ ] Sign-in page (`/sign-in/[[...sign-in]]`) and sign-up page using Clerk `<SignIn />` / `<SignUp />`
+- [x] Next.js **15** App Router scaffold + Tailwind v3 + shadcn/ui conventions (`components.json`, `ui/button`)
+- [x] Install `@clerk/nextjs` (v7), `NEXT_PUBLIC_CLERK_*` via Clerk CLI, `<ClerkProvider>` in `<body>`
+- [x] Route protection — _resource-based `await auth()` in `(app)/layout.tsx` (v7 style), not middleware matcher; `middleware.ts` runs bare `clerkMiddleware()`_
+- [x] Sign-in page (`/sign-in/[[...sign-in]]`) and sign-up page using Clerk `<SignIn />` / `<SignUp />`
 - [ ] After sign-up: call `GET /users/me` and wait for 200 before redirecting to `/chat` (webhook race condition guard)
-- [ ] Chat page: `ChatWindow`, `Message`, `StreamingDot`
-- [ ] `useChat` hook: POST /chat → SSE connection → append tokens to message
-- [ ] `AgentActivity` component: shows `agent_start`/`agent_end` events live
-- [ ] Zustand `chatStore`: messages, activeAgents, runId
+- [x] Chat page: `ChatWindow`, `Message`, `StreamingDot` — _placeholder assistant reply; not streaming_
+- [ ] `useChat` hook: POST /chat → SSE connection → append tokens to message — _stub_
+- [x] `AgentActivity` component — _renders `chatStore.activeAgents`; needs real SSE events_
+- [x] Zustand `chatStore`: messages, activeAgents, runId
 - [ ] Basic conversation sidebar (hardcoded single conversation for now)
 
 **Database tasks**:
-- [ ] Run `setup_supabase.sql` (extensions, RLS stubs)
-- [ ] Alembic migration: users, conversations, messages
-- [ ] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
+- [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
+- [x] Alembic migration: users, conversations, messages (`5badea5fbffd`)
+- [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
 **Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload.
 
@@ -1358,38 +1366,53 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 
 ## 19. Current Status
 
+> **Keep this section current.** It is the source of truth for what is actually
+> implemented. Update the ledger + phase table with every meaningful change, in
+> the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
+
+_Last updated: 2026-08-29 (commit `8bb15a8`)._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
-| Phase 1 — Foundation | 🟡 In Progress | ~10% |
+| Phase 1 — Foundation | 🟡 In Progress | ~15% |
 | Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
 
-**Update this table as phases complete.** Claude Code should read this section to know what to build next.
+### 19.1 Implementation ledger
 
-**Phase 0 (scaffold) notes:** Full `§5` tree stubbed; both apps boot and are
-wired (`/health` reachable from the UI). Local dev uses the Supabase CLI stack
-(Postgres `:54322`, dedicated `genie` DB) + `docker compose` (Redis, LocalStack).
-Backend deps are in `backend/requirements.txt` (uv-managed via `uv sync`).
-Done: config, logging, `request_id` middleware, health/readiness, v1 router
-(all endpoints `501`), `GenieState`/`RouteDecision`, `AsyncPostgresSaver`
-checkpointer setup, `users`/`conversations`/`messages` models + first Alembic
-migration, Next.js 15 shell (chat + tasks pages, Zustand stores, `api.ts`/`sse.ts`).
+**Backend** (`@clerk/…` n/a — FastAPI + uv; deps in `backend/requirements.txt`)
+- ✅ App factory + lifespan (`main.py`): Redis ping, DB `SELECT 1`, `AsyncPostgresSaver.setup()` (non-fatal in dev)
+- ✅ `config.py` (pydantic-settings, all §6 vars), `core/logging.py` (structlog JSON), `core/middleware.py` (`request_id` + timing), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
+- ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
+- ✅ v1 router mounted — every §14 endpoint exists but returns **501** (except `GET /users/me`, which returns the dev user)
+- ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`5badea5fbffd`, applied). Phase 2+ models are inert placeholder files.
+- ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
+- 🟡 `core/clerk.py` — dev-user bypass works; real JWKS/JWT verification raises **501**
+- ⬜ Supervisor LLM routing, all 5 agents, synthesiser, graph compile, `chat_service` SSE, memory (`short_term`/`long_term`/`manager`), repositories (signatures only), workers, `POST /webhooks/clerk`
 
-**Clerk:** frontend is fully set up via the Clerk CLI — `@clerk/nextjs` v7 linked
-to app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm` (dev instance), keys in
-`frontend/.env.local`, `ClerkProvider` themed via the `appearance` prop
-(`src/lib/clerk-appearance.ts`; `@clerk/ui` skipped — needs Tailwind v4), sign-in/up
-pages, `UserButton`/`SignInButton` in the sidebar, `(app)/*` gated by
-`await auth()` in the group layout. `clerk doctor` passes. **Backend** Clerk is
-still Phase 1 — `core/clerk.py` returns a fixed dev user until
-`CLERK_SECRET_KEY` + `CLERK_DOMAIN` are set and JWT verification is implemented,
-so the frontend's real Clerk JWT is not yet verified server-side.
+**Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
+- ✅ App Router shell: `/` → `/chat`; `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
+- ✅ `/chat` — `ChatWindow` (message list + input; posts to `chatStore`, shows placeholder assistant reply), `AgentActivity`, `Message`, `StreamingDot`
+- ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
+- ✅ Zustand `chatStore` / `taskStore`; `lib/api.ts` (typed fetch + `getHealth`), `lib/sse.ts` (event parser matching `core/streaming.py`)
+- ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts`; `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up pages; `clerk doctor` passes
+- ⬜ `useChat` (real POST + SSE) and `useTasks` (enabled) are stubs; conversation sidebar list; document upload UI
 
-Next: Phase 1 backend tasks (real Clerk verify + webhook, supervisor LLM
-routing, web_search + prompt_enhancer agents, `POST /chat` + SSE).
+**Auth end-to-end**
+- ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`
+- 🟡 Backend does **not** verify the Clerk JWT yet → every API caller is treated as the fixed dev user (`00000000-0000-0000-0000-000000000001`). Set `CLERK_SECRET_KEY` + `CLERK_DOMAIN` and implement `core/clerk.py` to close this.
+
+**Infra / local dev**
+- ✅ `docker-compose.yml` → Redis (`:6379`) + LocalStack (`:4566`). Postgres/pgvector comes from the **Supabase CLI** stack (`supabase start`, `:54322`), dedicated **`genie`** database.
+- ✅ `scripts/setup_supabase.sql` — extensions + hybrid-search RPCs now; indexes/FTS triggers/RLS self-skip until Phase 2 tables exist.
+- ⬜ `infrastructure/terraform` (Phase 4), SQS/S3 wiring, CI/CD.
+
+### 19.2 Next up (Phase 1)
+
+Real Clerk JWT verify + `POST /webhooks/clerk` → supervisor `with_structured_output(RouteDecision)` routing → `prompt_enhancer` + `web_search` agents → synthesiser → `POST /chat` + `GET /chat/{id}/stream` SSE → Redis `recent_messages` / `rate_limit` → frontend `useChat` wired to the stream.
 
 ---
 
