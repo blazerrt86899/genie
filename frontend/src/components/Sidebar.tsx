@@ -44,13 +44,13 @@ export function Sidebar() {
       <div className="mt-auto space-y-3 px-2 pt-4">
         <Show when="signed-out">
           <div className="flex flex-col gap-2">
-            <SignInButton mode="modal">
+            <SignInButton mode="modal" fallbackRedirectUrl="/chat">
               <Button variant="outline" size="sm" className="w-full">
                 Sign in
               </Button>
             </SignInButton>
-            <SignUpButton mode="modal">
-              <Button size="sm" className="w-full">
+            <SignUpButton mode="modal" fallbackRedirectUrl="/chat">
+              <Button variant="brand" size="sm" className="w-full">
                 Sign up
               </Button>
             </SignUpButton>

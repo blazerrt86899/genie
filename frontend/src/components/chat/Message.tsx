@@ -29,7 +29,7 @@ export function Message({
         )}
       >
         {isUser ? (
-          <span className="grid h-5 w-5 place-items-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+          <span className="grid h-5 w-5 place-items-center rounded-full bg-brand text-[10px] font-bold text-brand-foreground">
             {initials(userName)}
           </span>
         ) : (
@@ -54,8 +54,8 @@ export function Message({
         className={cn(
           "max-w-[78%] whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
           isUser
-            ? "rounded-tr-sm bg-primary text-primary-foreground"
-            : "rounded-tl-sm border border-border bg-muted",
+            ? "rounded-tr-sm bg-brand text-brand-foreground"
+            : "rounded-tl-sm border border-border bg-muted text-foreground",
         )}
       >
         {message.content}

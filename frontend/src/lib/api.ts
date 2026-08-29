@@ -3,8 +3,11 @@
  * Attaches the Clerk bearer token when a getter is provided.
  */
 
+// Use 127.0.0.1, not "localhost": on many machines the browser resolves
+// localhost to IPv6 (::1) first, where a default uvicorn (IPv4-only) isn't
+// listening — which makes the health check spuriously fail.
 export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export class ApiError extends Error {
   constructor(

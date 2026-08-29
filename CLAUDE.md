@@ -117,7 +117,7 @@ Supabase Studio shows the tables via its schema switcher.
 | State | Zustand | Global chat/task/agent state |
 | Streaming | Native `EventSource` API | SSE — no third-party lib needed |
 | Data Fetching | TanStack Query v5 | REST endpoints + cache invalidation |
-| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. Themed via `appearance` prop (not `@clerk/ui` — that needs Tailwind v4). Core-3: use `<Show when="signed-in">`, not `<SignedIn>`. |
+| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. `appearance` (`lib/clerk-appearance.ts`) binds every colour to the HSL design tokens so Clerk follows light/dark automatically (not `@clerk/ui`/`@clerk/themes` — need Tailwind v4 / Core 2). Core-3: use `<Show when="signed-in">`, not `<SignedIn>`. `<SignIn/>`/`<SignUp/>` have `fallbackRedirectUrl="/chat"`. |
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
 | Icons | Lucide React (v1 — no brand icons; inline SVG for X/GitHub/LinkedIn) | Consistent icon set |
 | Animations | Framer Motion | Agent activity + the landing hero animation |
@@ -1408,7 +1408,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — marketing landing page + light/dark theme._
+_Last updated: 2026-08-29 — dark-mode fixes, sign-in→/chat, IPv6 API-url fix._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1450,6 +1450,7 @@ _Last updated: 2026-08-29 — marketing landing page + light/dark theme._
 - ✅ Backend verifies the Clerk JWT and owns each conversation with the **real** internal user id. Needs `CLERK_PUBLISHABLE_KEY` (JWKS domain) + `CLERK_SECRET_KEY` (profile/webhook) in `backend/.env`; `CLERK_WEBHOOK_SECRET` for the webhook. Missing/expired token → `401`. With none of these set, the dev-user fallback keeps local work frictionless.
 
 **Infra / local dev**
+- ⚠️ The frontend talks to the API at **`http://127.0.0.1:8000`**, not `localhost` — browsers often resolve `localhost` to IPv6 (`::1`) first and a default uvicorn is IPv4-only, which makes the health check spuriously report "offline". `NEXT_PUBLIC_API_URL` + the `lib/api.ts` fallback use `127.0.0.1`; `CORS_ALLOW_ORIGINS` lists both `:3000` hosts.
 - ✅ `docker-compose.yml` → Redis (`:6379`) + LocalStack (`:4566`). Postgres/pgvector comes from the **Supabase CLI** stack (`supabase start`, `:54322`); `DATABASE_URL_*` point at the default `postgres` db, Genie's tables live in the **`genie` schema** (visible in Studio).
 - ✅ `scripts/setup_supabase.sql` — `CREATE SCHEMA genie` + hybrid-search RPCs (in `genie`, `SET search_path`); indexes/FTS triggers/RLS self-skip until Phase 2 tables exist.
 - ⬜ `infrastructure/terraform` (Phase 4), SQS/S3 wiring, CI/CD.
