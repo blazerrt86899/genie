@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useUser } from "@clerk/nextjs";
 import { SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/hooks/useChat";
@@ -9,6 +10,9 @@ import { AgentActivity } from "./AgentActivity";
 
 export function ChatWindow() {
   const { messages, send, hydrate, isStreaming } = useChat();
+  const { user } = useUser();
+  const userName =
+    user?.firstName || user?.username || user?.fullName || "You";
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -29,43 +33,45 @@ export function ChatWindow() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-5 overflow-y-auto p-4">
         {messages.length === 0 && (
           <p className="mt-10 text-center text-sm text-muted-foreground">
             Ask Genie anything to get started.
           </p>
         )}
         {messages.map((m) => (
-          <Message key={m.id} message={m} />
+          <Message key={m.id} message={m} userName={userName} />
         ))}
         <div ref={endRef} />
       </div>
 
       <AgentActivity />
 
-      <div className="flex items-end gap-2 border-t p-3">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          rows={1}
-          placeholder="Message Genie…"
-          disabled={isStreaming}
-          className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
-        />
-        <Button
-          size="icon"
-          onClick={handleSend}
-          disabled={isStreaming || !input.trim()}
-          aria-label="Send"
-        >
-          <SendHorizontal className="h-4 w-4" />
-        </Button>
+      <div className="border-t border-border">
+        <div className="mx-auto flex w-full max-w-3xl items-end gap-2 p-3">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            rows={1}
+            placeholder="Message Genie…"
+            disabled={isStreaming}
+            className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+          />
+          <Button
+            size="icon"
+            onClick={handleSend}
+            disabled={isStreaming || !input.trim()}
+            aria-label="Send"
+          >
+            <SendHorizontal className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
     </div>
   );

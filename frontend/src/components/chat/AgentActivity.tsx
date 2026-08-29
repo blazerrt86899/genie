@@ -8,7 +8,7 @@ export function AgentActivity() {
   if (activeAgents.length === 0) return null;
 
   return (
-    <div className="flex flex-wrap gap-2 px-4 py-2 text-xs text-muted-foreground">
+    <div className="mx-auto flex w-full max-w-3xl flex-wrap gap-2 px-4 py-2 text-xs text-muted-foreground">
       <AnimatePresence>
         {activeAgents.map((agent) => (
           <motion.span
