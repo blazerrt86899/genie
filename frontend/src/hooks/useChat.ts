@@ -1,121 +1,117 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
+import { useQueryClient } from "@tanstack/react-query";
 import { chatStreamUrl, getConversation, postChat } from "@/lib/api";
 import { parseSseStream } from "@/lib/sse";
 import { useChatStore } from "@/store/chatStore";
 
-const CID_KEY = "genie:conversation_id";
+const CONVERSATIONS_KEY = ["conversations"] as const;
 
 /**
- * Chat turn lifecycle: POST /chat → open the SSE stream → feed frames into the
- * store. Conversation memory lives server-side (LangGraph checkpointer); the id
- * is remembered in localStorage so a reload rehydrates the thread.
+ * Drives one chat view. The route is the source of truth:
+ *   /chat        → conversationId undefined → blank new chat
+ *   /chat/<uuid> → load that conversation's messages
+ * On the first message of a new chat we POST, learn the id, and
+ * `router.replace('/chat/<id>')` (messages already in the store, so no flash).
  */
-export function useChat() {
+export function useChat(conversationId?: string) {
   const { getToken } = useAuth();
+  const router = useRouter();
+  const qc = useQueryClient();
   const store = useChatStore();
-  const {
-    messages,
-    conversationId,
-    runId,
-    addMessage,
-    setMessages,
-    appendToken,
-    setMessagePending,
-    setRunId,
-    setConversationId,
-  } = store;
+
+  useEffect(() => {
+    const s = useChatStore.getState();
+
+    if (!conversationId) {
+      if (s.conversationId !== null || s.messages.length > 0) s.reset();
+      return;
+    }
+    if (s.conversationId === conversationId) return; // already loaded (or just created)
+
+    let cancelled = false;
+    (async () => {
+      s.reset();
+      try {
+        const conv = await getConversation(conversationId, await getToken());
+        if (cancelled) return;
+        s.setConversationId(conv.id);
+        s.setMessages(
+          conv.messages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+          })),
+        );
+      } catch {
+        if (!cancelled) router.replace("/chat");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId, getToken, router]);
 
   const send = useCallback(
     async (text: string) => {
       const message = text.trim();
       if (!message || useChatStore.getState().runId) return;
 
-      addMessage({ id: crypto.randomUUID(), role: "user", content: message });
+      const s = useChatStore.getState();
+      s.addMessage({ id: crypto.randomUUID(), role: "user", content: message });
       const assistantId = crypto.randomUUID();
-      addMessage({ id: assistantId, role: "assistant", content: "", pending: true });
+      s.addMessage({ id: assistantId, role: "assistant", content: "", pending: true });
 
       const token = await getToken();
-      const currentCid = useChatStore.getState().conversationId;
+      const existingCid = useChatStore.getState().conversationId;
 
       try {
         const { run_id, conversation_id } = await postChat(
           message,
-          currentCid,
+          existingCid,
           token,
         );
-        setRunId(run_id);
-        setConversationId(conversation_id);
-        try {
-          localStorage.setItem(CID_KEY, conversation_id);
-        } catch {
-          /* ignore */
+        s.setRunId(run_id);
+        s.setConversationId(conversation_id);
+        if (!existingCid) {
+          qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+          router.replace(`/chat/${conversation_id}`);
         }
 
         const res = await fetch(chatStreamUrl(conversation_id, run_id), {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
-        if (!res.ok || !res.body) {
-          throw new Error(`stream failed (${res.status})`);
-        }
+        if (!res.ok || !res.body) throw new Error(`stream failed (${res.status})`);
 
         await parseSseStream(res.body, (event) => {
           if (event.type === "token") {
-            appendToken(assistantId, event.content);
+            s.appendToken(assistantId, event.content);
           } else if (event.type === "error") {
-            appendToken(assistantId, `\n\n⚠️ ${event.message}`);
+            s.appendToken(assistantId, `\n\n⚠️ ${event.message}`);
+          } else if (event.type === "title") {
+            qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
           }
         });
       } catch (err) {
-        appendToken(
+        s.appendToken(
           assistantId,
           `\n\n⚠️ ${err instanceof Error ? err.message : "Something went wrong"}`,
         );
       } finally {
-        setMessagePending(assistantId, false);
-        setRunId(null);
+        s.setMessagePending(assistantId, false);
+        s.setRunId(null);
+        qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
       }
     },
-    [getToken, addMessage, appendToken, setMessagePending, setRunId, setConversationId],
+    [getToken, router, qc],
   );
 
-  const hydrate = useCallback(async () => {
-    if (useChatStore.getState().messages.length > 0) return;
-    let cid: string | null = null;
-    try {
-      cid = localStorage.getItem(CID_KEY);
-    } catch {
-      return;
-    }
-    if (!cid) return;
-    try {
-      const token = await getToken();
-      const conv = await getConversation(cid, token);
-      setConversationId(conv.id);
-      setMessages(
-        conv.messages.map((m) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-        })),
-      );
-    } catch {
-      // stale id — drop it
-      try {
-        localStorage.removeItem(CID_KEY);
-      } catch {
-        /* ignore */
-      }
-    }
-  }, [getToken, setConversationId, setMessages]);
-
   return {
-    messages,
-    conversationId,
-    isStreaming: runId !== null,
+    messages: store.messages,
+    isStreaming: store.runId !== null,
     send,
-    hydrate,
   };
 }

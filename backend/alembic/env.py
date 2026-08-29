@@ -25,10 +25,28 @@ config.set_main_option("sqlalchemy.url", settings.DATABASE_URL_DIRECT)
 target_metadata = Base.metadata
 
 
+# The LangGraph checkpointer creates these in the genie schema itself
+# (checkpointer.setup()) — never Alembic-managed (CLAUDE.md §8.2).
+_CHECKPOINTER_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
+
+
 def _include_name(name, type_, parent_names):  # noqa: ARG001
-    """Only ever look at the genie schema — never touch public/auth/storage/etc."""
+    """Only ever look at the genie schema, and never at the checkpointer tables."""
     if type_ == "schema":
         return name == DB_SCHEMA
+    if type_ == "table":
+        return name not in _CHECKPOINTER_TABLES
+    return True
+
+
+def _include_object(obj, name, type_, reflected, compare_to):  # noqa: ARG001
+    if type_ == "table" and name in _CHECKPOINTER_TABLES:
+        return False
     return True
 
 
@@ -38,6 +56,7 @@ _CONFIGURE = dict(
     version_table_schema=DB_SCHEMA,  # keep alembic_version inside the genie schema
     include_schemas=True,
     include_name=_include_name,
+    include_object=_include_object,
 )
 
 

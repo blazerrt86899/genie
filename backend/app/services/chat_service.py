@@ -23,6 +23,7 @@ from app.core.streaming import format_sse_event, sse_done, sse_error
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.message_repo import MessageRepository
+from app.services.title_service import generate_title
 
 logger = structlog.get_logger(__name__)
 
@@ -49,9 +50,10 @@ async def create_turn(
         if conversation is None:
             raise ValueError("conversation not found")
     else:
-        conversation = await conv_repo.create(user.id, title=message[:60])
+        conversation = await conv_repo.create(user.id, title=None)
 
     await msg_repo.add_message(conversation.id, user.id, "user", message)
+    await conv_repo.touch(conversation.id)
 
     run_id = str(uuid.uuid4())
     await redis.setex(
@@ -82,9 +84,8 @@ async def _generate(
         yield sse_error("run does not belong to this conversation", "run_mismatch"), None
         return
 
-    conversation = await ConversationRepository(db).get_for_user(
-        uuid.UUID(conversation_id), user.id
-    )
+    conv_repo = ConversationRepository(db)
+    conversation = await conv_repo.get_for_user(uuid.UUID(conversation_id), user.id)
     if conversation is None:
         yield sse_error("conversation not found", "not_found"), None
         return
@@ -122,6 +123,7 @@ async def _generate(
                 total_tokens = usage.get("total_tokens", 0)
 
     answer = "".join(answer_parts)
+    title: str | None = None
     if answer:
         meta: dict = {}
         if langsmith_run_id:
@@ -129,14 +131,33 @@ async def _generate(
         await MessageRepository(db).add_message(
             conversation.id, user.id, "assistant", answer, metadata=meta
         )
+        await conv_repo.touch(conversation.id)
+
+        # First real exchange in this chat → auto-title it (Claude-style heading).
+        if conversation.title is None:
+            title = await generate_title(message, answer)
+            if title:
+                await conv_repo.set_title(conversation.id, user.id, title)
+                yield (
+                    format_sse_event(
+                        "title", conversation_id=conversation_id, title=title
+                    ),
+                    None,
+                )
+
     await redis.delete(_run_key(run_id))
     logger.info(
         "chat_turn_completed",
         run_id=run_id,
         langsmith_run_id=langsmith_run_id,
         total_tokens=total_tokens,
+        titled=bool(title),
     )
-    yield "", {"total_tokens": total_tokens, "langsmith_run_id": langsmith_run_id}
+    yield "", {
+        "total_tokens": total_tokens,
+        "langsmith_run_id": langsmith_run_id,
+        "title": title,
+    }
 
 
 async def stream_turn(
@@ -163,4 +184,21 @@ async def stream_turn(
         total_tokens=done_info.get("total_tokens", 0),
         run_id=run_id,
         langsmith_run_id=done_info.get("langsmith_run_id"),
+        title=done_info.get("title"),
     )
+
+
+async def delete_conversation(db: AsyncSession, user: User, conversation_id: str) -> bool:
+    """Delete a conversation (+ its messages via cascade) and its LangGraph thread."""
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError:
+        return False
+
+    ok = await ConversationRepository(db).delete_for_user(cid, user.id)
+    if ok:
+        try:
+            await get_runtime_graph().checkpointer.adelete_thread(conversation_id)
+        except Exception:  # noqa: BLE001  — best-effort; orphan checkpoint rows are harmless
+            logger.warning("checkpointer_thread_delete_failed", conversation_id=conversation_id)
+    return ok

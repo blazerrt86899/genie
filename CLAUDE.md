@@ -269,7 +269,7 @@ genie/
 │       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp />
 │       │   └── (app)/
 │       │       ├── layout.tsx         ← auth() gate (redirect to /sign-in) + Sidebar
-│       │       ├── chat/page.tsx      ← Main chat interface
+│       │       ├── chat/page.tsx      ← new chat  ·  chat/[id]/page.tsx ← a conversation
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
@@ -279,8 +279,8 @@ genie/
 │       │   │                              ThemeToggle, LogoMarquee, HowItWorks, Features,
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
-│       │   │   ├── ChatWindow.tsx     ← Message list + input
-│       │   │   ├── Message.tsx        ← Renders user/assistant messages
+│       │   │   ├── ChatView.tsx       ← Message list + composer (prop: conversationId)
+│       │   │   ├── Message.tsx        ← user/assistant bubble + sender label
 │       │   │   ├── AgentActivity.tsx  ← Live "web_search is thinking..." strip
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
@@ -289,7 +289,8 @@ genie/
 │       │   └── ui/                    ← shadcn/ui primitives (button)
 │       │
 │       ├── hooks/
-│       │   ├── useChat.ts             ← POST /chat + SSE stream + localStorage rehydrate
+│       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
+│       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
 │       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
 │       │
 │       ├── providers/
@@ -368,6 +369,7 @@ CLERK_USER_CACHE_TTL_SECONDS=300     # clerk_id → internal user_id mapping cac
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=           # For Claude-specific agent nodes
 OPENAI_CHAT_MODEL=gpt-4o-2024-08-06   # ALWAYS pin the model version — never use "gpt-4o"
+OPENAI_TITLE_MODEL=gpt-4o-mini        # cheap model for auto conversation titles
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 
 # ─── LangSmith (observability) ───────────────────────────────────────────────
@@ -1055,14 +1057,16 @@ async def hybrid_retrieve(
 
 ### Event Types (strict — frontend parses by `type` field)
 
-> Implemented today: `token`, `error`, `done` (see `core/streaming.py` +
-> `lib/sse.ts`). The rest arrive with their features. The stream **always** ends
+> Implemented today: `token`, `title`, `error`, `done` (see `core/streaming.py` +
+> `lib/sse.ts`). `done` carries `total_tokens`, `run_id`, `langsmith_run_id?`,
+> `title?`. The rest arrive with their features. The stream **always** ends
 > with `done`, even after an `error` (§16).
 
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
 data: {"type": "token",         "content": "Based on"}
 data: {"type": "agent_end",     "agent": "web_search", "duration_ms": 1240}
+data: {"type": "title",         "conversation_id": "...", "title": "Learning ML"}
 data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo"}}
 data: {"type": "interrupt",     "reason": "calendar_write_confirmation", "details": {...}}
 data: {"type": "error",         "message": "...", "code": "AGENT_TIMEOUT"}
@@ -1156,9 +1160,9 @@ GET    /api/v1/chat/{conv_id}/stream   → SSE stream  (query param: run_id)
 POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
 
 # ── Conversations ─────────────────────────────────────────────────────────────
-GET    /api/v1/conversations           → paginated list
+GET    /api/v1/conversations           → [{id,title,created_at,last_message_at}], newest-activity first
 GET    /api/v1/conversations/{id}      → conversation + messages
-DELETE /api/v1/conversations/{id}      → 204
+DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 GET    /api/v1/tasks                   → list (filter: status, date)
@@ -1210,11 +1214,11 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] `useChat` hook: POST /chat → SSE connection → append tokens; rehydrates from `GET /conversations/{id}` on reload
 - [x] `AgentActivity` component — _renders `chatStore.activeAgents`; needs real SSE events_
 - [x] Zustand `chatStore`: messages, activeAgents, runId, conversationId
-- [ ] Basic conversation sidebar (hardcoded single conversation for now)
+- [x] Conversation sidebar — `useConversations` list (recency-ordered), "New chat", `/chat/[id]` per conversation, auto-title (cheap-LLM, SSE `title` event), delete
 
 **Database tasks**:
 - [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
-- [x] Alembic migration: users, conversations, messages (`1c61bba11678`)
+- [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at)
 - [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
 **Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload.
@@ -1412,7 +1416,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 — LangSmith tracing wired + run id captured._
+_Last updated: 2026-08-29 — conversation sidebar, per-chat URLs, auto-titles._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1438,17 +1442,18 @@ _Last updated: 2026-08-29 — LangSmith tracing wired + run id captured._
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
-- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, LangSmith, rate limiting
+- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event. ORM relations (`User.conversations`, `Conversation.messages`, `Message.conversation`).
+- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, rate limiting
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ **Landing page** at `/` (`components/landing/*`) — voice-AI-concierge positioning, sticky blur nav w/ placeholder links, Framer-Motion hero "live call" animation (`CallOrb`: waveform → spoken request → agent chips → completed actions, loops; static under `prefers-reduced-motion`), logo marquee, how-it-works, features grid, "voice coming soon" band, CTA, 4-col footer. **`/` no longer redirects to `/chat`.**
 - ✅ **Light/dark theme** — `next-themes` (`ThemeProvider` outermost in `layout.tsx`, `attribute="class"`, system default); `ThemeToggle` in the nav; global (also themes `/chat`, `/tasks`, Clerk pages). Dark palette = deep violet-black + violet glow.
-- ✅ `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
-- ✅ `/chat` — real streaming chat: `useChat` hook (POST `/chat` → `fetch` the SSE stream → `parseSseStream` → `chatStore`), `ChatWindow` (max-w-3xl centred) renders tokens live and disables input while streaming; each `Message` shows a sender label — "GENIE" in the brand gradient w/ sparkle, the user's Clerk first name (`useUser()`). Conversation id in `localStorage`, rehydrated from `GET /conversations/{id}` on reload. `AgentActivity` present (no agent events emitted yet).
+- ✅ `(app)/` group — `Sidebar` = "New chat" + recency-ordered **conversation list** (`useConversations`, active-highlight, hover-to-delete) + Tasks link + `BackendStatus` + Clerk `UserButton`.
+- ✅ Chat — `/chat` (new) and `/chat/[id]` (a conversation); `ChatView` + `useChat(conversationId?)` is **route-driven** (loads `GET /conversations/{id}` on nav; on the first message of a new chat it POSTs, learns the id, `router.replace('/chat/<id>')`, invalidates the sidebar list; the SSE `title` event refreshes the sidebar). Streams tokens live, input locked mid-turn. Each `Message` has a sender label — "GENIE" brand-gradient + sparkle, or the user's Clerk first name.
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
-- ✅ Zustand `chatStore` (messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`
-- ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts`; `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up pages; `clerk doctor` passes
-- ⬜ `useTasks` (enabled), conversation sidebar list, document upload UI
+- ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`
+- ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
+- ⬜ `useTasks` (enabled), conversation rename/search, document upload UI, Projects
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.

@@ -8,6 +8,7 @@ export type SseEvent =
   | { type: "token"; content: string }
   | { type: "agent_end"; agent: string; duration_ms: number }
   | { type: "task_created"; task: Record<string, unknown> }
+  | { type: "title"; conversation_id: string; title: string }
   | { type: "interrupt"; reason: string; details: Record<string, unknown> }
   | { type: "error"; message: string; code: string }
   | {
@@ -15,6 +16,7 @@ export type SseEvent =
       total_tokens: number;
       run_id: string;
       langsmith_run_id?: string;
+      title?: string;
     };
 
 export type SseHandler = (event: SseEvent) => void;

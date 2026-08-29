@@ -29,16 +29,25 @@ class FakeRedis:
 
 
 class FakeConvRepo:
-    conv = SimpleNamespace(id=uuid.uuid4(), title="t")
+    conv = SimpleNamespace(id=uuid.uuid4(), title=None)
+    touched: int = 0
+    titled: str | None = None
 
     def __init__(self, _db) -> None: ...
 
-    async def create(self, user_id, title):
+    async def create(self, user_id, title=None):
         FakeConvRepo.conv = SimpleNamespace(id=uuid.uuid4(), user_id=user_id, title=title)
         return FakeConvRepo.conv
 
     async def get_for_user(self, conversation_id, user_id):
         return FakeConvRepo.conv if conversation_id == FakeConvRepo.conv.id else None
+
+    async def touch(self, conversation_id):
+        FakeConvRepo.touched += 1
+
+    async def set_title(self, conversation_id, user_id, title):
+        FakeConvRepo.titled = title
+        FakeConvRepo.conv.title = title
 
 
 class FakeMsgRepo:
@@ -56,9 +65,17 @@ class FakeMsgRepo:
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     FakeMsgRepo.added = []
+    FakeConvRepo.touched = 0
+    FakeConvRepo.titled = None
+    FakeConvRepo.conv = SimpleNamespace(id=uuid.uuid4(), title=None)
     monkeypatch.setattr(chat_service, "ConversationRepository", FakeConvRepo)
     monkeypatch.setattr(chat_service, "MessageRepository", FakeMsgRepo)
     monkeypatch.setattr(chat_service, "settings", SimpleNamespace(llm_configured=True))
+
+    async def _fake_title(_u, _a):
+        return "Learn ML"
+
+    monkeypatch.setattr(chat_service, "generate_title", _fake_title)
 
 
 def _user():
@@ -106,10 +123,14 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
         json.loads(f[6:])
         async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
     ]
-    assert [f["type"] for f in frames] == ["token", "token", "done"]
+    assert [f["type"] for f in frames] == ["token", "token", "title", "done"]
     assert [f["content"] for f in frames if f["type"] == "token"] == ["Hel", "lo"]
     assert frames[-1]["total_tokens"] == 7
     assert frames[-1]["langsmith_run_id"] == "trace-123"
+    assert frames[-1]["title"] == "Learn ML"
+    assert next(f for f in frames if f["type"] == "title")["title"] == "Learn ML"
+    assert FakeConvRepo.titled == "Learn ML"
+    assert FakeConvRepo.touched >= 2  # user msg + assistant msg
     assert ("assistant", "Hello") in FakeMsgRepo.added
     assert FakeMsgRepo.last_metadata == {"langsmith_run_id": "trace-123"}
     assert f"run:{run_id}" not in redis.store  # consumed

@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
     OPENAI_CHAT_MODEL: str = "gpt-4o-2024-08-06"
+    OPENAI_TITLE_MODEL: str = "gpt-4o-mini"  # cheap model for conversation titles
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
     # ─── LangSmith ─────────────────────────────────────────────────────────

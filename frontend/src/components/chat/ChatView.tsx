@@ -8,17 +8,13 @@ import { useChat } from "@/hooks/useChat";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
 
-export function ChatWindow() {
-  const { messages, send, hydrate, isStreaming } = useChat();
+export function ChatView({ conversationId }: { conversationId?: string }) {
+  const { messages, send, isStreaming } = useChat(conversationId);
   const { user } = useUser();
   const userName =
     user?.firstName || user?.username || user?.fullName || "You";
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    void hydrate();
-  }, [hydrate]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -35,9 +31,13 @@ export function ChatWindow() {
     <div className="flex h-full flex-col">
       <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
         {messages.length === 0 && (
-          <p className="mt-10 text-center text-sm text-muted-foreground">
-            Ask Genie anything to get started.
-          </p>
+          <div className="m-auto max-w-md text-center">
+            <h1 className="text-xl font-semibold">What can Genie do for you?</h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Ask anything — Genie routes it to the right specialists and streams
+              back one answer.
+            </p>
+          </div>
         )}
         {messages.map((m) => (
           <Message key={m.id} message={m} userName={userName} />

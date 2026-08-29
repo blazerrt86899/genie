@@ -75,10 +75,14 @@ export interface ConversationMessage {
   created_at: string;
 }
 
-export interface ConversationDetail {
+export interface ConversationSummary {
   id: string;
   title: string | null;
   created_at: string;
+  last_message_at: string | null;
+}
+
+export interface ConversationDetail extends ConversationSummary {
   messages: ConversationMessage[];
 }
 
@@ -87,6 +91,22 @@ export function getConversation(
   token?: string | null,
 ): Promise<ConversationDetail> {
   return apiFetch<ConversationDetail>(`/api/v1/conversations/${id}`, { token });
+}
+
+export function listConversations(
+  token?: string | null,
+): Promise<ConversationSummary[]> {
+  return apiFetch<ConversationSummary[]>("/api/v1/conversations", { token });
+}
+
+export function deleteConversation(
+  id: string,
+  token?: string | null,
+): Promise<void> {
+  return apiFetch<void>(`/api/v1/conversations/${id}`, {
+    method: "DELETE",
+    token,
+  });
 }
 
 export function chatStreamUrl(conversationId: string, runId: string): string {

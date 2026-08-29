@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, Boolean, DateTime, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.db.models.conversation import Conversation
 
 
 class User(Base, TimestampMixin):
@@ -29,3 +33,9 @@ class User(Base, TimestampMixin):
     token_budget: Mapped[int] = mapped_column(BigInteger, nullable=False, default=100_000)
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     user_metadata: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, default=dict)
+
+    conversations: Mapped[list[Conversation]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

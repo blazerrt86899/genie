@@ -14,6 +14,7 @@ SSEEventType = Literal[
     "token",
     "agent_end",
     "task_created",
+    "title",
     "interrupt",
     "error",
     "done",

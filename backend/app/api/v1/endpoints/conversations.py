@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,7 @@ from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.message_repo import MessageRepository
 from app.db.session import get_db
+from app.services import chat_service
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -22,6 +23,7 @@ class ConversationSummary(BaseModel):
     id: str
     title: str | None
     created_at: datetime
+    last_message_at: datetime | None
 
 
 class MessageOut(BaseModel):
@@ -42,7 +44,12 @@ async def list_conversations(
 ) -> list[ConversationSummary]:
     rows = await ConversationRepository(db).list_for_user(user.id)
     return [
-        ConversationSummary(id=str(c.id), title=c.title, created_at=c.created_at)
+        ConversationSummary(
+            id=str(c.id),
+            title=c.title,
+            created_at=c.created_at,
+            last_message_at=c.last_message_at,
+        )
         for c in rows
     ]
 
@@ -67,6 +74,7 @@ async def get_conversation(
         id=str(conv.id),
         title=conv.title,
         created_at=conv.created_at,
+        last_message_at=conv.last_message_at,
         messages=[
             MessageOut(id=str(m.id), role=m.role, content=m.content, created_at=m.created_at)
             for m in messages
@@ -75,5 +83,12 @@ async def get_conversation(
 
 
 @router.delete("/{conversation_id}", status_code=204)
-async def delete_conversation(conversation_id: str, user: User = Depends(get_current_user)):
-    raise HTTPException(status_code=501, detail="Not implemented yet (Phase 1)")
+async def delete_conversation(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    ok = await chat_service.delete_conversation(db, user, conversation_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return Response(status_code=204)
