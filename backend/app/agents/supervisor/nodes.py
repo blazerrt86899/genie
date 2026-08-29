@@ -1,8 +1,39 @@
-"""Supervisor + synthesiser graph nodes — STUB (Phase 1, CLAUDE.md §9)."""
+"""Graph nodes (CLAUDE.md §9).
+
+`chat_node` is the interim single-node chatbot; the supervisor / synthesiser
+nodes below stay stubbed until the agent layer lands.
+"""
 
 from __future__ import annotations
 
+from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
+
+from app.agents.supervisor.prompts import CHAT_SYSTEM_PROMPT
 from app.agents.supervisor.state import GenieState, RouteDecision
+from app.config import settings
+
+
+def get_chat_model() -> ChatOpenAI:
+    """The chat LLM — pinned model from settings (CLAUDE.md §3)."""
+    return ChatOpenAI(
+        model=settings.OPENAI_CHAT_MODEL,
+        temperature=0.7,
+        streaming=True,
+        api_key=settings.OPENAI_API_KEY,
+    )
+
+
+async def chat_node(state: GenieState) -> dict:
+    """Single-node chat: prepend the system prompt, call the model.
+
+    Token streaming is surfaced by ``graph.astream_events(version="v2")`` at the
+    call site — see ``app.services.chat_service``.
+    """
+    model = get_chat_model()
+    messages = [SystemMessage(content=CHAT_SYSTEM_PROMPT), *state["messages"]]
+    response = await model.ainvoke(messages)
+    return {"messages": [response]}
 
 
 async def supervisor_node(state: GenieState) -> GenieState:
@@ -30,6 +61,8 @@ def should_continue_or_end(state: GenieState) -> str:
 
 
 __all__ = [
+    "chat_node",
+    "get_chat_model",
     "supervisor_node",
     "route_to_agents",
     "synthesiser_node",

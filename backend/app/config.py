@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     def clerk_configured(self) -> bool:
         return bool(self.CLERK_SECRET_KEY and self.CLERK_DOMAIN)
 
+    @property
+    def llm_configured(self) -> bool:
+        return bool(self.OPENAI_API_KEY)
+
 
 @lru_cache
 def get_settings() -> Settings:

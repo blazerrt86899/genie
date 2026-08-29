@@ -1,32 +1,30 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useChatStore } from "@/store/chatStore";
+import { useChat } from "@/hooks/useChat";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
 
 export function ChatWindow() {
-  const { messages, addMessage } = useChatStore();
+  const { messages, send, hydrate, isStreaming } = useChat();
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    void hydrate();
+  }, [hydrate]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
   function handleSend() {
     const text = input.trim();
-    if (!text) return;
-    addMessage({ id: crypto.randomUUID(), role: "user", content: text });
-    // Phase 1: POST /chat -> SSE stream (see hooks/useChat.ts). Placeholder reply:
-    addMessage({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content:
-        "The orchestration graph isn't wired yet — this is the Phase 1 chat shell.",
-    });
+    if (!text || isStreaming) return;
     setInput("");
-    requestAnimationFrame(() =>
-      endRef.current?.scrollIntoView({ behavior: "smooth" }),
-    );
+    void send(text);
   }
 
   return (
@@ -57,9 +55,15 @@ export function ChatWindow() {
           }}
           rows={1}
           placeholder="Message Genie…"
-          className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+          disabled={isStreaming}
+          className="flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
         />
-        <Button size="icon" onClick={handleSend} aria-label="Send">
+        <Button
+          size="icon"
+          onClick={handleSend}
+          disabled={isStreaming || !input.trim()}
+          aria-label="Send"
+        >
           <SendHorizontal className="h-4 w-4" />
         </Button>
       </div>

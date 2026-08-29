@@ -924,6 +924,12 @@ ALTER TABLE user_memory      ENABLE ROW LEVEL SECURITY;
 
 ## 9. LangGraph: GenieState & Graph Wiring
 
+> **Current reality (see §19):** only `build_chat_graph()` runs — `START → chat → END`,
+> one node calling the LLM. The full supervisor wiring below is the target;
+> `build_graph()` is still a stub. The compiled chat graph + `AsyncPostgresSaver`
+> checkpointer are created once in the FastAPI lifespan and held via
+> `set_runtime_graph()` / `get_runtime_graph()`.
+
 ### GenieState
 ```python
 # app/agents/supervisor/state.py
@@ -1017,6 +1023,11 @@ async def hybrid_retrieve(
 ## 11. Streaming Protocol (SSE)
 
 ### Event Types (strict — frontend parses by `type` field)
+
+> Implemented today: `token`, `error`, `done` (see `core/streaming.py` +
+> `lib/sse.ts`). The rest arrive with their features. The stream **always** ends
+> with `done`, even after an `error` (§16).
+
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
 data: {"type": "token",         "content": "Based on"}
@@ -1151,10 +1162,10 @@ DELETE /api/v1/documents/{id}          → 204
 - [ ] Supervisor node with `with_structured_output(RouteDecision)` (no hardcoded routing)
 - [ ] Web Search agent (Tavily) + Prompt Enhancer agent
 - [ ] Synthesiser node
-- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — _`.setup()` runs at startup; graph `compile()` pending_
-- [ ] `POST /chat` + `GET /chat/{id}/stream` SSE endpoints
-- [ ] SSE event protocol: `agent_start`, `token`, `agent_end`, `done` — _`core/streaming.py` helper + `lib/sse.ts` parser exist; nothing emits yet_
-- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only_
+- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — live for the app lifetime, compiled with `build_chat_graph()`
+- [x] `POST /chat` + `GET /chat/{id}/stream` SSE endpoints — _single-node `chat` graph, no supervisor yet_
+- [x] SSE event protocol: `token`, `error`, `done` emitted — _`agent_start`/`agent_end` await the agent layer_
+- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat_
 - [ ] LangSmith tracing enabled (set env vars, verify traces appear)
 - [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
 
@@ -1164,10 +1175,10 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] Route protection — _resource-based `await auth()` in `(app)/layout.tsx` (v7 style), not middleware matcher; `middleware.ts` runs bare `clerkMiddleware()`_
 - [x] Sign-in page (`/sign-in/[[...sign-in]]`) and sign-up page using Clerk `<SignIn />` / `<SignUp />`
 - [ ] After sign-up: call `GET /users/me` and wait for 200 before redirecting to `/chat` (webhook race condition guard)
-- [x] Chat page: `ChatWindow`, `Message`, `StreamingDot` — _placeholder assistant reply; not streaming_
-- [ ] `useChat` hook: POST /chat → SSE connection → append tokens to message — _stub_
+- [x] Chat page: `ChatWindow`, `Message`, `StreamingDot` — _streams live tokens; input disabled mid-turn_
+- [x] `useChat` hook: POST /chat → SSE connection → append tokens; rehydrates from `GET /conversations/{id}` on reload
 - [x] `AgentActivity` component — _renders `chatStore.activeAgents`; needs real SSE events_
-- [x] Zustand `chatStore`: messages, activeAgents, runId
+- [x] Zustand `chatStore`: messages, activeAgents, runId, conversationId
 - [ ] Basic conversation sidebar (hardcoded single conversation for now)
 
 **Database tasks**:
@@ -1370,12 +1381,12 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-29 (commit `8bb15a8`)._
+_Last updated: 2026-08-29 — basic streaming chat wired end-to-end._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
-| Phase 1 — Foundation | 🟡 In Progress | ~15% |
+| Phase 1 — Foundation | 🟡 In Progress | ~35% |
 | Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
@@ -1387,19 +1398,22 @@ _Last updated: 2026-08-29 (commit `8bb15a8`)._
 - ✅ App factory + lifespan (`main.py`): Redis ping, DB `SELECT 1`, `AsyncPostgresSaver.setup()` (non-fatal in dev)
 - ✅ `config.py` (pydantic-settings, all §6 vars), `core/logging.py` (structlog JSON), `core/middleware.py` (`request_id` + timing), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
-- ✅ v1 router mounted — every §14 endpoint exists but returns **501** (except `GET /users/me`, which returns the dev user)
+- ✅ **Chat**: `POST /chat` (persist user msg + stash run in Redis) → `GET /chat/{id}/stream` SSE (`token`/`error`/`done`). Single-node LangGraph `chat` graph (`build_chat_graph`) → OpenAI `gpt-4o-2024-08-06`, compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id` gives multi-turn memory. Both messages persist to `messages`.
+- ✅ `GET /conversations`, `GET /conversations/{id}` (conversation + messages); `conversation_repo` / `message_repo` real methods
+- ✅ Dev user row seeded on startup (dev only) so chat FKs resolve
+- ✅ Remaining §14 endpoints still return **501** (`/webhooks/clerk`, `/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`5badea5fbffd`, applied). Phase 2+ models are inert placeholder files.
 - ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
 - 🟡 `core/clerk.py` — dev-user bypass works; real JWKS/JWT verification raises **501**
-- ⬜ Supervisor LLM routing, all 5 agents, synthesiser, graph compile, `chat_service` SSE, memory (`short_term`/`long_term`/`manager`), repositories (signatures only), workers, `POST /webhooks/clerk`
+- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), `user_repo` Clerk helpers, workers, `POST /webhooks/clerk`
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ App Router shell: `/` → `/chat`; `(app)/` group with `Sidebar` (nav + live `BackendStatus` dot + Clerk buttons)
-- ✅ `/chat` — `ChatWindow` (message list + input; posts to `chatStore`, shows placeholder assistant reply), `AgentActivity`, `Message`, `StreamingDot`
+- ✅ `/chat` — real streaming chat: `useChat` hook (POST `/chat` → `fetch` the SSE stream → `parseSseStream` → `chatStore`), `ChatWindow` renders tokens live and disables input while streaming; conversation id in `localStorage`, rehydrated from `GET /conversations/{id}` on reload. `AgentActivity` present (no agent events emitted yet).
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
-- ✅ Zustand `chatStore` / `taskStore`; `lib/api.ts` (typed fetch + `getHealth`), `lib/sse.ts` (event parser matching `core/streaming.py`)
+- ✅ Zustand `chatStore` (messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts`; `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up pages; `clerk doctor` passes
-- ⬜ `useChat` (real POST + SSE) and `useTasks` (enabled) are stubs; conversation sidebar list; document upload UI
+- ⬜ `useTasks` (enabled), conversation sidebar list, document upload UI
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`
@@ -1412,7 +1426,16 @@ _Last updated: 2026-08-29 (commit `8bb15a8`)._
 
 ### 19.2 Next up (Phase 1)
 
-Real Clerk JWT verify + `POST /webhooks/clerk` → supervisor `with_structured_output(RouteDecision)` routing → `prompt_enhancer` + `web_search` agents → synthesiser → `POST /chat` + `GET /chat/{id}/stream` SSE → Redis `recent_messages` / `rate_limit` → frontend `useChat` wired to the stream.
+Real Clerk JWT verify + `POST /webhooks/clerk` (`user_repo` Clerk helpers) →
+grow `build_chat_graph()` into the supervisor: `with_structured_output(RouteDecision)`
+routing → `prompt_enhancer` + `web_search` agents → synthesiser (emit
+`agent_start`/`agent_end` SSE) → Redis `recent_messages` / `rate_limit` +
+token-budget check → conversation sidebar list.
+
+> **Interim note (CLAUDE.md §9/§11):** the running graph is a single `chat` node,
+> not the supervisor. SSE currently emits only `token` / `error` / `done`.
+> `chat_service` calls the model directly through the graph — no agents, tools,
+> RAG or memory-consolidation yet.
 
 ---
 

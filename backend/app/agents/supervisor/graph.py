@@ -1,19 +1,23 @@
-"""LangGraph supervisor graph assembly — STUB (Phase 1, CLAUDE.md §9).
+"""LangGraph graph assembly (CLAUDE.md §9).
 
-The checkpointer ALWAYS uses ``DATABASE_URL_SESSION`` (Supavisor session mode —
-needs LISTEN/NOTIFY). ``interrupt_before=["calendar"]`` for write confirmation.
+The checkpointer ALWAYS uses ``DATABASE_URL_SESSION`` (Supavisor session mode).
+
+Right now ``build_chat_graph()`` is what actually runs — a single ``chat`` node.
+``build_graph()`` (the full supervisor + agents + synthesiser) is still a stub;
+it grows out of the chat graph as the agent layer is implemented.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from app.agents.calendar.agent import calendar_node
 from app.agents.prompt_enhancer.agent import prompt_enhancer_node
 from app.agents.rag.agent import rag_node
 from app.agents.supervisor.nodes import (
+    chat_node,
     route_to_agents,
     should_continue_or_end,
     supervisor_node,
@@ -22,6 +26,32 @@ from app.agents.supervisor.nodes import (
 from app.agents.supervisor.state import GenieState
 from app.agents.task_creator.agent import task_creator_node
 from app.agents.web_search.agent import web_search_node
+
+# ─── Interim single-node chat graph ────────────────────────────────────────
+
+
+def build_chat_graph() -> StateGraph:
+    """START → chat → END. No routing, no agents."""
+    graph = StateGraph(GenieState)
+    graph.add_node("chat", chat_node)
+    graph.add_edge(START, "chat")
+    graph.add_edge("chat", END)
+    return graph
+
+
+_runtime_graph: Any = None
+
+
+def set_runtime_graph(compiled: Any) -> None:
+    """Called once from the FastAPI lifespan with the compiled+checkpointed graph."""
+    global _runtime_graph
+    _runtime_graph = compiled
+
+
+def get_runtime_graph() -> Any:
+    if _runtime_graph is None:
+        raise RuntimeError("chat graph not compiled — is the app lifespan running?")
+    return _runtime_graph
 
 _AGENT_NODES = {
     "prompt_enhancer": prompt_enhancer_node,

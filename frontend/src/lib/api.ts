@@ -45,3 +45,47 @@ export interface HealthResponse {
 export function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
 }
+
+// ─── Chat ──────────────────────────────────────────────────────────────────
+
+export interface ChatAccepted {
+  run_id: string;
+  conversation_id: string;
+}
+
+export function postChat(
+  message: string,
+  conversationId: string | null,
+  token?: string | null,
+): Promise<ChatAccepted> {
+  return apiFetch<ChatAccepted>("/api/v1/chat", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ message, conversation_id: conversationId }),
+  });
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at: string;
+}
+
+export interface ConversationDetail {
+  id: string;
+  title: string | null;
+  created_at: string;
+  messages: ConversationMessage[];
+}
+
+export function getConversation(
+  id: string,
+  token?: string | null,
+): Promise<ConversationDetail> {
+  return apiFetch<ConversationDetail>(`/api/v1/conversations/${id}`, { token });
+}
+
+export function chatStreamUrl(conversationId: string, runId: string): string {
+  return `${API_BASE_URL}/api/v1/chat/${conversationId}/stream?run_id=${encodeURIComponent(runId)}`;
+}
