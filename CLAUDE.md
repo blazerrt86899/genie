@@ -1336,13 +1336,26 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
-| Phase 1 — Foundation | 🔴 Not Started | 0% |
+| Phase 0 — Scaffold | 🟢 Complete | 100% |
+| Phase 1 — Foundation | 🟡 In Progress | ~10% |
 | Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
 
 **Update this table as phases complete.** Claude Code should read this section to know what to build next.
+
+**Phase 0 (scaffold) notes:** Full `§5` tree stubbed; both apps boot and are
+wired (`/health` reachable from the UI). Local dev uses the Supabase CLI stack
+(Postgres `:54322`, dedicated `genie` DB) + `docker compose` (Redis, LocalStack).
+Backend deps are in `backend/requirements.txt` (uv-managed via `uv sync`). Auth
+falls back to a fixed dev user when Clerk is unconfigured. Done: config,
+logging, `request_id` middleware, health/readiness, v1 router (all endpoints
+`501`), `GenieState`/`RouteDecision`, `AsyncPostgresSaver` checkpointer setup,
+`users`/`conversations`/`messages` models + first Alembic migration, Next.js
+shell (chat + tasks pages, Zustand stores, `api.ts`/`sse.ts`).
+Next: Phase 1 backend tasks (real Clerk verify + webhook, supervisor LLM
+routing, web_search + prompt_enhancer agents, `POST /chat` + SSE).
 
 ---
 
