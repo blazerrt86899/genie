@@ -1,10 +1,15 @@
+import { redirect } from "next/navigation";
+import { auth } from "@clerk/nextjs/server";
 import { Sidebar } from "@/components/Sidebar";
 
-export default function AppLayout({
+export default async function AppLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const { userId } = await auth();
+  if (!userId) redirect("/sign-in");
+
   return (
     <div className="flex h-screen">
       <Sidebar />

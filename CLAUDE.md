@@ -27,7 +27,7 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  CLIENT  │  Next.js 14 (App Router) + Tailwind CSS       │
+│  CLIENT  │  Next.js 15 (App Router) + Tailwind CSS       │
 │          │  Chat UI · Agent Activity · Task Board         │
 └──────────┬──────────────────────────────────────────────┘
            │ HTTPS / SSE
@@ -102,12 +102,12 @@ DATABASE_URL_SESSION="postgresql+asyncpg://postgres.REF:PASSWORD@aws-0-REGION.po
 ### Frontend
 | Component | Choice | Notes |
 |-----------|--------|-------|
-| Framework | Next.js 14 | App Router only (no Pages Router) |
+| Framework | Next.js 15 | App Router only (no Pages Router). React 19. |
 | Styling | Tailwind CSS v3 | + custom CSS variables for theming |
 | State | Zustand | Global chat/task/agent state |
 | Streaming | Native `EventSource` API | SSE — no third-party lib needed |
 | Data Fetching | TanStack Query v5 | REST endpoints + cache invalidation |
-| Auth | `@clerk/nextjs` | ClerkProvider, useAuth(), middleware route protection |
+| Auth | `@clerk/nextjs` v7 | Set up via Clerk CLI. `ClerkProvider` in `<body>`, resource-based auth in `(app)/layout.tsx`. `@clerk/ui` shadcn theme. |
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
 | Icons | Lucide React | Consistent icon set |
 | Animations | Framer Motion | Agent activity indicators only |
@@ -604,33 +604,55 @@ async def soft_delete_by_clerk_id(self, clerk_id: str) -> None:
 
 ### 7.6 Frontend: ClerkProvider + Middleware
 
-```typescript
+Setup is done with the **Clerk CLI** (`clerk auth login` → `clerk init --app
+app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), which links the repo to the Clerk app and
+writes `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` + `CLERK_SECRET_KEY` to
+`frontend/.env.local`. Frontend runs `@clerk/nextjs` **v7** (needs Next 15+).
+
+`ClerkProvider` goes **inside `<body>`**, not wrapping `<html>`:
+
+```tsx
 // frontend/src/app/layout.tsx
 import { ClerkProvider } from '@clerk/nextjs'
+import { shadcn } from '@clerk/ui/themes'
+import '@clerk/ui/themes/shadcn.css'
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <ClerkProvider>
-      <html lang="en">
-        <body>{children}</body>
-      </html>
-    </ClerkProvider>
+    <html lang="en">
+      <body>
+        <ClerkProvider appearance={{ theme: shadcn }}>
+          <QueryProvider>{children}</QueryProvider>
+        </ClerkProvider>
+      </body>
+    </html>
   )
 }
 ```
 
-```typescript
-// frontend/middleware.ts  (at repo root, next to package.json)
-import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
+Clerk v7 favours **resource-based auth checks** over middleware path-matching
+(`createRouteMatcher` is deprecated). Middleware just enables `auth()` + the
+`/__clerk/*` auto-proxy; the gate lives in the route group layout:
 
-const isProtectedRoute = createRouteMatcher(['/(app)(.*)'])
-
-export default clerkMiddleware((auth, req) => {
-  if (isProtectedRoute(req)) auth().protect()
-})
-
+```tsx
+// frontend/src/middleware.ts
+import { clerkMiddleware } from '@clerk/nextjs/server'
+export default clerkMiddleware()
 export const config = {
-  matcher: ['/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)', '/(api|trpc)(.*)'],
+  matcher: [
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    '/(api|trpc)(.*)',
+    '/__clerk/:path*',   // Clerk auto-proxy — keep after the API matcher
+  ],
+}
+
+// frontend/src/app/(app)/layout.tsx  — the actual protection
+import { auth } from '@clerk/nextjs/server'
+import { redirect } from 'next/navigation'
+export default async function AppLayout({ children }) {
+  const { userId } = await auth()          // v7: auth() is async
+  if (!userId) redirect('/sign-in')
+  return <>{children}</>
 }
 ```
 
@@ -1348,12 +1370,21 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 **Phase 0 (scaffold) notes:** Full `§5` tree stubbed; both apps boot and are
 wired (`/health` reachable from the UI). Local dev uses the Supabase CLI stack
 (Postgres `:54322`, dedicated `genie` DB) + `docker compose` (Redis, LocalStack).
-Backend deps are in `backend/requirements.txt` (uv-managed via `uv sync`). Auth
-falls back to a fixed dev user when Clerk is unconfigured. Done: config,
-logging, `request_id` middleware, health/readiness, v1 router (all endpoints
-`501`), `GenieState`/`RouteDecision`, `AsyncPostgresSaver` checkpointer setup,
-`users`/`conversations`/`messages` models + first Alembic migration, Next.js
-shell (chat + tasks pages, Zustand stores, `api.ts`/`sse.ts`).
+Backend deps are in `backend/requirements.txt` (uv-managed via `uv sync`).
+Done: config, logging, `request_id` middleware, health/readiness, v1 router
+(all endpoints `501`), `GenieState`/`RouteDecision`, `AsyncPostgresSaver`
+checkpointer setup, `users`/`conversations`/`messages` models + first Alembic
+migration, Next.js 15 shell (chat + tasks pages, Zustand stores, `api.ts`/`sse.ts`).
+
+**Clerk:** frontend is fully set up via the Clerk CLI — `@clerk/nextjs` v7 linked
+to app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm` (dev instance), keys in
+`frontend/.env.local`, `ClerkProvider` + `@clerk/ui` shadcn theme, sign-in/up
+pages, `UserButton`/`SignInButton` in the sidebar, `(app)/*` gated by
+`await auth()` in the group layout. `clerk doctor` passes. **Backend** Clerk is
+still Phase 1 — `core/clerk.py` returns a fixed dev user until
+`CLERK_SECRET_KEY` + `CLERK_DOMAIN` are set and JWT verification is implemented,
+so the frontend's real Clerk JWT is not yet verified server-side.
+
 Next: Phase 1 backend tasks (real Clerk verify + webhook, supervisor LLM
 routing, web_search + prompt_enhancer agents, `POST /chat` + SSE).
 

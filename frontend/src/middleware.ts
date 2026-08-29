@@ -1,26 +1,19 @@
-import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { clerkMiddleware } from "@clerk/nextjs/server";
 
 /**
- * Clerk route protection (CLAUDE.md §7.6). When Clerk keys are absent the
- * middleware is a pass-through so local dev works without a Clerk app.
- * The env var is inlined at build time, so the unused branch is dropped.
+ * Clerk v7 recommends resource-based auth checks, not middleware path-matching.
+ * This runs `clerkMiddleware` so `auth()` is available everywhere and Clerk's
+ * auto-proxy (`/__clerk/*`) works; the actual gate lives in
+ * `src/app/(app)/layout.tsx`.
  */
-const isProtected = createRouteMatcher([
-  "/(app)(.*)",
-  "/chat(.*)",
-  "/tasks(.*)",
-]);
-
-export default process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-  ? clerkMiddleware((auth, req) => {
-      if (isProtected(req)) auth().protect();
-    })
-  : () => NextResponse.next();
+export default clerkMiddleware();
 
 export const config = {
   matcher: [
+    // Skip Next.js internals and static files, unless found in search params
     "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    // Always run for API routes and Clerk's auto-proxy path
     "/(api|trpc)(.*)",
+    "/__clerk/:path*",
   ],
 };

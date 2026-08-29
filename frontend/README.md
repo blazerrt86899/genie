@@ -15,11 +15,27 @@ npm run dev                          # http://localhost:3000
 `/` redirects to `/chat`. The sidebar shows a live **backend connected**
 indicator (calls `GET /health` on `NEXT_PUBLIC_API_URL`).
 
-## Auth
+## Auth (Clerk)
 
-Clerk is optional in dev. Leave `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` blank to run
-in public mode (matches the backend dev-user bypass, `CLAUDE.md` §7). Set the
-Clerk env vars to enable `<SignIn/>` / `<SignUp/>` and route protection.
+`@clerk/nextjs` **v7** (needs Next 15). Set up with the Clerk CLI:
+
+```bash
+npm install -g clerk
+clerk auth login
+clerk init --app app_3Ia08IpcDiBIMwI1FykjqEgLCMm   # links the app, writes .env.local
+clerk doctor
+```
+
+- `ClerkProvider` (with the `@clerk/ui` shadcn theme) wraps the app in
+  `src/app/layout.tsx`, inside `<body>`.
+- `src/middleware.ts` runs bare `clerkMiddleware()` (enables `auth()` + the
+  `/__clerk/*` proxy). Route protection is **resource-based**:
+  `src/app/(app)/layout.tsx` calls `await auth()` and redirects to `/sign-in`.
+- Sidebar shows `SignInButton`/`SignUpButton` when signed out, `UserButton` when
+  signed in.
+
+Backend JWT verification is still Phase 1 — until then the API treats every
+caller as a fixed dev user (`CLAUDE.md` §7).
 
 ## Scripts
 

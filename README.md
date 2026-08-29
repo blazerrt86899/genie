@@ -64,13 +64,19 @@ uv run uvicorn "app.main:create_app" --factory --reload
 ```bash
 cd frontend
 npm install
-cp .env.local.example .env.local
-npm run dev                          # http://localhost:3000
+
+# Clerk auth (keys are managed by the Clerk CLI):
+npm install -g clerk          # or brew install clerk/stable/clerk
+clerk auth login
+clerk init --app app_3Ia08IpcDiBIMwI1FykjqEgLCMm   # writes .env.local
+clerk doctor                  # verify
+
+npm run dev                   # http://localhost:3000
 ```
 
-Open http://localhost:3000 → redirects to `/chat`. The sidebar shows a live
-**backend connected** dot. Auth (Clerk) is optional in dev — see
-`frontend/README.md`.
+Open http://localhost:3000 → `/` redirects to `/chat`, which requires sign-in
+(Clerk). Sign up via the sidebar. The sidebar also shows a live **backend
+connected** dot. See `frontend/README.md` for details.
 
 ## Verify
 
@@ -81,7 +87,8 @@ Open http://localhost:3000 → redirects to `/chat`. The sidebar shows a live
 | `cd backend && uv run pytest` | green |
 | `cd backend && uv run ruff check .` | clean |
 | `cd frontend && npm run build` | succeeds |
-| Visit `/chat`, send a message | your message + a placeholder reply |
+| Visit `/chat` signed out | redirects to `/sign-in` |
+| Sign up, then visit `/chat`, send a message | your message + a placeholder reply |
 | Visit `/tasks` | three empty Kanban columns |
 
 ## What's stubbed
