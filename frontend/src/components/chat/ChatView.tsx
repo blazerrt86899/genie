@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useUser } from "@clerk/nextjs";
@@ -11,6 +11,8 @@ import { useProjects } from "@/hooks/useProjects";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
 import { GreetingHeadline } from "./GreetingHeadline";
+
+const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
 
 function Composer({
   input,
@@ -25,9 +27,20 @@ function Composer({
   isStreaming: boolean;
   autoFocus?: boolean;
 }) {
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow the textarea with its content, up to a cap.
+  useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
+  }, [input]);
+
   return (
-    <div className="flex items-end gap-2">
+    <div className="rounded-2xl border border-input bg-background shadow-sm transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring">
       <textarea
+        ref={taRef}
         // eslint-disable-next-line jsx-a11y/no-autofocus
         autoFocus={autoFocus}
         value={input}
@@ -38,20 +51,27 @@ function Composer({
             onSend();
           }
         }}
-        rows={1}
+        rows={2}
         placeholder="Message Genie…"
         disabled={isStreaming}
-        className="flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+        className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
       />
-      <Button
-        variant="brand"
-        size="icon"
-        onClick={onSend}
-        disabled={isStreaming || !input.trim()}
-        aria-label="Send"
-      >
-        <SendHorizontal className="h-4 w-4" />
-      </Button>
+      <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1.5">
+        <span className="select-none pl-1 text-xs text-muted-foreground/70">
+          <kbd className="font-sans">Enter</kbd> to send ·{" "}
+          <kbd className="font-sans">Shift</kbd>+<kbd className="font-sans">Enter</kbd>{" "}
+          for a new line
+        </span>
+        <Button
+          variant="brand"
+          size="icon"
+          onClick={onSend}
+          disabled={isStreaming || !input.trim()}
+          aria-label="Send"
+        >
+          <SendHorizontal className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   );
 }
