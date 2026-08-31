@@ -1194,6 +1194,13 @@ from the registry.
 
 ## 13. Memory Architecture
 
+> **Current reality:** only the **per-conversation** LangGraph checkpointer
+> (`AsyncPostgresSaver`, `thread_id = conversation_id`) is live — it replays a
+> chat's full history each turn. The **cross-conversation** L1 (Redis
+> `recent_messages` / `rate_limit`) and L2 (`user_memory` hybrid search) below are
+> **not built** — see **Phase 6 (§15)**. `messages`, `tasks` and the checkpointer
+> tables are the only memory-ish tables that exist.
+
 ### L1 — Redis (TTL varies, ephemeral)
 ```
 recent_messages:{user_id}     → list of last 10 messages (LPUSH/LTRIM, TTL 2h)
@@ -1301,7 +1308,7 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (supervisor→executor→synthesiser→validator)
 - [x] `POST /chat` (+ `client_hour`) + `GET /chat/{id}/stream` SSE endpoints
 - [x] SSE event protocol: `agent_start`, `agent_end`, `plan`, `token`, `title`, `error`, `done` emitted
-- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat_
+- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat. **Moved to Phase 6** (§15)._
 - [x] LangSmith tracing — `configure_tracing()` in the lifespan pushes `LANGSMITH_*` into `os.environ`; each chat turn's root run id is stored on the assistant message's `metadata.langsmith_run_id` and echoed in the SSE `done` event. Verified: traces land in the LangSmith project.
 - [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
 
@@ -1326,32 +1333,31 @@ DELETE /api/v1/documents/{id}          → 204
 
 ---
 
-### PHASE 2 — RAG + Memory (Weeks 4–6)
-**Goal**: Genie remembers the user and can search their documents.
+### PHASE 2 — Tasks + RAG / Documents (Weeks 4–6)
+**Goal**: Genie manages a task board and can answer from the user's own documents.
+_(Cross-conversation memory moved to **Phase 6** — the conversation checkpointer
+already gives per-chat memory.)_
 
 **Backend tasks**:
+- [x] Task Creator agent — registered; parses → `TaskOps` → **`genie-tasks` FastMCP** (§22) → `task_created`/`task_updated`/`tasks_archived` SSE
+- [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
 - [ ] Alembic migration: `documents`, `document_chunks` (with `embedding vector(1536)`, `fts_content tsvector`)
 - [ ] Run `setup_supabase.sql` sections: hybrid search functions, IVFFlat indexes, FTS triggers
 - [ ] `document_service.py`: PDF/text → chunks (512 tokens, 50-token overlap) → embed → upsert
 - [ ] Document ingestion SQS worker (`workers/document_ingestion.py`)
 - [ ] `POST /documents` endpoint (upload → S3 → SQS job)
-- [ ] RAG agent: calls `hybrid_search_documents` Supabase RPC, formats context
-- [ ] Alembic migration: `user_memory` (with `embedding vector(1536)`, `fts_content tsvector`)
-- [ ] FTS trigger for `user_memory` (add to `setup_supabase.sql`)
-- [ ] `hybrid_search_memories` Supabase RPC function
-- [ ] Memory manager: `load_context()` fetches Redis L1 + Supabase memories
-- [ ] Memory consolidation SQS worker (LLM extraction → embed → upsert)
-- [x] Task Creator agent — registered; parses → `TaskOps` → **`genie-tasks` FastMCP** (§22) → `task_created`/`task_updated`/`tasks_archived` SSE
-- [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
+- [ ] RAG agent: calls `hybrid_search_documents` Supabase RPC, formats context; register in `AGENT_REGISTRY`
 
 **Frontend tasks**:
+- [x] Task Board: `/tasks` — 3 columns, HTML5 drag between columns, "Archive done" button, collapsible "Archived (N)"
+- [x] Task detail modal — status, linked chat (`/chat/<id>`), editable description, "Summarise from chat", delete
+- [x] `useTasks` / `usePatchTask` / `useArchiveDone` / `useDeleteTask` / `useSummarizeTask`; `useChat` invalidates `["tasks"]` on the `task_*` SSE events
 - [ ] Document upload UI in sidebar (drag-drop + file picker)
 - [ ] Ingestion progress indicator (poll document status)
-- [x] Task Board: `/tasks` — 3 columns, HTML5 drag between columns, "Archive done" button, collapsible "Archived (N)"
-- [x] Task detail modal — status, linked chat (`/chat/<id>`), editable description, delete
-- [x] `useTasks` / `usePatchTask` / `useArchiveDone` / `useDeleteTask` (TanStack Query); `useChat` invalidates `["tasks"]` on the `task_*` SSE events
 
-**Phase 2 done when**: User uploads a PDF, asks a question about it, gets an answer from their document (verify RAG agent was used via LangSmith trace). Long-term memories appear in context on next conversation. Tasks are created and visible on the board.
+**Phase 2 done when**: Tasks are managed by chat + the board (✅). User uploads a
+PDF, asks about it, and gets an answer grounded in their document (verify the RAG
+agent ran via the LangSmith trace).
 
 ---
 
@@ -1365,8 +1371,8 @@ DELETE /api/v1/documents/{id}          → 204
 - [ ] `POST /chat/{conv_id}/confirm` endpoint to resume interrupted graph
 - [ ] SSE `interrupt` event type → frontend shows confirmation UI
 - [ ] SQS consumer service (`workers/sqs_consumer.py`) as separate ECS service
-- [ ] Full memory consolidation pipeline tested end-to-end
 - [ ] Token budget enforcer in supervisor (check `state.token_usage` before routing)
+      _(memory-consolidation worker → Phase 6)_
 
 **Frontend tasks**:
 - [ ] Google OAuth "Connect Calendar" button in settings
@@ -1403,8 +1409,6 @@ DELETE /api/v1/documents/{id}          → 204
 ### PHASE 5 — Intelligence + Expansion (Weeks 11+)
 **Goal**: Make Genie smarter. Expand the agent catalogue.
 
-- [ ] Memory importance scoring: LLM rates extracted facts 0–1, `importance` column in `user_memory`
-- [ ] Memory decay: lower importance for older facts in hybrid search weighting
 - [ ] Per-user token quotas: `token_budget` column in `users`, enforced in supervisor
 - [ ] LangSmith evaluation datasets: build golden Q&A sets for each agent
 - [ ] LangSmith CI evaluations: run on each deploy, gate on regression threshold
@@ -1414,6 +1418,66 @@ DELETE /api/v1/documents/{id}          → 204
 - [ ] Genie API: expose `/api/v1/run` for programmatic access (API key auth)
 - [ ] Multi-modal: image upload → vision model → route to agents with image context
 - [ ] CrewAI integration: wrap research-heavy tasks in a CrewAI crew called as a single LangGraph node
+
+---
+
+### PHASE 6 — Memory: short-term + long-term (not started — deferred)
+
+**Goal**: Genie remembers the user *across* conversations — recent activity and
+durable, learned facts / preferences.
+
+**Why it's a phase, not a hack**: the LangGraph `AsyncPostgresSaver` checkpointer
+(`thread_id = conversation_id`) already gives full **per-conversation** memory.
+Everything below is the *cross-conversation* layer, which is currently all stubs
+(`app/memory/*`, `services/memory_service.py`, `db/repositories/memory_repo.py`,
+`workers/memory_consolidation.py` all `raise NotImplementedError`; `user_memory`
+table not migrated; `GenieState.user_memories` always `[]`). The
+`hybrid_search_memories` RPC already exists in `scripts/setup_supabase.sql`.
+
+**Two layers (CLAUDE.md §13)**
+- **Short-term (STM)** — recency-ordered, ephemeral, per user, cross-chat.
+  Redis, `user_id`-keyed, ~2h TTL. "What has this person been doing lately."
+  Injected wholesale.
+- **Long-term (LTM)** — relevance-ranked, durable, *learned* facts & preferences.
+  Postgres `user_memory` (`embedding vector(1536)` + `fts_content tsvector`),
+  hybrid (RRF) search; only the top ~5 injected. "What is always true about
+  this person."
+
+**Use cases (our product specifically)**
+- Standing facts so agents stop asking: home city / timezone (greeting +
+  web_search "weather" with no "where?"), employer, role, the products worked on,
+  key people.
+- Response-style prefs feeding the **synthesiser**: "code only, no preamble",
+  "TypeScript examples", expertise level, don't-re-explain.
+- **Supervisor** routing hints ("this user asks about their docs a lot" → RAG).
+- Cross-conversation continuity ("last week we decided X" surfaced in a new chat).
+- Task intelligence for `task_creator`: recurring tasks, typical priorities,
+  "weekly review on Fridays"; STM fixes `_resolve_task_id` so "mark it done"
+  works about a task discussed in a *different* chat.
+- Rate limiting (`rate_limit:{user_id}:{min}`) lives in `memory/short_term.py`.
+
+**Staged plan (build in this order — cheapest / lowest-risk first)**
+1. **STM.** Implement `memory/short_term.py` (`recent_messages` LPUSH/LTRIM,
+   `rate_limit` INCR/EXPIRE) + `memory/manager.load_context()` (Redis only for
+   now) → wire into `chat_service._generate` → new `GenieState` field →
+   supervisor / synthesiser prompts get a "recent activity" block. Push every
+   user + assistant message into STM.
+2. **Explicit LTM (Claude/ChatGPT model — user-controlled, no magic).** Migrate
+   `user_memory`; wire embeddings (`text-embedding-3-small`) + the
+   `hybrid_search_memories` RPC via `memory_repo`; a **`remember` MCP tool** (fits
+   the §22 layer — "remember that I…") + a `/memory` settings page to view/edit/
+   delete. `load_context()` adds hybrid search → `GenieState.user_memories` →
+   prompts.
+3. **Automatic consolidation.** After each turn, a fire-and-forget LLM extraction
+   of durable facts → embed → upsert (skip the SQS worker until scale; keep it
+   idempotent per CLAUDE.md §4.5). Everything it learns is visible + editable on
+   `/memory`.
+4. **Refinements (was Phase 5):** importance scoring (LLM rates facts 0–1,
+   `importance` column) and decay (down-weight old facts in the hybrid ranking).
+
+**Phase 6 done when**: a fact stated in one chat ("I only want TypeScript
+examples") changes the next chat's answers; "the task I just made" resolves in a
+brand-new chat; `/memory` lets the user see and remove what Genie knows.
 
 ---
 
@@ -1520,16 +1584,17 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a FastMCP `genie-tasks` server (8 tools incl. **`summarize_task`** — LLM-recaps a task's linked chat into its description) called in-process; `task_creator` agent routes "add to todo" / "start/finish the … task" / **"summarise the … task"** / "archive done"; `tasks` table + `/tasks` REST (+ `POST /{id}/summarize`); drag-and-drop board with "Archive done", collapsible "Archived", task detail modal (linked chat + editable description + "Summarise from chat"). SSE: `task_created` / `task_updated` / `tasks_archived`; the "Summarising the task…" pill rides `agent_start`/`agent_end` for a synthetic `task_summary` agent._
+_Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a FastMCP `genie-tasks` server (8 tools incl. **`summarize_task`**) called in-process; `task_creator` agent routes "add to todo" / "start/finish the … task" / "summarise the … task" / "archive done"; `tasks` table + `/tasks` REST; drag-and-drop board + "Archive done" + collapsible "Archived" + task detail modal. SSE `task_created` / `task_updated` / `tasks_archived`. Also: **cross-conversation memory (STM + LTM) carved out into a new deferred Phase 6** (§15) — the conversation checkpointer already covers per-chat memory; the `app/memory/*` layer is still all stubs._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
 | Phase 1 — Foundation | 🟡 In Progress | ~70% |
-| Phase 2 — RAG + Memory | 🟡 In Progress | ~20% |
+| Phase 2 — Tasks + RAG / Documents | 🟡 In Progress | ~40% (tasks ✅, docs/RAG ⬜) |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
+| Phase 6 — Memory (STM + LTM) | 🔴 Not Started (deferred) | 0% |
 
 ### 19.1 Implementation ledger
 
@@ -1552,7 +1617,7 @@ _Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a Fas
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
-- ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar`/`task_creator` agents, parallel fan-out, memory (`short_term`/`long_term`/`manager`), workers, rate limiting, token-usage write-back to `GenieState` mid-run
+- ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), workers, rate limiting, token-usage write-back to `GenieState` mid-run
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ **Landing page** at `/` (`components/landing/*`) — voice-AI-concierge positioning, sticky blur nav w/ placeholder links, Framer-Motion hero "live call" animation (`CallOrb`: waveform → spoken request → agent chips → completed actions, loops; static under `prefers-reduced-motion`), logo marquee, how-it-works, features grid, "voice coming soon" band, CTA, 4-col footer. **`/` no longer redirects to `/chat`.**
@@ -1584,8 +1649,8 @@ _Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a Fas
   `issues` back to the supervisor for a re-plan turn. The loop + `Validation`
   model are already wired.
 - **Prompt Enhancer agent** — register it; clarify/enrich the query, set `state.intent`.
-- Redis L1 (`recent_messages` / `rate_limit`) + memory `load_context()`;
-  token-usage write-back into `GenieState` mid-run so the budget guard bites.
+- `rate_limit` in Redis + token-usage write-back into `GenieState` mid-run so the
+  budget guard bites. _(Cross-conversation memory / `load_context()` → Phase 6.)_
 - A visible **plan / task-ledger panel** in the chat (the `plan` SSE event is
   already emitted).
 - Frontend `GET /users/me` gate after sign-up (webhook race guard, §7.8).
