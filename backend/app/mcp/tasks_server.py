@@ -106,6 +106,16 @@ async def delete_task(user_id: str, task_id: str) -> bool:
 
 
 @mcp.tool
+async def summarize_task(user_id: str, task_id: str) -> dict:
+    """Summarise the task's linked chat into 3-4 lines and save it as the task's
+    description. Returns the updated task."""
+    logger.info("mcp_summarize_task", user_id=user_id, task_id=task_id)
+    async with get_sessionmaker()() as db:
+        task = await task_service.summarize_task(db, _uid(user_id), uuid.UUID(task_id))
+        return task_service.to_dict(task)
+
+
+@mcp.tool
 async def archive_done_tasks(user_id: str) -> int:
     """Move every 'done' task to 'archived'. Returns how many were archived."""
     async with get_sessionmaker()() as db:

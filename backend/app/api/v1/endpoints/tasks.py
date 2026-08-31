@@ -119,20 +119,29 @@ async def patch_task(
     db: AsyncSession = Depends(get_db),
 ) -> TaskOut:
     tid = _uuid_or_404(task_id)
-    logger.info(
-        "tasks_patch",
-        user_id=str(user.id),
-        task_id=task_id,
-        fields=[k for k, v in body.model_dump(exclude_unset=True).items()],
-    )
+    provided = body.model_dump(exclude_unset=True)
+    logger.info("tasks_patch", user_id=str(user.id), task_id=task_id, fields=sorted(provided))
     try:
-        if body.status is not None:
-            await task_service.move_task(db, user.id, tid, body.status)
-        if body.title is not None or body.description is not None:
-            await task_service.update_details(
-                db, user.id, tid, title=body.title, description=body.description
-            )
+        if "status" in provided and provided["status"] is not None:
+            await task_service.move_task(db, user.id, tid, provided["status"])
+        detail = {k: provided[k] for k in ("title", "description") if k in provided}
+        if detail:
+            await task_service.update_details(db, user.id, tid, **detail)
         task = await task_service.get_task(db, user.id, tid)
+    except GenieError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return _out(task)
+
+
+@router.post("/{task_id}/summarize", response_model=TaskOut)
+async def summarize_task(
+    task_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TaskOut:
+    logger.info("tasks_summarize", user_id=str(user.id), task_id=task_id)
+    try:
+        task = await task_service.summarize_task(db, user.id, _uuid_or_404(task_id))
     except GenieError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
     return _out(task)

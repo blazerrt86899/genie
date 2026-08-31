@@ -65,9 +65,10 @@ class FakeRepo:
     async def update(self, task_id, user_id, **fields):
         t = FakeRepo.store.get(task_id)
         if t:
-            for k, v in fields.items():
-                if v is not None:
-                    setattr(t, k, v)
+            if fields.get("title") is not None:
+                t.title = fields["title"]
+            if "description" in fields:
+                t.description = fields["description"]
         return t
 
     async def archive_done(self, user_id):
@@ -82,10 +83,21 @@ class FakeRepo:
         return FakeRepo.store.pop(task_id, None) is not None
 
 
+class FakeMsgRepo:
+    messages: list = []
+
+    def __init__(self, _db) -> None: ...
+
+    async def list_for_conversation(self, conversation_id, limit=200):
+        return FakeMsgRepo.messages
+
+
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     FakeRepo.store = {}
+    FakeMsgRepo.messages = []
     monkeypatch.setattr(task_service, "TaskRepository", FakeRepo)
+    monkeypatch.setattr(task_service, "MessageRepository", FakeMsgRepo)
 
 
 _UID = uuid.uuid4()
@@ -142,3 +154,28 @@ async def test_to_dict_shape():
         "id", "title", "description", "status", "conversation_id",
         "source_agent", "created_at", "updated_at", "archived_at",
     }
+
+
+async def test_summarize_writes_description(monkeypatch):
+    conv = uuid.uuid4()
+    t = await task_service.create_task(None, _UID, "ship the release", conversation_id=conv)
+    FakeMsgRepo.messages = [
+        SimpleNamespace(role="user", content="we need to ship v2 friday"),
+        SimpleNamespace(role="assistant", content="ok, blockers are the migration and QA"),
+    ]
+
+    async def fake_summarise(title, transcript):
+        assert "ship the release" in title
+        assert "v2 friday" in transcript
+        return "Ship v2 on Friday. Blockers: the DB migration and QA. Agreed to prioritise both."
+
+    monkeypatch.setattr(task_service, "_summarise", fake_summarise)
+
+    out = await task_service.summarize_task(None, _UID, t.id)
+    assert out.description.startswith("Ship v2 on Friday")
+
+
+async def test_summarize_needs_a_linked_chat():
+    t = await task_service.create_task(None, _UID, "no chat")  # no conversation_id
+    with pytest.raises(TaskValidationError):
+        await task_service.summarize_task(None, _UID, t.id)

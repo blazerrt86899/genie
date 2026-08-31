@@ -81,6 +81,41 @@ async def test_move_finds_then_sets_status(monkeypatch):
     assert "Done" in res.summary
 
 
+async def test_summarize_resolves_task_and_shows_progress(monkeypatch):
+    calls: list[str] = []
+    events: list[str] = []
+
+    async def fake_call(name, args):
+        calls.append(name)
+        if name == "list_tasks":
+            return [{"id": "t5", "title": "ship v2", "conversation_id": "conv-1"}]
+        if name == "summarize_task":
+            assert args["task_id"] == "t5"
+            return {"id": "t5", "title": "ship v2", "description": "3 line recap"}
+        return None
+
+    async def fake_emit(name, data):
+        events.append(f"{name}:{data.get('agent') or data.get('task', {}).get('id')}")
+
+    monkeypatch.setattr(tc, "call_tasks_tool", fake_call)
+    monkeypatch.setattr(tc, "emit", fake_emit)
+    monkeypatch.setattr(
+        tc,
+        "get_chat_model",
+        lambda **_: _model_returning(
+            TaskOps(ops=[TaskOp(action="summarize")], reply="Summarised it.")
+        ),
+    )
+
+    res = await run_task_creator(_state("summarise this task"), {})
+    assert "summarize_task" in calls
+    # the "Summarising the task…" pill is shown then cleared
+    assert "agent_start:task_summary" in events
+    assert "agent_end:task_summary" in events
+    assert "task_updated:t5" in events
+    assert "Summarised" in res.summary
+
+
 async def test_archive_done(monkeypatch):
     async def fake_call(name, _args):
         assert name == "archive_done_tasks"

@@ -65,10 +65,18 @@ class FakeSvc:
         return t
 
     @staticmethod
-    async def update_details(db, user_id, task_id, *, title=None, description=None):
+    async def update_details(db, user_id, task_id, **fields):
         t = await FakeSvc.get_task(db, user_id, task_id)
-        if description is not None:
-            t.description = description
+        if fields.get("title") is not None:
+            t.title = fields["title"]
+        if "description" in fields:
+            t.description = fields["description"]
+        return t
+
+    @staticmethod
+    async def summarize_task(db, user_id, task_id):
+        t = await FakeSvc.get_task(db, user_id, task_id)
+        t.description = "A crisp 3-line summary of the chat."
         return t
 
     @staticmethod
@@ -122,6 +130,14 @@ async def test_task_lifecycle(client):
 
         gone = await c.delete(f"/api/v1/tasks/{tid}")
         assert gone.status_code == 204
+
+
+async def test_summarize_endpoint(client):
+    async with client as c:
+        tid = (await c.post("/api/v1/tasks", json={"title": "x"})).json()["id"]
+        r = await c.post(f"/api/v1/tasks/{tid}/summarize")
+        assert r.status_code == 200
+        assert r.json()["description"].startswith("A crisp 3-line summary")
 
 
 async def test_bad_status_is_422(client):

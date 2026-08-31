@@ -114,7 +114,13 @@ class TaskRepository(BaseRepository[Task]):
     async def update(
         self, task_id: uuid.UUID, user_id: uuid.UUID, **fields: str | None
     ) -> Task | None:
-        values = {k: v for k, v in fields.items() if k in {"title", "description"}}
+        # ``title`` is NOT NULL — only set it when a value is given. ``description``
+        # is nullable, so a passed key (even ``None``) means "set it" (clear).
+        values: dict[str, str | None] = {}
+        if fields.get("title") is not None:
+            values["title"] = fields["title"]
+        if "description" in fields:
+            values["description"] = fields["description"]
         if values:
             await self.db.execute(
                 update(Task)

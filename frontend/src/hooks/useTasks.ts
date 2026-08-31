@@ -7,6 +7,7 @@ import {
   deleteTask,
   listTasks,
   patchTask,
+  summarizeTask,
   type TaskDto,
 } from "@/lib/api";
 
@@ -58,6 +59,15 @@ export function useDeleteTask() {
   const invalidate = useInvalidateTasks();
   return useMutation({
     mutationFn: async (id: string) => deleteTask(id, await getToken()),
+    onSuccess: invalidate,
+  });
+}
+
+export function useSummarizeTask() {
+  const { getToken } = useAuth();
+  const invalidate = useInvalidateTasks();
+  return useMutation({
+    mutationFn: async (id: string) => summarizeTask(id, await getToken()),
     onSuccess: invalidate,
   });
 }

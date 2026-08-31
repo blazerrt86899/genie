@@ -55,8 +55,12 @@ class _FakeSvc:
         return 3
 
     @staticmethod
+    async def summarize_task(db, user_id, task_id):
+        return _fake_task("ship it", description="A 3-line recap of the chat.")
+
+    @staticmethod
     def to_dict(t):
-        return {"id": str(t.id), "title": t.title, "status": t.status}
+        return {"id": str(t.id), "title": t.title, "status": t.status, "description": t.description}
 
 
 class _FakeSession:
@@ -70,7 +74,10 @@ class _FakeSession:
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     _FakeSvc.created = []
-    for name in ("create_task", "list_tasks", "find_task", "move_task", "archive_done", "to_dict"):
+    for name in (
+        "create_task", "list_tasks", "find_task", "move_task",
+        "archive_done", "summarize_task", "to_dict",
+    ):
         monkeypatch.setattr(tasks_server.task_service, name, getattr(_FakeSvc, name))
     monkeypatch.setattr(tasks_server, "get_sessionmaker", lambda: (lambda: _FakeSession()))
 
@@ -78,7 +85,18 @@ def _patch(monkeypatch):
 async def test_tools_are_registered():
     async with Client(tasks_server.mcp) as c:
         names = {t.name for t in await c.list_tools()}
-    assert {"create_task", "list_tasks", "set_task_status", "archive_done_tasks"} <= names
+    assert {
+        "create_task", "list_tasks", "set_task_status",
+        "archive_done_tasks", "summarize_task",
+    } <= names
+
+
+async def test_summarize_task_tool():
+    async with Client(tasks_server.mcp) as c:
+        r = await c.call_tool(
+            "summarize_task", {"user_id": _UID, "task_id": str(uuid.uuid4())}
+        )
+    assert r.data["description"] == "A 3-line recap of the chat."
 
 
 async def test_create_task_tool():

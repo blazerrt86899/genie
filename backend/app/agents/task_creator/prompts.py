@@ -14,6 +14,9 @@ Operations:
                 from that task's title in `target` and the destination column in
                 `status` (todo | in_progress | done). "start X" → in_progress;
                 "finished / did / done with X" / "mark X done" → done.
+- summarize    — they asked to summarise / recap a task. Put words from the task
+                title in `target` if they named one; leave `target` empty to mean
+                "the task discussed in this chat".
 - archive_done — they asked to archive / clear / clean up finished (Done) tasks.
 - list        — they asked what's on their list / board.
 

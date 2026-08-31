@@ -1,4 +1,4 @@
-import { Globe, Sparkles } from "lucide-react";
+import { CheckSquare, Globe, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
@@ -13,6 +13,8 @@ const AGENT_LABELS: Record<string, { icon: typeof Globe; live: string; done: str
   web_search: { icon: Globe, live: "Searching the web", done: "Searched the web" },
   greeting: { icon: Sparkles, live: "Greeting you", done: "Greeted you" },
   rag: { icon: Globe, live: "Reading your documents", done: "Read your documents" },
+  task_creator: { icon: CheckSquare, live: "Updating your tasks", done: "Updated your tasks" },
+  task_summary: { icon: CheckSquare, live: "Summarising the task", done: "Summarised the task" },
 };
 
 function AgentTrail({

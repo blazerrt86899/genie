@@ -82,6 +82,21 @@ async def _run_op(op, user_id: str, conversation_id: str | None) -> str:
         await emit("task_updated", {"task": moved})
         return f'Moved "{moved["title"]}" to {_STATUS_LABEL.get(status, status)}.'
 
+    if op.action == "summarize":
+        target_id = await _resolve_task_id(user_id, op.target, conversation_id)
+        if not target_id:
+            return "Couldn't find a task to summarise."
+        # surface a live "Summarising the task…" pill while the LLM works
+        await emit("agent_start", {"agent": "task_summary", "task": "Summarising the task"})
+        try:
+            t = await call_tasks_tool(
+                "summarize_task", {"user_id": user_id, "task_id": target_id}
+            )
+        finally:
+            await emit("agent_end", {"agent": "task_summary", "status": "done"})
+        await emit("task_updated", {"task": t})
+        return f'Summarised "{t["title"]}" into its description.'
+
     if op.action == "archive_done":
         count = await call_tasks_tool("archive_done_tasks", {"user_id": user_id})
         await emit("tasks_archived", {"count": count})
@@ -101,3 +116,20 @@ async def _run_op(op, user_id: str, conversation_id: str | None) -> str:
         return " · ".join(parts)
 
     return ""
+
+
+async def _resolve_task_id(
+    user_id: str, target: str | None, conversation_id: str | None
+) -> str | None:
+    """Task id from a fuzzy title, or — if no target — the task tied to this chat."""
+    query = (target or "").strip()
+    if query:
+        match = await call_tasks_tool("find_task", {"user_id": user_id, "query": query})
+        return match["id"] if match else None
+    tasks = await call_tasks_tool(
+        "list_tasks", {"user_id": user_id, "include_archived": True}
+    )
+    for t in tasks:
+        if t.get("conversation_id") == conversation_id:
+            return t["id"]
+    return None

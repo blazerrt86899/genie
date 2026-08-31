@@ -12,12 +12,22 @@ import uuid
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.exceptions import GenieError, NotFoundError
 from app.core.logging import preview
 from app.db.models.task import TASK_STATUSES, Task
+from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.task_repo import TaskRepository
 
 logger = structlog.get_logger(__name__)
+
+_SUMMARY_SYSTEM = (
+    "You summarise a task's discussion. Given the task title and the chat "
+    "transcript it was created in, write a 3-4 line summary of what the task is "
+    "about and any decisions / details agreed. Plain prose, no preamble, no "
+    "bullet list, no markdown headings."
+)
+_TRANSCRIPT_CHARS = 8000
 
 
 class TaskValidationError(GenieError):
@@ -91,18 +101,70 @@ async def move_task(
 
 
 async def update_details(
-    db: AsyncSession,
-    user_id: uuid.UUID,
-    task_id: uuid.UUID,
-    *,
-    title: str | None = None,
-    description: str | None = None,
+    db: AsyncSession, user_id: uuid.UUID, task_id: uuid.UUID, **fields: str | None
 ) -> Task:
-    logger.info("task_service_update_details", user_id=str(user_id), task_id=str(task_id))
-    task = await TaskRepository(db).update(task_id, user_id, title=title, description=description)
+    """``fields`` may contain ``title`` and/or ``description`` — only the keys
+    actually passed are applied (``description`` can be set to ``None`` to clear)."""
+    logger.info(
+        "task_service_update_details",
+        user_id=str(user_id),
+        task_id=str(task_id),
+        fields=sorted(fields),
+    )
+    task = await TaskRepository(db).update(task_id, user_id, **fields)
     if task is None:
         raise NotFoundError("task not found")
     return task
+
+
+async def summarize_task(
+    db: AsyncSession, user_id: uuid.UUID, task_id: uuid.UUID
+) -> Task:
+    """Summarise the task's linked chat into 3-4 lines → the task description."""
+    task = await get_task(db, user_id, task_id)
+    if task.conversation_id is None:
+        raise TaskValidationError("this task has no linked chat to summarise")
+
+    messages = await MessageRepository(db).list_for_conversation(task.conversation_id, limit=100)
+    if not messages:
+        raise TaskValidationError("the linked chat has no messages yet")
+
+    transcript = "\n".join(f"{m.role}: {m.content}" for m in messages)[:_TRANSCRIPT_CHARS]
+    logger.info(
+        "task_service_summarize",
+        user_id=str(user_id),
+        task_id=str(task_id),
+        conversation_id=str(task.conversation_id),
+        messages=len(messages),
+    )
+
+    summary = await _summarise(task.title, transcript)
+    logger.info("task_summary_generated", task_id=str(task_id), chars=len(summary))
+    return await update_details(db, user_id, task_id, description=summary)
+
+
+async def _summarise(title: str, transcript: str) -> str:
+    """3-4 line summary of a task's chat. Isolated so tests can stub the LLM."""
+    if not settings.llm_configured:
+        raise TaskValidationError("summarisation needs OPENAI_API_KEY")
+
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    model = ChatOpenAI(
+        model=settings.OPENAI_CHAT_MODEL,
+        temperature=0.3,
+        streaming=False,
+        max_tokens=200,
+        api_key=settings.OPENAI_API_KEY,
+    )
+    resp = await model.ainvoke(
+        [
+            SystemMessage(content=_SUMMARY_SYSTEM),
+            HumanMessage(content=f"Task: {title}\n\nTranscript:\n{transcript}"),
+        ]
+    )
+    return str(resp.content).strip()
 
 
 async def archive_done(db: AsyncSession, user_id: uuid.UUID) -> int:

@@ -247,6 +247,16 @@ export function archiveDoneTasks(
   });
 }
 
+export function summarizeTask(
+  id: string,
+  token?: string | null,
+): Promise<TaskDto> {
+  return apiFetch<TaskDto>(`/api/v1/tasks/${id}/summarize`, {
+    method: "POST",
+    token,
+  });
+}
+
 export function deleteTask(id: string, token?: string | null): Promise<void> {
   return apiFetch<void>(`/api/v1/tasks/${id}`, { method: "DELETE", token });
 }

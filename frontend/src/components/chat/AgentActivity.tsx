@@ -7,7 +7,8 @@ const LABELS: Record<string, string> = {
   web_search: "Searching the web",
   rag: "Reading your documents",
   calendar: "Checking your calendar",
-  task_creator: "Creating a task",
+  task_creator: "Updating your tasks",
+  task_summary: "Summarising the task",
 };
 
 function label(agent: string) {

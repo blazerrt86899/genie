@@ -2,10 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { MessageSquare, Trash2 } from "lucide-react";
+import { MessageSquare, Sparkles, Trash2 } from "lucide-react";
 import { Modal } from "@/components/ui/modal";
 import { Button } from "@/components/ui/button";
-import { useDeleteTask, usePatchTask } from "@/hooks/useTasks";
+import {
+  useDeleteTask,
+  usePatchTask,
+  useSummarizeTask,
+} from "@/hooks/useTasks";
 import type { TaskDto } from "@/lib/api";
 
 const STATUS_LABEL: Record<string, string> = {
@@ -25,6 +29,7 @@ export function TaskModal({
   const [description, setDescription] = useState(task.description ?? "");
   const patch = usePatchTask();
   const del = useDeleteTask();
+  const summarize = useSummarizeTask();
 
   useEffect(() => setDescription(task.description ?? ""), [task]);
 
@@ -55,9 +60,26 @@ export function TaskModal({
         )}
 
         <div>
-          <label className="mb-1 block text-xs font-medium text-muted-foreground">
-            Description
-          </label>
+          <div className="mb-1 flex items-center justify-between">
+            <label className="text-xs font-medium text-muted-foreground">
+              Description
+            </label>
+            {task.conversation_id && (
+              <button
+                type="button"
+                disabled={summarize.isPending}
+                onClick={() =>
+                  summarize.mutate(task.id, {
+                    onSuccess: (t) => setDescription(t.description ?? ""),
+                  })
+                }
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-brand hover:underline disabled:opacity-60"
+              >
+                <Sparkles className="h-3 w-3" />
+                {summarize.isPending ? "Summarising…" : "Summarise from chat"}
+              </button>
+            )}
+          </div>
           <textarea
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -65,6 +87,11 @@ export function TaskModal({
             placeholder="Add details…"
             className="w-full resize-none rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring"
           />
+          {summarize.isError && (
+            <p className="mt-1 text-xs text-red-500">
+              Couldn’t summarise this task’s chat.
+            </p>
+          )}
         </div>
 
         <p className="text-xs text-muted-foreground">
