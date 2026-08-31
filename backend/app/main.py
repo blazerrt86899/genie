@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
-from app.agents.supervisor.graph import build_chat_graph, set_runtime_graph
+from app.agents.supervisor.graph import build_graph, set_runtime_graph
 from app.api.v1.router import api_router
 from app.config import settings
 from app.core.clerk import DEV_CLERK_ID, DEV_USER_ID
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
                 AsyncPostgresSaver.from_conn_string(_checkpointer_conn_string())
             )
             await checkpointer.setup()
-            set_runtime_graph(build_chat_graph().compile(checkpointer=checkpointer))
+            set_runtime_graph(build_graph().compile(checkpointer=checkpointer))
             logger.info("checkpointer_ready")
         except Exception as exc:  # noqa: BLE001
             if settings.is_production:

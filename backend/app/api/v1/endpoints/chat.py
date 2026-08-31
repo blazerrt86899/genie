@@ -21,6 +21,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: str | None = None
     project_id: str | None = None  # start a new chat inside this project
+    client_hour: int | None = None  # the user's local hour (0-23), for time-aware agents
 
 
 class ChatAccepted(BaseModel):
@@ -40,7 +41,7 @@ async def create_chat_run(
         raise HTTPException(status_code=422, detail="message must not be empty")
     try:
         run_id, conversation_id = await chat_service.create_turn(
-            db, redis, user, message, body.conversation_id, body.project_id
+            db, redis, user, message, body.conversation_id, body.project_id, body.client_hour
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

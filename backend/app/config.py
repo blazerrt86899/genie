@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     # ─── Limits ────────────────────────────────────────────────────────────
     MAX_TOKENS_PER_RUN: int = 50000
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
+    SUPERVISOR_MAX_TURNS: int = 2  # how many times the supervisor may (re)plan per run
 
     @property
     def is_production(self) -> bool:
@@ -133,6 +134,10 @@ class Settings(BaseSettings):
     @property
     def llm_configured(self) -> bool:
         return bool(self.OPENAI_API_KEY)
+
+    @property
+    def tavily_configured(self) -> bool:
+        return bool(self.TAVILY_API_KEY)
 
     @property
     def langsmith_enabled(self) -> bool:

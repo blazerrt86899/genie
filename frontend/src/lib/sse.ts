@@ -3,10 +3,21 @@
  * Keep the event union in sync with backend `app/core/streaming.py`.
  */
 
+export interface PlanStepView {
+  id: string;
+  description: string;
+  agent: string;
+  status: "pending" | "in_progress" | "done" | "failed";
+  depends_on: string[];
+  result: string | null;
+  error: string | null;
+}
+
 export type SseEvent =
   | { type: "agent_start"; agent: string; run_id: string }
   | { type: "token"; content: string }
-  | { type: "agent_end"; agent: string; duration_ms: number }
+  | { type: "agent_end"; agent: string; status: string }
+  | { type: "plan"; steps: PlanStepView[] }
   | { type: "task_created"; task: Record<string, unknown> }
   | { type: "title"; conversation_id: string; title: string }
   | { type: "interrupt"; reason: string; details: Record<string, unknown> }

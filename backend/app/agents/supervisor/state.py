@@ -1,4 +1,4 @@
-"""GenieState + RouteDecision (CLAUDE.md §9)."""
+"""GenieState + the supervisor's planning models (CLAUDE.md §9)."""
 
 from __future__ import annotations
 
@@ -8,13 +8,23 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-AgentName = Literal[
-    "prompt_enhancer",
-    "web_search",
-    "rag",
-    "calendar",
-    "task_creator",
-]
+TaskStatus = Literal["pending", "in_progress", "done", "failed"]
+
+
+class TaskRecord(TypedDict):
+    """One row of the supervisor's task ledger.
+
+    The supervisor writes these; the executor flips ``status`` as it runs each
+    agent and fills ``result`` / ``error``.
+    """
+
+    id: str  # "t1", "t2", …
+    description: str  # what this step should accomplish
+    agent: str  # registry key of the agent assigned to it
+    status: TaskStatus
+    depends_on: list[str]  # ids of tasks that must be "done" first
+    result: str | None  # the agent's summary once done
+    error: str | None
 
 
 class GenieState(TypedDict):
@@ -22,22 +32,46 @@ class GenieState(TypedDict):
     user_id: str
     conversation_id: str
     project_instructions: str | None  # prepended to the system prompt when set
-    intent: str | None
-    active_agents: list[str]
+    client_hour: int | None  # the user's local hour (0-23), for time-aware agents
+    intent: str | None  # the supervisor's rationale for the current plan
+    plan: list[TaskRecord]  # the task ledger — supervisor writes, executor updates
+    supervisor_turns: int  # how many times the supervisor has planned this run
+    active_agents: list[str]  # currently running (surfaced to the UI)
     intermediate_results: dict[str, Any]  # keyed by agent name
     final_response: str | None
+    validation: dict[str, Any] | None  # {"approved": bool, "issues": [...]}
     token_usage: dict[str, int]  # {"total": N, "by_agent": {...}}
     user_memories: list[dict]
     should_interrupt: bool
     metadata: dict[str, Any]
 
 
-class RouteDecision(BaseModel):
-    """Structured output the supervisor LLM must produce (CLAUDE.md §4.1)."""
+# ─── Supervisor structured output ─────────────────────────────────────────────
 
-    agents: list[AgentName]
-    rationale: str = Field(description="Why the supervisor chose these agents")
-    parallel: bool = Field(default=True, description="Run agents concurrently when True")
-    requires_confirmation: bool = Field(
-        default=False, description="True for calendar writes / external side effects"
+
+class PlanStep(BaseModel):
+    """One step the supervisor wants run. Routing is ALWAYS the LLM's call here —
+    never hardcoded ``if "search" in query`` logic (CLAUDE.md §4.1)."""
+
+    description: str = Field(description="What this step should accomplish, in one sentence")
+    agent: str = Field(description="The agent to run this step (must be one offered in the prompt)")
+    depends_on: list[int] = Field(
+        default_factory=list,
+        description="1-based positions of earlier steps whose output this step needs",
     )
+
+
+class SupervisorPlan(BaseModel):
+    steps: list[PlanStep] = Field(
+        default_factory=list,
+        description="Ordered plan. Empty when no specialist agent is needed — "
+        "the answer will then be written directly.",
+    )
+    rationale: str = Field(description="Why this plan (or why no agents are needed)")
+
+
+class Validation(BaseModel):
+    """Validator verdict. Minimal for now — a real content check comes later."""
+
+    approved: bool
+    issues: list[str] = Field(default_factory=list)

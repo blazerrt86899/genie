@@ -65,6 +65,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       s.addMessage({ id: crypto.randomUUID(), role: "user", content: message });
       const assistantId = crypto.randomUUID();
       s.addMessage({ id: assistantId, role: "assistant", content: "", pending: true });
+      s.setActiveAgents([]);
 
       const token = await getToken();
       const existingCid = useChatStore.getState().conversationId;
@@ -94,6 +95,10 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         await parseSseStream(res.body, (event) => {
           if (event.type === "token") {
             s.appendToken(assistantId, event.content);
+          } else if (event.type === "agent_start") {
+            s.agentStarted(event.agent);
+          } else if (event.type === "agent_end") {
+            s.agentEnded(event.agent);
           } else if (event.type === "error") {
             s.appendToken(assistantId, `\n\n⚠️ ${event.message}`);
           } else if (event.type === "title") {
@@ -108,6 +113,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       } finally {
         s.setMessagePending(assistantId, false);
         s.setRunId(null);
+        s.setActiveAgents([]);
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
       }
     },

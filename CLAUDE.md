@@ -190,19 +190,27 @@ genie/
 │       │       └── documents.py       ← /documents upload + list
 │       │
 │       ├── agents/
+│       │   ├── base.py                ← AgentResult dataclass
+│       │   ├── models.py              ← get_chat_model() / get_utility_model()
+│       │   ├── registry.py            ← AGENT_REGISTRY, AgentSpec, agent_menu()
 │       │   ├── supervisor/
-│       │   │   ├── graph.py           ← build_graph(), compile with checkpointer
-│       │   │   ├── state.py           ← GenieState TypedDict
-│       │   │   ├── nodes.py           ← supervisor_node(), synthesiser_node()
-│       │   │   └── prompts.py         ← System prompts for supervisor
+│       │   │   ├── graph.py           ← build_graph(): supervisor→executor→synthesiser→validator
+│       │   │   ├── state.py           ← GenieState + TaskRecord + SupervisorPlan
+│       │   │   ├── nodes.py           ← supervisor / executor / synthesiser / validator nodes
+│       │   │   └── prompts.py         ← supervisor (registry-driven) / synthesiser / validator prompts
 │       │   │
-│       │   ├── prompt_enhancer/
+│       │   ├── greeting/              ← registered agent: time-of-day greeting
+│       │   │   ├── agent.py           ← run_greeting(state, task) → AgentResult
+│       │   │   └── prompts.py
+│       │   │
+│       │   ├── prompt_enhancer/       ← stub (unregistered)
 │       │   │   ├── agent.py
 │       │   │   └── prompts.py
 │       │   │
-│       │   ├── web_search/
-│       │   │   ├── agent.py
-│       │   │   └── tools.py           ← TavilySearchResults, WebPageFetcher
+│       │   ├── web_search/            ← registered agent: Tavily
+│       │   │   ├── agent.py           ← run_web_search(state, task) → AgentResult
+│       │   │   ├── prompts.py
+│       │   │   └── tools.py           ← tavily_search(), format_results(), extract_sources()
 │       │   │
 │       │   ├── rag/
 │       │   │   ├── agent.py
@@ -283,7 +291,7 @@ genie/
 │       │   ├── chat/
 │       │   │   ├── ChatView.tsx       ← Message list + composer (prop: conversationId)
 │       │   │   ├── Message.tsx        ← user/assistant bubble + sender label
-│       │   │   ├── AgentActivity.tsx  ← Live "web_search is thinking..." strip
+│       │   │   ├── AgentActivity.tsx  ← Live agent pills from agent_start/agent_end SSE
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← Kanban: todo/in-progress/done
@@ -960,69 +968,84 @@ ALTER TABLE user_memory      ENABLE ROW LEVEL SECURITY;
 
 ## 9. LangGraph: GenieState & Graph Wiring
 
-> **Current reality (see §19):** only `build_chat_graph()` runs — `START → chat → END`,
-> one node calling the LLM. The full supervisor wiring below is the target;
-> `build_graph()` is still a stub. The compiled chat graph + `AsyncPostgresSaver`
+> **Current reality (see §19):** the real supervisor graph runs —
+> `START → supervisor → executor → synthesiser → validator → {supervisor | END}`.
+> Two agents are registered (`greeting`, `web_search`); the other agent dirs are
+> still stubs and are NOT in the registry. The compiled graph + `AsyncPostgresSaver`
 > checkpointer are created once in the FastAPI lifespan and held via
 > `set_runtime_graph()` / `get_runtime_graph()`.
 
-### GenieState
+### GenieState (`app/agents/supervisor/state.py`)
 ```python
-# app/agents/supervisor/state.py
-from typing import Annotated, Any, Optional
-from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
+class TaskRecord(TypedDict):          # one row of the supervisor's task ledger
+    id: str                           # "t1", "t2", …
+    description: str
+    agent: str                        # registry key
+    status: Literal["pending","in_progress","done","failed"]
+    depends_on: list[str]             # ids that must be "done" first
+    result: str | None                # the agent's summary once done
+    error: str | None
 
 class GenieState(TypedDict):
     messages:             Annotated[list, add_messages]   # append-only
     user_id:              str
     conversation_id:      str
-    project_instructions: Optional[str]                   # prepended to the system prompt (Projects)
-    intent:               Optional[str]                   # extracted by supervisor
-    active_agents:        list[str]                       # currently running
-    intermediate_results: dict[str, Any]                  # keyed by agent name
-    final_response:       Optional[str]
-    token_usage:          dict[str, int]                  # {"total": N, "by_agent": {...}}
-    user_memories:        list[dict]                      # injected at start
-    should_interrupt:     bool                            # calendar write confirmation
+    project_instructions: str | None                     # prepended to the system prompt (Projects)
+    client_hour:          int | None                     # user's local hour 0-23 (time-aware agents)
+    intent:               str | None                     # supervisor's rationale for the current plan
+    plan:                 list[TaskRecord]               # the task ledger — supervisor writes, executor updates
+    supervisor_turns:     int                            # (re)plan count — capped by SUPERVISOR_MAX_TURNS
+    active_agents:        list[str]
+    intermediate_results: dict[str, Any]                  # keyed by agent name: {summary, detail, sources}
+    final_response:       str | None
+    validation:           dict | None                    # {"approved": bool, "issues": [...]}
+    token_usage:          dict[str, int]
+    user_memories:        list[dict]
+    should_interrupt:     bool
     metadata:             dict[str, Any]
 ```
 
-### RouteDecision (Pydantic — used by supervisor)
+### SupervisorPlan (Pydantic — the supervisor's structured output)
 ```python
-class RouteDecision(BaseModel):
-    agents: List[Literal["prompt_enhancer","web_search","rag","calendar","task_creator"]]
-    rationale: str        # supervisor must explain why it chose these agents
-    parallel: bool        # run agents concurrently when True
-    requires_confirmation: bool  # set True for calendar writes
-```
+class PlanStep(BaseModel):
+    description: str                  # what this step accomplishes / the search query
+    agent: str                        # must be a registered agent (KNOWN_AGENTS) — LLM's choice
+    depends_on: list[int] = []        # 1-based positions of earlier steps it needs
 
-### Graph Wiring Pattern
+class SupervisorPlan(BaseModel):
+    steps: list[PlanStep] = []        # empty ⇒ no agent needed, synthesiser answers directly
+    rationale: str
+```
+`nodes._plan_to_ledger()` validates: drops unknown agents, dedupes (no agent
+twice per plan — §16), remaps `depends_on` → task ids.
+
+### Agent registry (`app/agents/registry.py`)
+`AGENT_REGISTRY: dict[str, AgentSpec]` — each `AgentSpec(name, description,
+runner)` where `runner(state, task) -> AgentResult(summary, detail, sources)`
+(`app/agents/base.py`). The supervisor prompt is generated from `agent_menu()`.
+Add an agent = add an `AgentSpec` here (+ its module) — no graph node needed, the
+`executor` dispatches through the registry.
+
+### Graph wiring (`app/agents/supervisor/graph.py`)
 ```python
-# app/agents/supervisor/graph.py
 graph = StateGraph(GenieState)
-graph.add_node("supervisor",       supervisor_node)
-graph.add_node("prompt_enhancer",  prompt_enhancer_node)
-graph.add_node("web_search",       web_search_node)
-graph.add_node("rag",              rag_node)
-graph.add_node("calendar",         calendar_node)
-graph.add_node("task_creator",     task_creator_node)
-graph.add_node("synthesiser",      synthesiser_node)
+graph.add_node("supervisor",  supervisor_node)   # LLM plan → task ledger
+graph.add_node("executor",    executor_node)     # walk ledger, run agents in dep order, update statuses
+graph.add_node("synthesiser", synthesiser_node)  # compose the one user-facing reply (streams)
+graph.add_node("validator",   validator_node)    # minimal gate now — approves non-empty
 
-graph.set_entry_point("supervisor")
-graph.add_conditional_edges("supervisor", route_to_agents)  # dynamic
-# all agents → synthesiser
-for agent in ["prompt_enhancer","web_search","rag","calendar","task_creator"]:
-    graph.add_edge(agent, "synthesiser")
-graph.add_conditional_edges("synthesiser", should_continue_or_end)
-
-# Checkpointer: ALWAYS use session-mode connection
-checkpointer = AsyncPostgresSaver.from_conn_string(settings.DATABASE_URL_SESSION)
-compiled = graph.compile(
-    checkpointer=checkpointer,
-    interrupt_before=["calendar"]  # requires user confirmation
-)
+graph.add_edge(START, "supervisor")
+graph.add_edge("supervisor", "executor")
+graph.add_edge("executor", "synthesiser")
+graph.add_edge("synthesiser", "validator")
+graph.add_conditional_edges("validator", route_after_validator,
+                            {"supervisor": "supervisor", END: END})  # capped re-plan loop
 ```
+Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
+`interrupt_before` yet (calendar agent not built). The `executor` runs agents
+**sequentially** (a later agent sees an earlier one's `intermediate_results`) and
+`adispatch_custom_event`s `agent_start` / `agent_end` / `plan` — surfaced as SSE.
+Only the **synthesiser's** tokens stream to the client.
 
 ---
 
@@ -1061,15 +1084,17 @@ async def hybrid_retrieve(
 
 ### Event Types (strict — frontend parses by `type` field)
 
-> Implemented today: `token`, `title`, `error`, `done` (see `core/streaming.py` +
-> `lib/sse.ts`). `done` carries `total_tokens`, `run_id`, `langsmith_run_id?`,
-> `title?`. The rest arrive with their features. The stream **always** ends
-> with `done`, even after an `error` (§16).
+> Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `title`,
+> `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `done` carries
+> `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `task_created` /
+> `interrupt` arrive with their features. The stream **always** ends with `done`,
+> even after an `error` (§16).
 
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
 data: {"type": "token",         "content": "Based on"}
-data: {"type": "agent_end",     "agent": "web_search", "duration_ms": 1240}
+data: {"type": "agent_end",     "agent": "web_search", "status": "done"}
+data: {"type": "plan",          "steps": [{"id":"t1","agent":"web_search","status":"done", ...}]}
 data: {"type": "title",         "conversation_id": "...", "title": "Learning ML"}
 data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo"}}
 data: {"type": "interrupt",     "reason": "calendar_write_confirmation", "details": {...}}
@@ -1095,20 +1120,25 @@ publish SQS memory consolidation job
 
 ## 12. Agent Catalogue
 
-| Agent | File | Runs When | Output to State |
-|-------|------|-----------|-----------------|
-| Prompt Enhancer | `agents/prompt_enhancer/` | First, always | `state.intent` + enhanced query |
-| Web Search | `agents/web_search/` | Current events, facts | `state.intermediate_results["web_search"]` |
-| RAG | `agents/rag/` | User asks about their docs | `state.intermediate_results["rag"]` |
-| Calendar | `agents/calendar/` | Schedule/event queries | `state.intermediate_results["calendar"]`, `interrupt_before` writes |
-| Task Creator | `agents/task_creator/` | Actionable tasks detected | `state.intermediate_results["task_creator"]` + SSE `task_created` event |
+Agents are dispatched by the `executor` through `AGENT_REGISTRY` (not graph
+nodes). `runner(state, task) -> AgentResult(summary, detail, sources)`.
+
+| Agent | File | Registered? | Runs When | Output |
+|-------|------|-------------|-----------|--------|
+| Greeting | `agents/greeting/` | ✅ | Message is a greeting / small talk | `AgentResult.summary` (time-of-day greeting; uses `state.client_hour`) — synthesiser relays it verbatim |
+| Web Search | `agents/web_search/` | ✅ | Current events, external facts | `intermediate_results["web_search"]` — Tavily results summarised + `sources` |
+| Prompt Enhancer | `agents/prompt_enhancer/` | ⬜ stub | — | — |
+| RAG | `agents/rag/` | ⬜ stub | — | — |
+| Calendar | `agents/calendar/` | ⬜ stub | — | — |
+| Task Creator | `agents/task_creator/` | ⬜ stub | — | — |
 
 **Adding a new agent**:
-1. Create `agents/new_agent/agent.py` with a `new_agent_node(state: GenieState)` function
-2. Register in `supervisor/graph.py` (add_node + add_edge to synthesiser)
-3. Add the literal to `RouteDecision.agents` Pydantic type
-4. Update the supervisor system prompt in `supervisor/prompts.py` to describe the new agent
-5. Write a unit test in `tests/agents/test_new_agent.py`
+1. Create `agents/<name>/agent.py` with `async def run_<name>(state: GenieState, task: TaskRecord) -> AgentResult`
+2. Add an `AgentSpec` to `AGENT_REGISTRY` in `agents/registry.py` (its `description` is what the supervisor sees)
+3. Write a unit test in `tests/agents/test_<name>.py`
+
+No graph change and no prompt edit needed — the supervisor prompt is generated
+from the registry.
 
 ---
 
@@ -1204,13 +1234,17 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] `UserRepository.create_from_clerk()` + `create_from_clerk_token()` + `update_from_clerk()` + `soft_delete_by_clerk_id()` + `touch_last_active()`
 - [x] `request_id` middleware injected on all requests
 - [x] Alembic: `users` (with `clerk_id` column, no `password_hash`), `conversations`, `messages` tables
-- [x] `GenieState` TypedDict + `RouteDecision` Pydantic model
-- [ ] Supervisor node with `with_structured_output(RouteDecision)` (no hardcoded routing)
-- [ ] Web Search agent (Tavily) + Prompt Enhancer agent
-- [ ] Synthesiser node
-- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — live for the app lifetime, compiled with `build_chat_graph()`
-- [x] `POST /chat` + `GET /chat/{id}/stream` SSE endpoints — _single-node `chat` graph, no supervisor yet_
-- [x] SSE event protocol: `token`, `error`, `done` emitted — _`agent_start`/`agent_end` await the agent layer_
+- [x] `GenieState` TypedDict (+ `TaskRecord` ledger) + `SupervisorPlan` Pydantic model
+- [x] Supervisor node with `with_structured_output(SupervisorPlan)` — registry-driven, no hardcoded routing; produces a task ledger; capped re-plan loop
+- [x] Agent registry (`agents/registry.py`) + `executor` node (sequential, dep-ordered, `agent_start`/`agent_end`/`plan` events)
+- [x] Web Search agent (Tavily) — grounded summary + sources
+- [x] Greeting agent — time-of-day greeting from `client_hour`
+- [ ] Prompt Enhancer agent
+- [x] Synthesiser node — composes the one streamed reply (greeting fast-path skips the LLM)
+- [x] Validator node — minimal (approves non-empty); real content check TODO
+- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (supervisor→executor→synthesiser→validator)
+- [x] `POST /chat` (+ `client_hour`) + `GET /chat/{id}/stream` SSE endpoints
+- [x] SSE event protocol: `agent_start`, `agent_end`, `plan`, `token`, `title`, `error`, `done` emitted
 - [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat_
 - [x] LangSmith tracing — `configure_tracing()` in the lifespan pushes `LANGSMITH_*` into `os.environ`; each chat turn's root run id is stored on the assistant message's `metadata.langsmith_run_id` and echoed in the SSE `done` event. Verified: traces land in the LangSmith project.
 - [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
@@ -1223,7 +1257,7 @@ DELETE /api/v1/documents/{id}          → 204
 - [ ] After sign-up: call `GET /users/me` and wait for 200 before redirecting to `/chat` (webhook race condition guard)
 - [x] Chat page: `ChatWindow`, `Message`, `StreamingDot` — _streams live tokens; input disabled mid-turn_
 - [x] `useChat` hook: POST /chat → SSE connection → append tokens; rehydrates from `GET /conversations/{id}` on reload
-- [x] `AgentActivity` component — _renders `chatStore.activeAgents`; needs real SSE events_
+- [x] `AgentActivity` component — renders `chatStore.activeAgents` from live `agent_start`/`agent_end` SSE events
 - [x] Zustand `chatStore`: messages, activeAgents, runId, conversationId
 - [x] Conversation sidebar — `useConversations` list (recency-ordered), "New chat", `/chat/[id]` per conversation, auto-title (cheap-LLM, SSE `title` event), delete
 
@@ -1333,8 +1367,10 @@ DELETE /api/v1/documents/{id}          → 204
 ```
 tests/
 ├── agents/
-│   ├── test_supervisor.py      ← RouteDecision output for various queries
-│   ├── test_web_search.py
+│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing
+│   ├── test_registry.py        ← registry integrity
+│   ├── test_greeting.py        ← time buckets + LLM/template fallback
+│   ├── test_web_search.py      ← Tavily mocked, summary + sources
 │   ├── test_rag.py             ← Mock Supabase RPC, verify hybrid_search called
 │   ├── test_task_creator.py    ← Verify ExtractedTask parsing
 │   └── test_calendar.py        ← Verify interrupt_before triggers
@@ -1408,7 +1444,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 | Storing `clerk_id` as FK on child tables | Store internal `users.id` UUID as FK always |
 | Processing Clerk webhooks without verifying Svix signature | Always verify with `svix` library first |
 | Redirecting to `/chat` immediately after sign-up | Call `GET /users/me` first; wait for 200 (webhook race guard) |
-| `if "calendar" in query: route_to_calendar()` | LLM-based routing via `RouteDecision` |
+| `if "calendar" in query: route_to_calendar()` | LLM-based routing via `SupervisorPlan` (registry-driven) |
 | Raw `supabase.table().select()` in route handler | Call repository → call service |
 | Synchronous document ingestion in request handler | Publish to SQS, return 202 Accepted |
 | Storing raw OAuth tokens in DB | Fernet-encrypt before insert |
@@ -1427,12 +1463,12 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-30 — centred empty-chat greeting (rotating words) + sidebar nav reorder (New chat · Projects · Tasks, then all Chats)._
+_Last updated: 2026-08-31 — real supervisor graph (supervisor→executor→synthesiser→validator, capped re-plan loop) + agent registry; greeting & web_search (Tavily) agents; `agent_start`/`agent_end`/`plan` SSE wired to the AgentActivity strip._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
-| Phase 1 — Foundation | 🟡 In Progress | ~50% |
+| Phase 1 — Foundation | 🟡 In Progress | ~70% |
 | Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
@@ -1445,17 +1481,18 @@ _Last updated: 2026-08-30 — centred empty-chat greeting (rotating words) + sid
 - ✅ `config.py` (pydantic-settings, all §6 vars), `core/logging.py` (structlog JSON), `core/middleware.py` (`request_id` + timing), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
 - ✅ **LangSmith tracing** — `core/observability.py:configure_tracing()` (called first in the lifespan) copies `LANGSMITH_*` from Settings into `os.environ` so LangChain actually traces; each chat turn's root run id → `messages.metadata.langsmith_run_id` + the SSE `done` event.
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
-- ✅ **Chat**: `POST /chat` (persist user msg + stash run in Redis) → `GET /chat/{id}/stream` SSE (`token`/`error`/`done`). Single-node LangGraph `chat` graph (`build_chat_graph`) → OpenAI `gpt-4o-2024-08-06`, compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id` gives multi-turn memory. Both messages persist to `messages`.
+- ✅ **Chat**: `POST /chat` (persist user msg + stash run — incl. `client_hour` — in Redis) → `GET /chat/{id}/stream` SSE. Runs the real **supervisor graph** (`build_graph`: `supervisor → executor → synthesiser → validator`, capped re-plan loop) compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id`. `chat_service._generate` streams only the synthesiser's tokens, relays `agent_start`/`agent_end`/`plan` custom events as SSE, accumulates token usage, and falls back to `graph.aget_state` for the greeting fast-path (no streamed tokens). Both messages persist to `messages`.
 - ✅ `GET /conversations`, `GET /conversations/{id}` (conversation + messages); `conversation_repo` / `message_repo` real methods
 - ✅ **Clerk auth** (`core/clerk.py`): JWKS fetched from the Frontend API host (derived from `CLERK_PUBLISHABLE_KEY`, or explicit `CLERK_DOMAIN`), Redis-cached (`clerk:jwks`); `RS256` verify; `sub` → internal user via Redis `user_by_clerk:{id}` → `UserRepository` → auto-provision (`create_from_clerk_token`, email/name enriched from the Clerk Backend API). `touch_last_active`. Dev-user fallback **only when no Clerk domain is configured**.
 - ✅ `POST /webhooks/clerk` — Svix-verified; `user.created/updated/deleted` → `UserRepository`. Local: `clerk webhooks --forward-to …`. `user_repo` Clerk helpers all implemented.
 - ✅ Dev user row seeded on startup **only when Clerk is unconfigured**
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
-- ✅ `GenieState` + `RouteDecision` (`agents/supervisor/state.py`) — real
+- ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result); `executor` runs registered agents **sequentially** through `AGENT_REGISTRY` in dependency order, a later agent seeing earlier `intermediate_results`; `synthesiser` composes the one streamed reply (verbatim fast-path for a lone greeting); `validator` is minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2). `adispatch_custom_event` → `agent_start`/`agent_end`/`plan`.
+- ✅ **Agents** — `greeting` (time-of-day from `client_hour`, cheap LLM + template fallback) and `web_search` (`tavily_search` → grounded summary + `sources`; falls back to Tavily's own answer without an LLM). Both registered; `prompt_enhancer`/`rag`/`calendar`/`task_creator` remain unregistered stubs.
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
-- ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → `chat_node` prepends them to `CHAT_SYSTEM_PROMPT`. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
-- ⬜ Supervisor LLM routing, the 5 agents, synthesiser, full `build_graph()`, memory (`short_term`/`long_term`/`manager`), workers, rate limiting
+- ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
+- ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar`/`task_creator` agents, parallel fan-out, memory (`short_term`/`long_term`/`manager`), workers, rate limiting, token-usage write-back to `GenieState` mid-run
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ **Landing page** at `/` (`components/landing/*`) — voice-AI-concierge positioning, sticky blur nav w/ placeholder links, Framer-Motion hero "live call" animation (`CallOrb`: waveform → spoken request → agent chips → completed actions, loops; static under `prefers-reduced-motion`), logo marquee, how-it-works, features grid, "voice coming soon" band, CTA, 4-col footer. **`/` no longer redirects to `/chat`.**
@@ -1463,7 +1500,8 @@ _Last updated: 2026-08-30 — centred empty-chat greeting (rotating words) + sid
 - ✅ `(app)/` group — `Sidebar`: nav block (**New chat** · **Projects** · **Tasks**, same style) then the **Chats** list (always below every nav item, recency-ordered `useConversations`, active-highlight, hover-to-delete), then `BackendStatus` + Clerk `UserButton` pinned at the bottom.
 - ✅ Chat — `/chat` (new) and `/chat/[id]` (a conversation); `ChatView` + `useChat(conversationId?)` is **route-driven** (loads `GET /conversations/{id}` on nav; on the first message of a new chat it POSTs, learns the id, `router.replace('/chat/<id>')`, invalidates the sidebar list; the SSE `title` event refreshes the sidebar). Streams tokens live, input locked mid-turn. Each `Message` has a sender label — "GENIE" brand-gradient + sparkle, or the user's Clerk first name. **Empty state** = a vertically-centred greeting (`GreetingHeadline`: "What can Genie _<two words>_?" — the two words swap every 3.2s with a fade, `prefers-reduced-motion`-safe) above a centred composer; project chats show "New chat in _<name>_" instead.
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
-- ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`) / `taskStore`; `lib/api.ts` (`postChat`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`), `lib/sse.ts` parser matching `core/streaming.py`
+- ✅ **Agent activity** — `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded`; `AgentActivity` renders `activeAgents` as pulsing pills (friendly labels: `web_search` → "Searching the web"), shown in both the empty/centred state and above the docked composer. `plan` events are typed in `lib/sse.ts` but not yet rendered.
+- ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
 - ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).
 - ⬜ `useTasks` (enabled), conversation rename/search, per-project model settings, project knowledge docs
@@ -1480,16 +1518,16 @@ _Last updated: 2026-08-30 — centred empty-chat greeting (rotating words) + sid
 
 ### 19.2 Next up (Phase 1)
 
-Grow `build_chat_graph()` into the supervisor: `with_structured_output(RouteDecision)`
-routing → `prompt_enhancer` + `web_search` agents → synthesiser (emit
-`agent_start`/`agent_end` SSE) → Redis `recent_messages` / `rate_limit` +
-token-budget check → conversation sidebar list. Frontend `GET /users/me` gate
-after sign-up (webhook race guard, §7.8).
-
-> **Interim note (CLAUDE.md §9/§11):** the running graph is a single `chat` node,
-> not the supervisor. SSE currently emits only `token` / `error` / `done`.
-> `chat_service` calls the model directly through the graph — no agents, tools,
-> RAG or memory-consolidation yet.
+- **Validator agent** — real content check (`with_structured_output(Validation)`):
+  grounding vs. agent findings, refusal/contradiction detection; on reject, feed
+  `issues` back to the supervisor for a re-plan turn. The loop + `Validation`
+  model are already wired.
+- **Prompt Enhancer agent** — register it; clarify/enrich the query, set `state.intent`.
+- Redis L1 (`recent_messages` / `rate_limit`) + memory `load_context()`;
+  token-usage write-back into `GenieState` mid-run so the budget guard bites.
+- A visible **plan / task-ledger panel** in the chat (the `plan` SSE event is
+  already emitted).
+- Frontend `GET /users/me` gate after sign-up (webhook race guard, §7.8).
 
 ---
 
@@ -1500,8 +1538,8 @@ after sign-up (webhook race guard, §7.8).
 | Auth / user verification | `core/clerk.py` (JWT verify) + `api/v1/endpoints/webhooks.py` (sync) |
 | User DB record | `db/models/user.py` + `db/repositories/user_repo.py` |
 | Clerk JWKS cache tuning | `JWKS_CACHE_TTL_SECONDS` env var (default 3600) |
-| Add a new agent | `agents/{name}/agent.py` + `supervisor/graph.py` + `supervisor/prompts.py` |
-| Change routing logic | `supervisor/nodes.py` → `RouteDecision` prompt in `supervisor/prompts.py` |
+| Add a new agent | `agents/{name}/agent.py` (`run_{name}`) + an `AgentSpec` in `agents/registry.py` |
+| Change routing logic | `agents/supervisor/nodes.py:supervisor_node` + `SUPERVISOR_SYSTEM_PROMPT` in `supervisor/prompts.py` (menu auto-built from the registry) |
 | Modify hybrid search weights | `agents/rag/retriever.py` → `fts_weight`, `semantic_weight` params |
 | Add a new API endpoint | `api/v1/endpoints/{resource}.py` + register in `api/v1/router.py` |
 | Add DB table | New SQLAlchemy model in `db/models/` + Alembic migration + repository |

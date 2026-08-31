@@ -142,6 +142,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
             <GreetingHeadline />
           )}
           <div className="w-full max-w-2xl">
+            <AgentActivity className="justify-center px-0" />
             <Composer
               input={input}
               setInput={setInput}

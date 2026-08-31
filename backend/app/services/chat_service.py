@@ -42,6 +42,7 @@ async def create_turn(
     message: str,
     conversation_id: str | None,
     project_id: str | None = None,
+    client_hour: int | None = None,
 ) -> tuple[str, str]:
     """Persist the user message, return ``(run_id, conversation_id)``."""
     conv_repo = ConversationRepository(db)
@@ -69,7 +70,13 @@ async def create_turn(
     await redis.setex(
         _run_key(run_id),
         _RUN_TTL_SECONDS,
-        json.dumps({"conversation_id": str(conversation.id), "message": message}),
+        json.dumps(
+            {
+                "conversation_id": str(conversation.id),
+                "message": message,
+                "client_hour": client_hour,
+            }
+        ),
     )
     return run_id, str(conversation.id)
 
@@ -89,6 +96,7 @@ async def _generate(
         return
     payload = json.loads(raw)
     message: str = payload["message"]
+    client_hour = payload.get("client_hour")
 
     if payload["conversation_id"] != conversation_id:
         yield sse_error("run does not belong to this conversation", "run_mismatch"), None
@@ -117,6 +125,18 @@ async def _generate(
         "user_id": str(user.id),
         "conversation_id": conversation_id,
         "project_instructions": project_instructions,
+        "client_hour": client_hour,
+        "intent": None,
+        "plan": [],
+        "supervisor_turns": 0,
+        "active_agents": [],
+        "intermediate_results": {},
+        "final_response": None,
+        "validation": None,
+        "token_usage": {"total": 0, "by_agent": {}},
+        "user_memories": [],
+        "should_interrupt": False,
+        "metadata": {},
     }
 
     total_tokens = 0
@@ -130,6 +150,10 @@ async def _generate(
 
         kind = event["event"]
         if kind == "on_chat_model_stream":
+            # Only the synthesiser's tokens are the user-facing answer — the
+            # supervisor and the agents also call models, silently.
+            if (event.get("metadata") or {}).get("langgraph_node") != "synthesiser":
+                continue
             chunk = event["data"]["chunk"].content
             if chunk:
                 answer_parts.append(chunk)
@@ -137,9 +161,35 @@ async def _generate(
         elif kind == "on_chat_model_end":
             usage = getattr(event["data"].get("output"), "usage_metadata", None)
             if usage:
-                total_tokens = usage.get("total_tokens", 0)
+                total_tokens += usage.get("total_tokens", 0)
+        elif kind == "on_custom_event":
+            name = event.get("name")
+            data = event.get("data") or {}
+            if name == "agent_start":
+                yield format_sse_event(
+                    "agent_start", agent=data.get("agent"), run_id=run_id
+                ), None
+            elif name == "agent_end":
+                yield format_sse_event(
+                    "agent_end", agent=data.get("agent"), status=data.get("status")
+                ), None
+            elif name == "plan":
+                yield format_sse_event("plan", steps=data.get("steps", [])), None
 
     answer = "".join(answer_parts)
+    if not answer:
+        # Greeting fast-path: the synthesiser returned a message without
+        # streaming. Pull the authoritative reply from the graph state and send
+        # it as a single token frame so the client renders it.
+        try:
+            snapshot = await graph.aget_state(config)
+            msgs = snapshot.values.get("messages", []) if snapshot else []
+            if msgs:
+                answer = str(msgs[-1].content)
+        except Exception:  # noqa: BLE001
+            logger.warning("chat_state_fetch_failed", run_id=run_id)
+        if answer:
+            yield format_sse_event("token", content=answer), None
     title: str | None = None
     if answer:
         meta: dict = {}

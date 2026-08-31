@@ -69,6 +69,8 @@ export function postChat(
       message,
       conversation_id: conversationId,
       project_id: projectId ?? null,
+      // the user's local hour — lets time-aware agents (greeting) get it right
+      client_hour: new Date().getHours(),
     }),
   });
 }

@@ -105,7 +105,11 @@ async def test_create_turn_persists_user_message_and_stashes_run():
     )
     assert ("user", "hello") in FakeMsgRepo.added
     stashed = json.loads(redis.store[f"run:{run_id}"])
-    assert stashed == {"conversation_id": conversation_id, "message": "hello"}
+    assert stashed == {
+        "conversation_id": conversation_id,
+        "message": "hello",
+        "client_hour": None,
+    }
 
 
 async def test_stream_turn_emits_tokens_then_done(monkeypatch):
@@ -122,6 +126,7 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
                 "event": "on_chat_model_stream",
                 "run_id": "child",
                 "parent_ids": ["trace-123"],
+                "metadata": {"langgraph_node": "synthesiser"},
                 "data": {"chunk": SimpleNamespace(content=piece)},
             }
         yield {
@@ -130,8 +135,13 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
             "data": {"output": SimpleNamespace(usage_metadata={"total_tokens": 7})},
         }
 
+    async def fake_get_state(_config):
+        return SimpleNamespace(values={"messages": [SimpleNamespace(content="Hello")]})
+
     monkeypatch.setattr(
-        chat_service, "get_runtime_graph", lambda: SimpleNamespace(astream_events=fake_events)
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
     )
 
     frames = [
@@ -176,10 +186,19 @@ async def test_project_instructions_reach_the_graph(monkeypatch):
 
     async def fake_events(state, config, version):  # noqa: ARG001
         seen["state"] = state
-        yield {"event": "on_chat_model_stream", "data": {"chunk": SimpleNamespace(content="ok")}}
+        yield {
+            "event": "on_chat_model_stream",
+            "metadata": {"langgraph_node": "synthesiser"},
+            "data": {"chunk": SimpleNamespace(content="ok")},
+        }
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(values={"messages": [SimpleNamespace(content="ok")]})
 
     monkeypatch.setattr(
-        chat_service, "get_runtime_graph", lambda: SimpleNamespace(astream_events=fake_events)
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
     )
 
     _ = [f async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)]
