@@ -1,16 +1,63 @@
-/**
- * Task list hook — STUB (Phase 2). TanStack Query against GET /api/v1/tasks
- * (currently 501). Optimistic updates + SSE `task_created` sync land in Phase 2.
- */
+"use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api";
-import type { Task } from "@/store/taskStore";
+import { useAuth } from "@clerk/nextjs";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  archiveDoneTasks,
+  deleteTask,
+  listTasks,
+  patchTask,
+  type TaskDto,
+} from "@/lib/api";
 
-export function useTasks() {
-  return useQuery<Task[]>({
-    queryKey: ["tasks"],
-    queryFn: () => apiFetch<Task[]>("/api/v1/tasks"),
-    enabled: false, // flip on in Phase 2 once the endpoint exists
+const KEY = (includeArchived: boolean) => ["tasks", includeArchived] as const;
+
+export function useTasks(includeArchived = false) {
+  const { getToken } = useAuth();
+  return useQuery<TaskDto[]>({
+    queryKey: KEY(includeArchived),
+    queryFn: async () => listTasks(await getToken(), includeArchived),
+    staleTime: 5_000,
+    refetchOnWindowFocus: true,
+  });
+}
+
+function useInvalidateTasks() {
+  const qc = useQueryClient();
+  return () => qc.invalidateQueries({ queryKey: ["tasks"] });
+}
+
+export function usePatchTask() {
+  const { getToken } = useAuth();
+  const invalidate = useInvalidateTasks();
+  return useMutation({
+    mutationFn: async (vars: {
+      id: string;
+      title?: string;
+      description?: string | null;
+      status?: string;
+    }) => {
+      const { id, ...body } = vars;
+      return patchTask(id, body, await getToken());
+    },
+    onSuccess: invalidate,
+  });
+}
+
+export function useArchiveDone() {
+  const { getToken } = useAuth();
+  const invalidate = useInvalidateTasks();
+  return useMutation({
+    mutationFn: async () => archiveDoneTasks(await getToken()),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteTask() {
+  const { getToken } = useAuth();
+  const invalidate = useInvalidateTasks();
+  return useMutation({
+    mutationFn: async (id: string) => deleteTask(id, await getToken()),
+    onSuccess: invalidate,
   });
 }

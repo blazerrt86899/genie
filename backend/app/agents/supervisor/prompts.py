@@ -39,6 +39,11 @@ Examples:
     [greeting, web_search: "today's weather in Mussoorie"]
 - "good morning — any news on the Artemis program and on SpaceX?" →
     [greeting, web_search: "latest news Artemis program and SpaceX"]
+- "add 'call the vet' to my todo" → [task_creator: "create task: call the vet"]
+- "mark the report task as done" → [task_creator: "move report task to done"]
+- "archive my finished tasks" → [task_creator: "archive done tasks"]
+- "remind me to renew my passport, and what's the fee?" →
+    [task_creator: "create task: renew passport", web_search: "passport renewal fee"]
 - "write me a haiku about rain" → []
 
 Explain your reasoning in `rationale`.

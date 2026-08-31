@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # ─── Search ────────────────────────────────────────────────────────────
     TAVILY_API_KEY: str | None = None
 
+    # ─── MCP (CLAUDE.md §22) — only used when a server runs standalone ──────
+    TASKS_MCP_HOST: str = "127.0.0.1"
+    TASKS_MCP_PORT: int = 8765
+
     # ─── Google OAuth (Phase 3) ────────────────────────────────────────────
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None

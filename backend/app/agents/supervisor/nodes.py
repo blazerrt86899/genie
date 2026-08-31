@@ -17,10 +17,10 @@ from __future__ import annotations
 import time
 
 import structlog
-from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.graph import END
 
+from app.agents.events import emit as _emit
 from app.agents.models import get_chat_model
 from app.agents.registry import AGENT_REGISTRY, KNOWN_AGENTS, agent_menu
 from app.agents.supervisor.prompts import (
@@ -42,18 +42,7 @@ logger = structlog.get_logger(__name__)
 
 
 # ─── shared helpers ──────────────────────────────────────────────────────────
-
-
-async def _emit(name: str, data: dict) -> None:
-    """Dispatch a custom event (surfaces in ``astream_events`` as ``on_custom_event``).
-
-    Swallows the error when there is no callback manager — e.g. a unit test
-    calling the node directly.
-    """
-    try:
-        await adispatch_custom_event(name, data)
-    except Exception:  # noqa: BLE001
-        logger.debug("custom_event_not_dispatched", event=name)
+# ``_emit`` is ``app.agents.events.emit`` (imported above).
 
 
 def _ledger_text(plan: list[TaskRecord]) -> str:

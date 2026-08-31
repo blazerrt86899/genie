@@ -188,3 +188,65 @@ export function deleteProject(
 export function chatStreamUrl(conversationId: string, runId: string): string {
   return `${API_BASE_URL}/api/v1/chat/${conversationId}/stream?run_id=${encodeURIComponent(runId)}`;
 }
+
+// ─── Tasks ─────────────────────────────────────────────────────────────────
+
+export interface TaskDto {
+  id: string;
+  title: string;
+  description: string | null;
+  status: "todo" | "in_progress" | "done" | "archived";
+  conversation_id: string | null;
+  source_agent: string | null;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+}
+
+export function listTasks(
+  token?: string | null,
+  includeArchived = false,
+): Promise<TaskDto[]> {
+  const q = includeArchived ? "?include_archived=true" : "";
+  return apiFetch<TaskDto[]>(`/api/v1/tasks${q}`, { token });
+}
+
+export function getTask(id: string, token?: string | null): Promise<TaskDto> {
+  return apiFetch<TaskDto>(`/api/v1/tasks/${id}`, { token });
+}
+
+export function createTask(
+  body: { title: string; description?: string | null },
+  token?: string | null,
+): Promise<TaskDto> {
+  return apiFetch<TaskDto>("/api/v1/tasks", {
+    method: "POST",
+    token,
+    body: JSON.stringify(body),
+  });
+}
+
+export function patchTask(
+  id: string,
+  body: { title?: string; description?: string | null; status?: string },
+  token?: string | null,
+): Promise<TaskDto> {
+  return apiFetch<TaskDto>(`/api/v1/tasks/${id}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify(body),
+  });
+}
+
+export function archiveDoneTasks(
+  token?: string | null,
+): Promise<{ archived: number }> {
+  return apiFetch<{ archived: number }>("/api/v1/tasks/archive-done", {
+    method: "POST",
+    token,
+  });
+}
+
+export function deleteTask(id: string, token?: string | null): Promise<void> {
+  return apiFetch<void>(`/api/v1/tasks/${id}`, { method: "DELETE", token });
+}

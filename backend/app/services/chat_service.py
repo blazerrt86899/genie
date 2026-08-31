@@ -255,6 +255,18 @@ async def _generate(
                     ],
                 )
                 yield format_sse_event("plan", steps=steps), None
+            elif name in ("task_created", "task_updated"):
+                task_dict = data.get("task") or {}
+                logger.info(
+                    f"chat_{name}",
+                    run_id=run_id,
+                    task_id=task_dict.get("id"),
+                    status=task_dict.get("status"),
+                )
+                yield format_sse_event(name, task=task_dict), None
+            elif name == "tasks_archived":
+                logger.info("chat_tasks_archived", run_id=run_id, count=data.get("count"))
+                yield format_sse_event("tasks_archived", count=data.get("count", 0)), None
             elif name == "message_break":
                 # start a new assistant message
                 parts.append("")

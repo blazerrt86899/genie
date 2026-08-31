@@ -113,6 +113,12 @@ export function useChat(conversationId?: string, projectId?: string | null) {
             s.agentStarted(event.agent);
           } else if (event.type === "agent_end") {
             s.agentEnded(event.agent);
+          } else if (
+            event.type === "task_created" ||
+            event.type === "task_updated" ||
+            event.type === "tasks_archived"
+          ) {
+            qc.invalidateQueries({ queryKey: ["tasks"] });
           } else if (event.type === "error") {
             s.appendToken(currentId, `\n\n⚠️ ${event.message}`);
           } else if (event.type === "title") {

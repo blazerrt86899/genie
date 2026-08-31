@@ -8,11 +8,13 @@ export function Modal({
   onClose,
   title,
   children,
+  className = "max-w-md",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   children: React.ReactNode;
+  className?: string;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -31,7 +33,7 @@ export function Modal({
       <div
         role="dialog"
         aria-modal="true"
-        className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl"
+        className={`w-full rounded-2xl border border-border bg-card p-5 shadow-xl ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">

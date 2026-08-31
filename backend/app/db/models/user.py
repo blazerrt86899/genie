@@ -20,6 +20,7 @@ from app.db.models.base import Base, TimestampMixin
 if TYPE_CHECKING:
     from app.db.models.conversation import Conversation
     from app.db.models.project import Project
+    from app.db.models.task import Task
 
 
 class User(Base, TimestampMixin):
@@ -41,6 +42,11 @@ class User(Base, TimestampMixin):
         passive_deletes=True,
     )
     projects: Mapped[list[Project]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    tasks: Mapped[list[Task]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

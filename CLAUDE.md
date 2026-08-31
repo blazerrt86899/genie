@@ -63,6 +63,7 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | Framework | FastAPI | Latest stable |
 | ASGI Server | Uvicorn + Gunicorn | Multi-worker in prod |
 | Orchestration | LangGraph | Supervisor pattern, `astream_events v2` |
+| Tool servers | **FastMCP** (`fastmcp>=3`) | Centralized MCP layer — `app/mcp/*` (§22) |
 | LLM Routing | OpenAI `gpt-4o-2024-08-06` | Pin the version in prod |
 | Embeddings | OpenAI `text-embedding-3-small` | 1536 dims |
 | Task Queue | AWS SQS | Standard queue, idempotent consumers |
@@ -221,9 +222,16 @@ genie/
 │       │   │   ├── agent.py           ← interrupt_before writes
 │       │   │   └── tools.py           ← Google Calendar API wrappers
 │       │   │
-│       │   └── task_creator/
-│       │       ├── agent.py
-│       │       └── schemas.py         ← ExtractedTask Pydantic model
+│       │   ├── task_creator/         ← registered agent: task board via the tasks MCP
+│       │   │   ├── agent.py           ← run_task_creator(state, task) → AgentResult
+│       │   │   ├── prompts.py
+│       │   │   └── schemas.py         ← TaskOp / TaskOps structured output
+│       │   │
+│       │   └── events.py              ← emit(name, data) — agent custom events → SSE (§11)
+│       │
+│       ├── mcp/                       ← MCP layer (§22) — FastMCP tool servers
+│       │   ├── tasks_server.py        ← FastMCP("genie-tasks"): task CRUD tools
+│       │   └── client.py              ← call_tasks_tool() — in-process in-memory client
 │       │
 │       ├── memory/
 │       │   ├── short_term.py          ← Redis ops: recent_messages, rate_limit
@@ -244,6 +252,8 @@ genie/
 │       │
 │       ├── services/
 │       │   ├── chat_service.py        ← Orchestrates memory load + graph run + SSE
+│       │   ├── task_service.py        ← task board logic (REST + MCP + tests call this)
+│       │   ├── title_service.py       ← cheap-LLM conversation titles
 │       │   ├── memory_service.py      ← Memory consolidation logic
 │       │   └── document_service.py    ← Chunking, embedding, upsert
 │       │
@@ -294,23 +304,23 @@ genie/
 │       │   │   ├── AgentActivity.tsx  ← Live agent pills from agent_start/agent_end SSE
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
-│       │   │   ├── TaskBoard.tsx      ← Kanban: todo/in-progress/done
-│       │   │   └── TaskCard.tsx
-│       │   └── ui/                    ← shadcn/ui primitives (button)
+│       │   │   ├── TaskBoard.tsx      ← 3 cols + HTML5 drag + "Archive done" + "Archived (N)"
+│       │   │   ├── TaskCard.tsx       ← draggable; opens the modal
+│       │   │   └── TaskModal.tsx      ← detail: status · linked chat · editable description · delete
+│       │   └── ui/                    ← shadcn/ui primitives (button, modal)
 │       │
 │       ├── hooks/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
 │       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
-│       │   └── useTasks.ts            ← TanStack Query for tasks (stub)
+│       │   └── useTasks.ts            ← tasks list + patch/archive-done/delete (TanStack Query)
 │       │
 │       ├── providers/
 │       │   ├── query-provider.tsx     ← TanStack QueryClientProvider
 │       │   └── theme-provider.tsx     ← next-themes ThemeProvider
 │       │
 │       ├── store/
-│       │   ├── chatStore.ts           ← Zustand: messages, active agents, run_id
-│       │   └── taskStore.ts
+│       │   └── chatStore.ts           ← Zustand: messages, active agents, run_id
 │       │
 │       └── lib/
 │           ├── api.ts                 ← Typed fetch wrapper (injects Clerk Bearer token)
@@ -394,6 +404,10 @@ LANGSMITH_PROJECT=genie-prod  # or genie-dev
 
 # ─── Search ──────────────────────────────────────────────────────────────────
 TAVILY_API_KEY=
+
+# ─── MCP (§22) — only used when a server runs standalone; agents use in-process ──
+TASKS_MCP_HOST=127.0.0.1
+TASKS_MCP_PORT=8765
 
 # ─── Google OAuth (Calendar agent only — not user auth) ──────────────────────
 GOOGLE_CLIENT_ID=
@@ -1102,10 +1116,12 @@ async def hybrid_retrieve(
 ### Event Types (strict — frontend parses by `type` field)
 
 > Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `message_break`,
-> `message_agents`, `title`, `error`, `done` (see `core/streaming.py` +
-> `lib/sse.ts`). `done` carries `total_tokens`, `run_id`, `langsmith_run_id?`,
-> `title?`. `task_created` / `interrupt` arrive with their features. The stream
-> **always** ends with `done`, even after an `error` (§16).
+> `message_agents`, `task_created`, `task_updated`, `tasks_archived`, `title`,
+> `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `done` carries
+> `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `interrupt` arrives
+> with its feature. The stream **always** ends with `done`, even after an
+> `error` (§16). The `task_*` events carry the task dict / count from the
+> `task_creator` agent — the frontend invalidates its `["tasks"]` query on them.
 >
 > **`message_break` / `message_agents`** — one turn can produce several assistant
 > messages (a greeting, then the answer). `token` frames append to the *current*
@@ -1128,7 +1144,9 @@ data: {"type": "plan",          "steps": [{"id":"t1","agent":"web_search","statu
 data: {"type": "message_break"}
 data: {"type": "message_agents", "agents": ["web_search"]}
 data: {"type": "title",         "conversation_id": "...", "title": "Learning ML"}
-data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo"}}
+data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo", ...}}
+data: {"type": "task_updated",  "task": {"id": "...", "status": "in_progress", ...}}
+data: {"type": "tasks_archived","count": 2}
 data: {"type": "interrupt",     "reason": "calendar_write_confirmation", "details": {...}}
 data: {"type": "error",         "message": "...", "code": "AGENT_TIMEOUT"}
 data: {"type": "done",          "total_tokens": 1842, "run_id": "..."}
@@ -1159,10 +1177,10 @@ nodes). `runner(state, task) -> AgentResult(summary, detail, sources)`.
 |-------|------|-------------|-----------|--------|
 | Greeting | `agents/greeting/` | ✅ | Message is a greeting / small talk | `AgentResult.summary` (time-of-day greeting; uses `state.client_hour`) — synthesiser relays it verbatim |
 | Web Search | `agents/web_search/` | ✅ | Current events, external facts | `intermediate_results["web_search"]` — Tavily results summarised + `sources` |
+| Task Creator | `agents/task_creator/` | ✅ | "add X to my todo", "start/finish the … task", "archive done", "what's on my list" | `AgentResult.summary` (`stream=True`, its own chat message). Parses the message → `TaskOps` → runs each op via the **`genie-tasks` MCP** (`app/mcp/client.call_tasks_tool`); emits `task_created` / `task_updated` / `tasks_archived` custom events |
 | Prompt Enhancer | `agents/prompt_enhancer/` | ⬜ stub | — | — |
 | RAG | `agents/rag/` | ⬜ stub | — | — |
 | Calendar | `agents/calendar/` | ⬜ stub | — | — |
-| Task Creator | `agents/task_creator/` | ⬜ stub | — | — |
 
 **Adding a new agent**:
 1. Create `agents/<name>/agent.py` with `async def run_<name>(state: GenieState, task: TaskRecord) -> AgentResult`
@@ -1188,6 +1206,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
+- `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
 
@@ -1238,9 +1257,13 @@ PATCH  /api/v1/projects/{id}           → update name/description/instructions
 DELETE /api/v1/projects/{id}           → 204 (CASCADE: deletes its chats + messages + threads)
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
-GET    /api/v1/tasks                   → list (filter: status, date)
-PATCH  /api/v1/tasks/{id}              → update status/title
-DELETE /api/v1/tasks/{id}              → 204
+GET    /api/v1/tasks?include_archived=  → [TaskOut] (board + the Archived section)
+GET    /api/v1/tasks/{id}               → TaskOut (detail modal)
+POST   /api/v1/tasks   {title,desc?}    → 201 TaskOut (manual add)
+PATCH  /api/v1/tasks/{id} {title?,description?,status?} → TaskOut (drag / modal edit)
+POST   /api/v1/tasks/archive-done       → {archived: N}  (done → archived; the button)
+DELETE /api/v1/tasks/{id}               → 204
+# chat-driven moves ("start the report task") go via the task_creator agent → the tasks MCP
 
 # ── Documents ────────────────────────────────────────────────────────────────
 POST   /api/v1/documents               → upload (multipart) → S3 → SQS ingestion job → 202
@@ -1317,15 +1340,15 @@ DELETE /api/v1/documents/{id}          → 204
 - [ ] `hybrid_search_memories` Supabase RPC function
 - [ ] Memory manager: `load_context()` fetches Redis L1 + Supabase memories
 - [ ] Memory consolidation SQS worker (LLM extraction → embed → upsert)
-- [ ] Task Creator agent: `with_structured_output(ExtractedTask)` → persist to DB → emit SSE `task_created`
-- [ ] Alembic migration: `tasks` table
+- [x] Task Creator agent — registered; parses → `TaskOps` → **`genie-tasks` FastMCP** (§22) → `task_created`/`task_updated`/`tasks_archived` SSE
+- [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
 
 **Frontend tasks**:
 - [ ] Document upload UI in sidebar (drag-drop + file picker)
 - [ ] Ingestion progress indicator (poll document status)
-- [ ] Task Board: `/tasks` page, Kanban columns (todo / in-progress / done)
-- [ ] Task cards created live from SSE `task_created` events (Zustand taskStore)
-- [ ] `useTasks` hook with TanStack Query + optimistic updates
+- [x] Task Board: `/tasks` — 3 columns, HTML5 drag between columns, "Archive done" button, collapsible "Archived (N)"
+- [x] Task detail modal — status, linked chat (`/chat/<id>`), editable description, delete
+- [x] `useTasks` / `usePatchTask` / `useArchiveDone` / `useDeleteTask` (TanStack Query); `useChat` invalidates `["tasks"]` on the `task_*` SSE events
 
 **Phase 2 done when**: User uploads a PDF, asks a question about it, gets an answer from their document (verify RAG agent was used via LangSmith trace). Long-term memories appear in context on next conversation. Tasks are created and visible on the board.
 
@@ -1496,13 +1519,13 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — application-wide structured logging (§21): `structlog` step logs across middleware / auth / chat_service / the agent graph / repositories / startup, with an automatic secret-redaction processor and a `preview()` helper for user content; noisy third-party loggers pinned to WARNING. Datadog wiring is still pending._
+_Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a FastMCP `genie-tasks` server (in-process, standalone-ready) with task CRUD; a registered `task_creator` agent that routes on "add to todo" / "start the … task" / "archive done" and calls the MCP; `tasks` table + `/tasks` REST; a drag-and-drop board with "Archive done", a collapsible "Archived" section, and a task detail modal (linked chat + editable description). New SSE: `task_created` / `task_updated` / `tasks_archived`._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
 | Phase 1 — Foundation | 🟡 In Progress | ~70% |
-| Phase 2 — RAG + Memory | 🔴 Not Started | 0% |
+| Phase 2 — RAG + Memory | 🟡 In Progress | ~20% |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
@@ -1523,7 +1546,9 @@ _Last updated: 2026-08-31 — application-wide structured logging (§21): `struc
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
-- ✅ **Agents** — `greeting` (time-of-day from `client_hour`, cheap LLM + template fallback, `stream=True`) and `web_search` (`tavily_search` → grounded summary + `sources`; falls back to Tavily's own answer without an LLM). Both registered; `prompt_enhancer`/`rag`/`calendar`/`task_creator` remain unregistered stubs.
+- ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), and `task_creator` (`stream=True`) — parses the message into `TaskOps` and runs each op through the **`genie-tasks` MCP** (`app/mcp/`), emitting `task_created`/`task_updated`/`tasks_archived`. All registered. `prompt_enhancer`/`rag`/`calendar` remain unregistered stubs. `app/agents/events.py:emit()` is the shared custom-event helper.
+- ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 7 task-CRUD tools (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
+- ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing.
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar`/`task_creator` agents, parallel fan-out, memory (`short_term`/`long_term`/`manager`), workers, rate limiting, token-usage write-back to `GenieState` mid-run
@@ -1533,13 +1558,13 @@ _Last updated: 2026-08-31 — application-wide structured logging (§21): `struc
 - ✅ **Light/dark theme** — `next-themes` (`ThemeProvider` outermost in `layout.tsx`, `attribute="class"`, system default); `ThemeToggle` in the nav; global (also themes `/chat`, `/tasks`, Clerk pages). Dark palette = deep violet-black + violet glow.
 - ✅ `(app)/` group — `Sidebar`: nav block (**New chat** · **Projects** · **Tasks**, same style) then the **Chats** list (always below every nav item, recency-ordered `useConversations`, active-highlight, hover-to-delete), then `BackendStatus` + Clerk `UserButton` pinned at the bottom.
 - ✅ Chat — `/chat` (new) and `/chat/[id]` (a conversation); `ChatView` + `useChat(conversationId?)` is **route-driven** (loads `GET /conversations/{id}` on nav; on the first message of a new chat it POSTs, learns the id, `router.replace('/chat/<id>')`, invalidates the sidebar list; the SSE `title` event refreshes the sidebar). Streams tokens live, input locked mid-turn. Each `Message` has a sender label — "GENIE" brand-gradient + sparkle, or the user's Clerk first name. **Empty state** = a vertically-centred greeting (`GreetingHeadline`: "What can Genie _<two words>_?" — the two words swap every 3.2s with a fade, `prefers-reduced-motion`-safe) above a centred composer; project chats show "New chat in _<name>_" instead.
-- ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
+- ✅ `/tasks` — `TaskBoard`: 3 columns from `useTasks`, **HTML5 drag** a card between columns (`usePatchTask`), **"Archive done"** button (`useArchiveDone`), collapsible **"Archived (N)"**, card → **`TaskModal`** (status, linked chat `/chat/<id>`, editable description, delete). `useChat` invalidates `["tasks"]` on `task_created`/`task_updated`/`tasks_archived`.
 - ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" while the agent is in flight → "🔍 Searched the web" once done). `AgentActivity` now only renders the *unclaimed* active agents (an agent running before its message exists) as a pill at the **tail of the message list**. `plan` events typed but not rendered.
 - ✅ **Multi-message turns** — `useChat` tracks a `currentId`; `message_break` finalises the current assistant bubble and starts a new one, `message_agents` tags it. A greeting + answer render as two captioned bubbles, matching the two persisted `messages` rows (with `metadata.agents`) on reload.
 - ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
 - ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).
-- ⬜ `useTasks` (enabled), conversation rename/search, per-project model settings, project knowledge docs
+- ⬜ conversation rename/search, per-project model settings, project knowledge docs, live optimistic task board (SSE currently just invalidates the query)
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.
@@ -1574,6 +1599,8 @@ _Last updated: 2026-08-31 — application-wide structured logging (§21): `struc
 | User DB record | `db/models/user.py` + `db/repositories/user_repo.py` |
 | Clerk JWKS cache tuning | `JWKS_CACHE_TTL_SECONDS` env var (default 3600) |
 | Add a new agent | `agents/{name}/agent.py` (`run_{name}`) + an `AgentSpec` in `agents/registry.py` |
+| Add a new MCP server | `app/mcp/{name}_server.py` (FastMCP) + a `call_{name}_tool` in `app/mcp/client.py` — see §22 |
+| Task board logic | `services/task_service.py` (REST + MCP both call it) · tools `app/mcp/tasks_server.py` |
 | Change routing logic | `agents/supervisor/nodes.py:supervisor_node` + `SUPERVISOR_SYSTEM_PROMPT` in `supervisor/prompts.py` (menu auto-built from the registry) |
 | Modify hybrid search weights | `agents/rag/retriever.py` → `fts_weight`, `semantic_weight` params |
 | Add a new API endpoint | `api/v1/endpoints/{resource}.py` + register in `api/v1/router.py` |
@@ -1638,8 +1665,12 @@ able to reconstruct a request from the logs alone.
   `supervisor_planned` (steps + rationale), `executor_start`, `agent_run_start` /
   `agent_run_done` (`duration_ms`, sources) / `agent_run_failed`,
   `synthesiser_compose` / `synthesiser_done`, `validator_verdict`,
-  `validator_replan`. `greeting` / `web_search` / `tavily_search` log their own
-  steps; `agents/models.py` logs every model build.
+  `validator_replan`. `greeting` / `web_search` / `tavily_search` /
+  `task_creator` (`task_creator_parsed`, per-op) log their own steps;
+  `agents/models.py` logs every model build.
+- **MCP / tasks** — `app/mcp/client.py`: `mcp_tool_call` / `mcp_tool_result`;
+  each tool + `task_service` + `task_repo` log their ops; `chat_service` logs the
+  forwarded `chat_task_created` / `chat_task_updated` / `chat_tasks_archived`.
 - **DB** — `db/repositories/base.py`: `db_insert` on every write;
   `db_get_by_id` / `*_listed` at debug. Each repo logs its mutations
   (`conversation_created`, `message_persisted`, `project_updated`, `user_*`).
@@ -1656,3 +1687,47 @@ able to reconstruct a request from the logs alone.
 Datadog agent + `ddtrace` (APM), log-based metrics/monitors, trace-id
 correlation with LangSmith, and structured logging in the Phase 2/3 stubs
 (`workers/*`, `memory/*`, `services/document_service.py`) as they are built.
+The MCP layer (§22) already logs each tool call in/out.
+
+---
+
+## 22. MCP Layer
+
+> Genie exposes some capabilities as **MCP** (Model Context Protocol) tool
+> servers built with **FastMCP** (`fastmcp>=3`, `requirements.txt` §3). Agents
+> call them; external MCP clients (Claude Desktop, …) can too, later.
+
+### 22.1 Shape
+
+```
+app/mcp/
+├── __init__.py
+├── tasks_server.py   ← FastMCP("genie-tasks") — task-board CRUD as @mcp.tool funcs
+└── client.py         ← call_tasks_tool(name, args) — in-process, in-memory transport
+```
+
+- **In-process (now)** — `app/mcp/client.py` does `async with Client(<server>)`
+  which uses FastMCP's **in-memory** transport: same process, no socket, no
+  subprocess. The `task_creator` agent calls `call_tasks_tool(...)`.
+- **Standalone (later)** — `uv run python -m app.mcp.tasks_server` serves the same
+  `mcp` object over **streamable-HTTP** on `TASKS_MCP_HOST:TASKS_MCP_PORT`
+  (default `127.0.0.1:8765`) for external MCP clients. No auth on that transport
+  yet — out of scope.
+
+### 22.2 Rules
+
+- **Stateless tools.** Every tool takes the ids it needs as explicit args
+  (`user_id` always — the agent passes `GenieState['user_id']`). Each tool opens
+  its own DB session (`get_sessionmaker()()`) and delegates to a **service**
+  (`app/services/task_service.py`) — never the repo directly, never business
+  logic in the tool body.
+- **Log every call** — `client.py` logs `mcp_tool_call` / `mcp_tool_result`;
+  each tool logs its own `mcp_*` line (§21).
+- Return plain JSON-able dicts (`task_service.to_dict`).
+
+### 22.3 Add a new MCP server
+
+1. `app/mcp/<name>_server.py` — `mcp = FastMCP("genie-<name>", instructions=…)`,
+   `@mcp.tool` async funcs → a service, plus a `main()` / `__main__` entrypoint.
+2. `app/mcp/client.py` — a `call_<name>_tool(...)` helper (or generalise).
+3. Tests in `tests/mcp/` — `async with Client(mcp)` with the service faked.

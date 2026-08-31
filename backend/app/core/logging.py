@@ -112,6 +112,11 @@ _NOISY_LOGGERS: dict[str, int] = {
     "watchfiles": logging.WARNING,
     "langsmith": logging.WARNING,
     "sqlalchemy.engine": logging.WARNING,
+    "mcp": logging.WARNING,
+    "mcp.server": logging.WARNING,
+    "mcp.server.lowlevel.server": logging.WARNING,
+    "FastMCP": logging.WARNING,
+    "fastmcp": logging.WARNING,
 }
 
 

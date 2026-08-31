@@ -16,6 +16,7 @@ import structlog
 from app.agents.base import AgentResult
 from app.agents.greeting.agent import run_greeting
 from app.agents.supervisor.state import GenieState, TaskRecord
+from app.agents.task_creator.agent import run_task_creator
 from app.agents.web_search.agent import run_web_search
 
 logger = structlog.get_logger(__name__)
@@ -53,6 +54,18 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
             "anything needing up-to-date or external information."
         ),
         runner=run_web_search,
+    ),
+    "task_creator": AgentSpec(
+        name="task_creator",
+        description=(
+            "Manages the user's task board (To Do / In Progress / Done). Use when "
+            "the message asks to add / create a to-do or task ('add X to my todo', "
+            "'add to tasks', 'remind me to X'), move / start / finish a task "
+            "('start the report task', 'mark it done', 'move X to in progress'), "
+            "list their tasks, or archive finished tasks."
+        ),
+        runner=run_task_creator,
+        stream=True,
     ),
 }
 
