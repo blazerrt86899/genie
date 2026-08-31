@@ -48,7 +48,7 @@ async def run_greeting(state: GenieState, task: TaskRecord) -> AgentResult:  # n
     fallback = TEMPLATE_GREETINGS[bucket]
 
     if not settings.llm_configured:
-        return AgentResult(summary=fallback)
+        return AgentResult(summary=fallback, stream=True)
 
     try:
         model = get_utility_model(temperature=0.7, max_tokens=80)
@@ -57,7 +57,7 @@ async def run_greeting(state: GenieState, task: TaskRecord) -> AgentResult:  # n
             [SystemMessage(content=system), HumanMessage(content=_last_user_text(state) or "Hello")]
         )
         text = str(resp.content).strip()
-        return AgentResult(summary=text or fallback)
+        return AgentResult(summary=text or fallback, stream=True)
     except Exception:  # noqa: BLE001 — greeting must never break a turn
         logger.warning("greeting_llm_failed", exc_info=True)
-        return AgentResult(summary=fallback)
+        return AgentResult(summary=fallback, stream=True)

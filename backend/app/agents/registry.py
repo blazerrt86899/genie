@@ -30,9 +30,11 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
     "greeting": AgentSpec(
         name="greeting",
         description=(
-            "Greets the user with a warm, time-of-day-aware hello. Use for any "
-            "message that is primarily a greeting or small talk (hi, hello, good "
-            "morning, how are you). Handles ONLY the greeting."
+            "Greets the user with a warm, time-of-day-aware hello. Use whenever "
+            "the message contains a greeting or pleasantry (hi, hello, good "
+            "morning, how are you, thanks) — even if it also asks for something "
+            "else in the same message. Handles ONLY the greeting portion, never "
+            "the request itself."
         ),
         runner=run_greeting,
     ),

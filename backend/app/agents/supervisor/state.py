@@ -37,7 +37,8 @@ class GenieState(TypedDict):
     plan: list[TaskRecord]  # the task ledger — supervisor writes, executor updates
     supervisor_turns: int  # how many times the supervisor has planned this run
     active_agents: list[str]  # currently running (surfaced to the UI)
-    intermediate_results: dict[str, Any]  # keyed by agent name
+    intermediate_results: dict[str, Any]  # {task_id: {agent, summary, detail, sources, streamed}}
+    streamed_segments: list[str]  # agent outputs already shown to the user, in order
     final_response: str | None
     validation: dict[str, Any] | None  # {"approved": bool, "issues": [...]}
     token_usage: dict[str, int]  # {"total": N, "by_agent": {...}}

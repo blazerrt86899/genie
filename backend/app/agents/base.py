@@ -17,8 +17,14 @@ class AgentResult:
     ledger (``TaskRecord.result``) and is handed to the synthesiser. ``detail``
     is optional longer context; ``sources`` are ``{"title", "url"}`` dicts the
     synthesiser can cite.
+
+    ``stream=True`` means the summary is already user-ready and should be shown
+    to the user the moment this step finishes (before later steps run) — the
+    synthesiser then composes only the remaining, non-streamed findings and does
+    not repeat it. Use for short, final outputs like a greeting.
     """
 
     summary: str
     detail: str | None = None
     sources: list[dict] = field(default_factory=list)
+    stream: bool = False

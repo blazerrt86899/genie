@@ -131,6 +131,7 @@ async def _generate(
         "supervisor_turns": 0,
         "active_agents": [],
         "intermediate_results": {},
+        "streamed_segments": [],
         "final_response": None,
         "validation": None,
         "token_usage": {"total": 0, "by_agent": {}},
@@ -142,6 +143,7 @@ async def _generate(
     total_tokens = 0
     langsmith_run_id: str | None = None
     answer_parts: list[str] = []
+    synth_started = False
     async for event in graph.astream_events(state, config=config, version="v2"):
         # The first event with no parent is the root graph run — its id is the
         # LangSmith trace id (when tracing is enabled).
@@ -156,6 +158,11 @@ async def _generate(
                 continue
             chunk = event["data"]["chunk"].content
             if chunk:
+                if not synth_started:
+                    synth_started = True
+                    if answer_parts:  # a segment was already streamed — separate it
+                        answer_parts.append("\n\n")
+                        yield format_sse_event("token", content="\n\n"), None
                 answer_parts.append(chunk)
                 yield format_sse_event("token", content=chunk), None
         elif kind == "on_chat_model_end":
@@ -175,6 +182,14 @@ async def _generate(
                 ), None
             elif name == "plan":
                 yield format_sse_event("plan", steps=data.get("steps", [])), None
+            elif name == "segment":
+                # an agent's output that's ready to show now (e.g. the greeting),
+                # streamed ahead of the composed answer so the user stays engaged
+                seg = str(data.get("text") or "")
+                if seg:
+                    piece = seg if not answer_parts else f"\n\n{seg}"
+                    answer_parts.append(piece)
+                    yield format_sse_event("token", content=piece), None
 
     answer = "".join(answer_parts)
     if not answer:

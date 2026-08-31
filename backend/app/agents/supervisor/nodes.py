@@ -64,20 +64,26 @@ def _ledger_text(plan: list[TaskRecord]) -> str:
     return LEDGER_PREFACE.format(ledger_body=body)
 
 
+_MAX_PLAN_STEPS = 6
+
+
 def _plan_to_ledger(steps: list[PlanStep]) -> list[TaskRecord]:
     """Validate the LLM's plan → an executable ledger.
 
-    Drops steps for unknown agents and any repeat of an agent already in the
-    plan (CLAUDE.md §16), then remaps 1-based ``depends_on`` positions to the
-    surviving task ids.
+    Drops steps for unknown agents and exact (agent, description) repeats; an
+    agent MAY appear more than once for genuinely distinct sub-tasks. Caps the
+    plan at ``_MAX_PLAN_STEPS`` and remaps 1-based ``depends_on`` → task ids.
     """
     kept: list[tuple[int, PlanStep]] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for idx, step in enumerate(steps, start=1):
-        if step.agent not in KNOWN_AGENTS or step.agent in seen:
+        key = (step.agent, step.description.strip().lower())
+        if step.agent not in KNOWN_AGENTS or key in seen:
             continue
-        seen.add(step.agent)
+        seen.add(key)
         kept.append((idx, step))
+        if len(kept) >= _MAX_PLAN_STEPS:
+            break
 
     orig_to_id = {orig: f"t{n}" for n, (orig, _) in enumerate(kept, start=1)}
     ledger: list[TaskRecord] = []
@@ -97,16 +103,23 @@ def _plan_to_ledger(steps: list[PlanStep]) -> list[TaskRecord]:
     return ledger
 
 
-def _format_findings(results: dict) -> str:
+def _format_findings(plan: list[TaskRecord], results: dict) -> str:
+    """Render non-streamed findings in plan order, with globally-numbered sources."""
     blocks: list[str] = []
-    for agent, r in results.items():
-        block = f"## {agent}\n{r.get('summary', '')}"
+    src_no = 0
+    for task in plan:
+        r = results.get(task["id"])
+        if not r or r.get("streamed"):
+            continue
+        block = f"## Step: {task['description']} (agent: {r.get('agent', task['agent'])})\n"
+        block += r.get("summary", "") or ""
         sources = r.get("sources") or []
         if sources:
-            block += "\n\nSources:\n" + "\n".join(
-                f"[{i}] {s.get('title', '')} — {s.get('url', '')}"
-                for i, s in enumerate(sources, start=1)
-            )
+            lines = []
+            for s in sources:
+                src_no += 1
+                lines.append(f"[{src_no}] {s.get('title', '')} — {s.get('url', '')}")
+            block += "\n\nSources:\n" + "\n".join(lines)
         blocks.append(block)
     return "\n\n".join(blocks)
 
@@ -149,11 +162,18 @@ async def supervisor_node(state: GenieState) -> dict:
 async def executor_node(state: GenieState) -> dict:
     plan: list[TaskRecord] = [dict(t) for t in (state.get("plan") or [])]  # type: ignore[misc]
     results = dict(state.get("intermediate_results") or {})
+    segments = list(state.get("streamed_segments") or [])
     if not plan:
-        return {"plan": plan, "intermediate_results": results, "active_agents": []}
+        return {
+            "plan": plan,
+            "intermediate_results": results,
+            "streamed_segments": segments,
+            "active_agents": [],
+        }
 
     # A live view so a later agent can read an earlier one's ledger + results.
     state = {**state, "plan": plan, "intermediate_results": results}
+    await _emit("plan", {"steps": plan})
     done = {t["id"] for t in plan if t["status"] == "done"}
     progressed = True
     while progressed:
@@ -171,12 +191,18 @@ async def executor_node(state: GenieState) -> dict:
                 res = await spec.runner(state, task)  # type: ignore[arg-type]
                 task["status"] = "done"
                 task["result"] = res.summary
-                results[task["agent"]] = {
+                results[task["id"]] = {
+                    "agent": task["agent"],
                     "summary": res.summary,
                     "detail": res.detail,
                     "sources": res.sources,
+                    "streamed": bool(res.stream),
                 }
                 done.add(task["id"])
+                if res.stream and res.summary.strip():
+                    # user-ready now — show it before the remaining steps run
+                    segments.append(res.summary.strip())
+                    await _emit("segment", {"agent": task["agent"], "text": res.summary.strip()})
             except Exception as exc:  # noqa: BLE001
                 task["status"] = "failed"
                 task["error"] = str(exc)
@@ -184,34 +210,57 @@ async def executor_node(state: GenieState) -> dict:
             await _emit("agent_end", {"agent": task["agent"], "status": task["status"]})
 
     await _emit("plan", {"steps": plan})
-    return {"plan": plan, "intermediate_results": results, "active_agents": []}
+    return {
+        "plan": plan,
+        "intermediate_results": results,
+        "streamed_segments": segments,
+        "active_agents": [],
+    }
+
+
+def _with_project(system: str, state: GenieState) -> str:
+    instructions = state.get("project_instructions")
+    if instructions:
+        return f"{system}\n\n---\nProject instructions (follow these):\n{instructions}"
+    return system
 
 
 async def synthesiser_node(state: GenieState) -> dict:
     plan = state.get("plan") or []
     results = state.get("intermediate_results") or {}
+    segments = list(state.get("streamed_segments") or [])
+    prefix = "\n\n".join(segments)
 
-    # Fast path: a pure greeting — relay it verbatim, no LLM round-trip.
-    if (
-        len(plan) == 1
-        and plan[0]["agent"] == "greeting"
-        and plan[0]["status"] == "done"
-        and plan[0].get("result")
-    ):
-        text = str(plan[0]["result"])
-        return {"messages": [AIMessage(content=text)], "final_response": text}
+    has_composable = any(
+        results.get(t["id"]) and not results[t["id"]].get("streamed") for t in plan
+    )
 
-    system = SYNTHESISER_SYSTEM_PROMPT if results else CHAT_SYSTEM_PROMPT
-    if state.get("project_instructions"):
-        system += f"\n\n---\nProject instructions (follow these):\n{state['project_instructions']}"
+    # Nothing left for the LLM to compose.
+    if not has_composable:
+        if prefix:  # e.g. a lone greeting — already shown, just finalise it
+            return {"messages": [AIMessage(content=prefix)], "final_response": prefix}
+        # No agents ran → answer the user directly.
+        model = get_chat_model(streaming=True)
+        resp = await model.ainvoke(
+            [SystemMessage(content=_with_project(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
+        )
+        return {"messages": [resp], "final_response": str(resp.content)}
 
-    convo = list(state["messages"])
-    if results:
-        convo.append(SystemMessage(content="Agent findings:\n" + _format_findings(results)))
+    system = _with_project(SYNTHESISER_SYSTEM_PROMPT, state)
+    findings = _format_findings(plan, results)
+    if prefix:
+        findings = (
+            f"The user has ALREADY been shown this (do not repeat it, do not greet "
+            f"again):\n{prefix}\n\n---\n{findings}"
+        )
 
+    convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
     model = get_chat_model(streaming=True)
     resp = await model.ainvoke([SystemMessage(content=system), *convo])
-    return {"messages": [resp], "final_response": str(resp.content)}
+
+    body = str(resp.content)
+    full = f"{prefix}\n\n{body}" if prefix else body
+    return {"messages": [AIMessage(content=full)], "final_response": full}
 
 
 async def validator_node(state: GenieState) -> dict:

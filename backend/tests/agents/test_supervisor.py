@@ -12,6 +12,7 @@ from app.agents.supervisor.nodes import (
     executor_node,
     route_after_validator,
     supervisor_node,
+    synthesiser_node,
     validator_node,
 )
 from app.agents.supervisor.state import PlanStep, SupervisorPlan
@@ -21,11 +22,11 @@ from langgraph.graph import END
 # ─── plan validation ─────────────────────────────────────────────────────────
 
 
-def test_plan_drops_unknown_and_duplicate_agents_and_remaps_deps() -> None:
+def test_plan_drops_unknown_and_exact_dupes_and_remaps_deps() -> None:
     steps = [
         PlanStep(description="greet", agent="greeting"),
         PlanStep(description="ignored", agent="bogus"),
-        PlanStep(description="dup", agent="greeting"),
+        PlanStep(description="greet", agent="greeting"),  # exact dupe → dropped
         PlanStep(description="search", agent="web_search", depends_on=[1]),
     ]
     ledger = _plan_to_ledger(steps)
@@ -33,6 +34,21 @@ def test_plan_drops_unknown_and_duplicate_agents_and_remaps_deps() -> None:
     assert ledger[0]["id"] == "t1"
     assert ledger[1]["depends_on"] == ["t1"]
     assert all(t["status"] == "pending" for t in ledger)
+
+
+def test_plan_allows_one_agent_across_distinct_tasks() -> None:
+    steps = [
+        PlanStep(description="weather in Mussoorie", agent="web_search"),
+        PlanStep(description="latest Artemis news", agent="web_search"),
+    ]
+    ledger = _plan_to_ledger(steps)
+    assert [t["agent"] for t in ledger] == ["web_search", "web_search"]
+    assert [t["id"] for t in ledger] == ["t1", "t2"]
+
+
+def test_plan_is_capped() -> None:
+    steps = [PlanStep(description=f"q{i}", agent="web_search") for i in range(20)]
+    assert len(_plan_to_ledger(steps)) == 6
 
 
 # ─── supervisor node ─────────────────────────────────────────────────────────
@@ -89,7 +105,7 @@ async def test_executor_runs_agents_in_dependency_order(monkeypatch) -> None:
 
     async def run_b(state, _task):
         calls.append("b")
-        assert state["intermediate_results"]["a"]["summary"] == "A done"
+        assert state["intermediate_results"]["t1"]["summary"] == "A done"
         return AgentResult(summary="B done", sources=[{"title": "x", "url": "http://x"}])
 
     monkeypatch.setattr(
@@ -121,7 +137,8 @@ async def test_executor_runs_agents_in_dependency_order(monkeypatch) -> None:
     assert calls == ["a", "b"]
     assert [t["status"] for t in out["plan"]] == ["done", "done"]
     assert out["plan"][0]["result"] == "A done"
-    assert out["intermediate_results"]["b"]["sources"][0]["url"] == "http://x"
+    assert out["intermediate_results"]["t2"]["sources"][0]["url"] == "http://x"
+    assert out["intermediate_results"]["t2"]["agent"] == "b"
     assert ("agent_start", "a") in events and ("agent_end", "b") in events
 
 
@@ -144,6 +161,77 @@ async def test_executor_marks_failed_agent(monkeypatch) -> None:
     out = await executor_node(state)
     assert out["plan"][0]["status"] == "failed"
     assert "kaboom" in out["plan"][0]["error"]
+
+
+async def test_executor_streams_a_segment_for_stream_results(monkeypatch) -> None:
+    emitted: list[tuple[str, dict]] = []
+
+    async def run_hi(_state, _task):
+        return AgentResult(summary="Good evening!", stream=True)
+
+    async def run_search(_state, _task):
+        return AgentResult(summary="It is 22°C.")
+
+    async def fake_emit(name, data):
+        emitted.append((name, data))
+
+    monkeypatch.setattr(
+        nodes,
+        "AGENT_REGISTRY",
+        {
+            "greeting": registry.AgentSpec("greeting", "", run_hi),
+            "web_search": registry.AgentSpec("web_search", "", run_search),
+        },
+    )
+    monkeypatch.setattr(nodes, "_emit", fake_emit)
+
+    state = {
+        "plan": [
+            {"id": "t1", "description": "greet", "agent": "greeting", "status": "pending",
+             "depends_on": [], "result": None, "error": None},
+            {"id": "t2", "description": "weather", "agent": "web_search", "status": "pending",
+             "depends_on": [], "result": None, "error": None},
+        ],
+        "intermediate_results": {},
+        "messages": [],
+    }
+    out = await executor_node(state)
+    assert out["streamed_segments"] == ["Good evening!"]
+    assert ("segment", {"agent": "greeting", "text": "Good evening!"}) in emitted
+    assert out["intermediate_results"]["t1"]["streamed"] is True
+    assert out["intermediate_results"]["t2"]["streamed"] is False
+
+
+async def test_synthesiser_keeps_streamed_greeting_and_composes_rest(monkeypatch) -> None:
+    seen: dict = {}
+
+    class FakeModel:
+        async def ainvoke(self, messages):
+            seen["prompt"] = "\n".join(str(m.content) for m in messages)
+            return SimpleNamespace(content="It is 22°C in Mussoorie [1].")
+
+    monkeypatch.setattr(nodes, "get_chat_model", lambda **_: FakeModel())
+
+    state = {
+        "messages": [HumanMessage(content="hi, weather in Mussoorie?")],
+        "streamed_segments": ["Good evening!"],
+        "plan": [
+            {"id": "t1", "agent": "greeting", "description": "greet", "status": "done",
+             "depends_on": [], "result": "Good evening!", "error": None},
+            {"id": "t2", "agent": "web_search", "description": "weather", "status": "done",
+             "depends_on": [], "result": "22C", "error": None},
+        ],
+        "intermediate_results": {
+            "t1": {"agent": "greeting", "summary": "Good evening!", "streamed": True,
+                   "sources": [], "detail": None},
+            "t2": {"agent": "web_search", "summary": "22C", "streamed": False,
+                   "sources": [{"title": "wx", "url": "http://wx"}], "detail": None},
+        },
+    }
+    out = await synthesiser_node(state)
+    assert out["final_response"].startswith("Good evening!\n\n")
+    assert "22°C" in out["final_response"]
+    assert "already been shown" in seen["prompt"].lower()
 
 
 # ─── validator + routing ─────────────────────────────────────────────────────

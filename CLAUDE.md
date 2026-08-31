@@ -1042,10 +1042,25 @@ graph.add_conditional_edges("validator", route_after_validator,
                             {"supervisor": "supervisor", END: END})  # capped re-plan loop
 ```
 Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
-`interrupt_before` yet (calendar agent not built). The `executor` runs agents
-**sequentially** (a later agent sees an earlier one's `intermediate_results`) and
-`adispatch_custom_event`s `agent_start` / `agent_end` / `plan` — surfaced as SSE.
-Only the **synthesiser's** tokens stream to the client.
+`interrupt_before` yet (calendar agent not built).
+
+**Executor** runs agents **sequentially** in dependency order — a later agent
+sees earlier `intermediate_results` (keyed by **task id**, not agent name, so an
+agent can appear in several steps for distinct sub-tasks; `_plan_to_ledger` only
+drops exact `(agent, description)` repeats and caps the plan at 6). It
+`adispatch_custom_event`s `agent_start` / `agent_end` / `plan`, and — for an
+`AgentResult(stream=True)` (e.g. the greeting) — a **`segment`** event carrying
+that step's output, emitted the moment the step finishes so the user sees it
+before later steps run.
+
+**Synthesiser** composes the final reply from the non-streamed findings; already
+-streamed segments are passed in as "already shown — don't repeat / don't greet
+again" and prepended to the result. Lone greeting ⇒ it just finalises the
+segment (no LLM). Empty plan ⇒ it answers the user directly.
+
+`chat_service` turns `segment` events into `token` frames (so the greeting
+streams ahead of the composed answer) and streams only the **synthesiser's**
+model tokens after that.
 
 ---
 
@@ -1088,7 +1103,9 @@ async def hybrid_retrieve(
 > `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `done` carries
 > `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `task_created` /
 > `interrupt` arrive with their features. The stream **always** ends with `done`,
-> even after an `error` (§16).
+> even after an `error` (§16). Internally the executor also emits a `segment`
+> custom event for an already-user-ready agent output (greeting); `chat_service`
+> forwards it to the client as `token` frames, so the frontend needs no new type.
 
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
@@ -1388,7 +1405,7 @@ tests/
 ```
 
 ### Key Test Assertions
-- Supervisor NEVER routes to same agent twice in one run
+- Supervisor never emits an exact `(agent, description)` step twice; an agent may recur for genuinely distinct sub-tasks (plan capped at 6)
 - RAG retriever ALWAYS includes `user_id` filter
 - Memory consolidation is idempotent (running twice produces same state)
 - Token budget enforced: graph stops routing at 50k tokens
@@ -1463,7 +1480,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — real supervisor graph (supervisor→executor→synthesiser→validator, capped re-plan loop) + agent registry; greeting & web_search (Tavily) agents; `agent_start`/`agent_end`/`plan` SSE wired to the AgentActivity strip._
+_Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting & web_search (Tavily) agents. Supervisor now splits multi-intent messages into ordered per-agent steps (greeting + request → 2 steps; an agent may recur for distinct sub-tasks); greeting streams to the user ahead of the composed answer (`segment` SSE); `agent_start`/`agent_end`/`plan` drive the AgentActivity strip._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1488,8 +1505,8 @@ _Last updated: 2026-08-31 — real supervisor graph (supervisor→executor→syn
 - ✅ Dev user row seeded on startup **only when Clerk is unconfigured**
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
-- ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result); `executor` runs registered agents **sequentially** through `AGENT_REGISTRY` in dependency order, a later agent seeing earlier `intermediate_results`; `synthesiser` composes the one streamed reply (verbatim fast-path for a lone greeting); `validator` is minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2). `adispatch_custom_event` → `agent_start`/`agent_end`/`plan`.
-- ✅ **Agents** — `greeting` (time-of-day from `client_hour`, cheap LLM + template fallback) and `web_search` (`tavily_search` → grounded summary + `sources`; falls back to Tavily's own answer without an LLM). Both registered; `prompt_enhancer`/`rag`/`calendar`/`task_creator` remain unregistered stubs.
+- ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting) are emitted as a `segment` event and shown immediately; `synthesiser` composes the rest and prepends the already-shown segments (told not to repeat/greet again). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2). Custom events → SSE `agent_start`/`agent_end`/`plan`/`segment`.
+- ✅ **Agents** — `greeting` (time-of-day from `client_hour`, cheap LLM + template fallback, `stream=True`) and `web_search` (`tavily_search` → grounded summary + `sources`; falls back to Tavily's own answer without an LLM). Both registered; `prompt_enhancer`/`rag`/`calendar`/`task_creator` remain unregistered stubs.
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar`/`task_creator` agents, parallel fan-out, memory (`short_term`/`long_term`/`manager`), workers, rate limiting, token-usage write-back to `GenieState` mid-run
