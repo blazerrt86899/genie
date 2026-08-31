@@ -226,19 +226,22 @@ def _with_project(system: str, state: GenieState) -> str:
 
 
 async def synthesiser_node(state: GenieState) -> dict:
+    """Compose the request answer. Streamed segments (e.g. the greeting) have
+    already been delivered to the user as their own message(s), so this node
+    NEVER repeats them — it only produces the answer to the request."""
     plan = state.get("plan") or []
     results = state.get("intermediate_results") or {}
     segments = list(state.get("streamed_segments") or [])
-    prefix = "\n\n".join(segments)
 
     has_composable = any(
         results.get(t["id"]) and not results[t["id"]].get("streamed") for t in plan
     )
 
-    # Nothing left for the LLM to compose.
+    # Nothing left to compose — the streamed segment(s) are the whole reply.
     if not has_composable:
-        if prefix:  # e.g. a lone greeting — already shown, just finalise it
-            return {"messages": [AIMessage(content=prefix)], "final_response": prefix}
+        if segments:
+            text = "\n\n".join(segments)
+            return {"messages": [AIMessage(content=text)], "final_response": text}
         # No agents ran → answer the user directly.
         model = get_chat_model(streaming=True)
         resp = await model.ainvoke(
@@ -248,19 +251,16 @@ async def synthesiser_node(state: GenieState) -> dict:
 
     system = _with_project(SYNTHESISER_SYSTEM_PROMPT, state)
     findings = _format_findings(plan, results)
-    if prefix:
-        findings = (
-            f"The user has ALREADY been shown this (do not repeat it, do not greet "
-            f"again):\n{prefix}\n\n---\n{findings}"
+    if segments:
+        findings += (
+            "\n\n(You have already sent the user a separate greeting message. Do "
+            "NOT greet again — reply straight to their request.)"
         )
 
     convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
     model = get_chat_model(streaming=True)
     resp = await model.ainvoke([SystemMessage(content=system), *convo])
-
-    body = str(resp.content)
-    full = f"{prefix}\n\n{body}" if prefix else body
-    return {"messages": [AIMessage(content=full)], "final_response": full}
+    return {"messages": [resp], "final_response": str(resp.content)}
 
 
 async def validator_node(state: GenieState) -> dict:

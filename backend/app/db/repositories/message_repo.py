@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -20,16 +21,21 @@ class MessageRepository(BaseRepository[Message]):
         role: str,
         content: str,
         metadata: dict | None = None,
+        created_at: datetime | None = None,
     ) -> Message:
-        return await self.add(
-            Message(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                role=role,
-                content=content,
-                message_metadata=metadata or {},
-            )
+        # ``created_at`` is normally the DB default (transaction ``now()``), which
+        # is identical for every row in one commit — pass an explicit value to
+        # keep several assistant messages from one turn in order.
+        msg = Message(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role=role,
+            content=content,
+            message_metadata=metadata or {},
         )
+        if created_at is not None:
+            msg.created_at = created_at
+        return await self.add(msg)
 
     async def list_for_conversation(
         self, conversation_id: uuid.UUID, limit: int = 200

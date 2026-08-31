@@ -60,7 +60,9 @@ class FakeMsgRepo:
 
     def __init__(self, _db) -> None: ...
 
-    async def add_message(self, conversation_id, user_id, role, content, metadata=None):
+    async def add_message(
+        self, conversation_id, user_id, role, content, metadata=None, created_at=None
+    ):
         FakeMsgRepo.added.append((role, content))
         FakeMsgRepo.last_metadata = metadata
         return SimpleNamespace(id=uuid.uuid4())
@@ -159,6 +161,58 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
     assert ("assistant", "Hello") in FakeMsgRepo.added
     assert FakeMsgRepo.last_metadata == {"langsmith_run_id": "trace-123"}
     assert f"run:{run_id}" not in redis.store  # consumed
+
+
+async def test_stream_turn_splits_segment_and_answer_into_two_messages(monkeypatch):
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="hi, weather?", conversation_id=None
+    )
+
+    async def fake_events(_state, config, version):  # noqa: ARG001
+        yield {
+            "event": "on_custom_event",
+            "name": "segment",
+            "parent_ids": [],
+            "data": {"agent": "greeting", "text": "Good evening!"},
+        }
+        for piece in ("It is ", "22C."):
+            yield {
+                "event": "on_chat_model_stream",
+                "parent_ids": [],
+                "metadata": {"langgraph_node": "synthesiser"},
+                "data": {"chunk": SimpleNamespace(content=piece)},
+            }
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(values={"messages": []})
+
+    monkeypatch.setattr(
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
+    )
+
+    frames = [
+        json.loads(f[6:])
+        async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
+    ]
+    assert [f["type"] for f in frames] == [
+        "token",
+        "message_break",
+        "token",
+        "token",
+        "title",
+        "done",
+    ]
+    assert [f["content"] for f in frames if f["type"] == "token"] == [
+        "Good evening!",
+        "It is ",
+        "22C.",
+    ]
+    assistant_msgs = [c for r, c in FakeMsgRepo.added if r == "assistant"]
+    assert assistant_msgs == ["Good evening!", "It is 22C."]
 
 
 async def test_stream_turn_unknown_run_emits_error_then_done():

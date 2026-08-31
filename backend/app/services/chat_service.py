@@ -1,9 +1,9 @@
 """Chat orchestration (CLAUDE.md §11).
 
-Interim: a single-node LangGraph ``chat`` graph, no supervisor/agents. Two-step
-flow — ``create_turn`` persists the user message and stashes the pending run in
-Redis; ``stream_turn`` runs the graph and streams SSE frames, then persists the
-assistant message.
+Two-step flow — ``create_turn`` persists the user message and stashes the pending
+run in Redis; ``stream_turn`` runs the supervisor graph and streams SSE frames,
+then persists the assistant reply. One turn can produce **several** assistant
+messages (e.g. a greeting, then the answer) — split on ``message_break`` frames.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from langchain_core.messages import HumanMessage
@@ -142,8 +143,8 @@ async def _generate(
 
     total_tokens = 0
     langsmith_run_id: str | None = None
-    answer_parts: list[str] = []
-    synth_started = False
+    parts: list[str] = [""]  # one entry per assistant message this turn
+    pending_break = False  # a completed segment is waiting for the next content
     async for event in graph.astream_events(state, config=config, version="v2"):
         # The first event with no parent is the root graph run — its id is the
         # LangSmith trace id (when tracing is enabled).
@@ -158,12 +159,11 @@ async def _generate(
                 continue
             chunk = event["data"]["chunk"].content
             if chunk:
-                if not synth_started:
-                    synth_started = True
-                    if answer_parts:  # a segment was already streamed — separate it
-                        answer_parts.append("\n\n")
-                        yield format_sse_event("token", content="\n\n"), None
-                answer_parts.append(chunk)
+                if pending_break:
+                    yield format_sse_event("message_break"), None
+                    parts.append("")
+                    pending_break = False
+                parts[-1] += chunk
                 yield format_sse_event("token", content=chunk), None
         elif kind == "on_chat_model_end":
             usage = getattr(event["data"].get("output"), "usage_metadata", None)
@@ -183,36 +183,48 @@ async def _generate(
             elif name == "plan":
                 yield format_sse_event("plan", steps=data.get("steps", [])), None
             elif name == "segment":
-                # an agent's output that's ready to show now (e.g. the greeting),
-                # streamed ahead of the composed answer so the user stays engaged
-                seg = str(data.get("text") or "")
+                # an agent's output that's ready now (e.g. the greeting) — its own
+                # assistant message, streamed ahead of the composed answer
+                seg = str(data.get("text") or "").strip()
                 if seg:
-                    piece = seg if not answer_parts else f"\n\n{seg}"
-                    answer_parts.append(piece)
-                    yield format_sse_event("token", content=piece), None
+                    if pending_break:
+                        yield format_sse_event("message_break"), None
+                        parts.append("")
+                        pending_break = False
+                    parts[-1] += seg
+                    yield format_sse_event("token", content=seg), None
+                    pending_break = True
 
-    answer = "".join(answer_parts)
-    if not answer:
-        # Greeting fast-path: the synthesiser returned a message without
-        # streaming. Pull the authoritative reply from the graph state and send
-        # it as a single token frame so the client renders it.
+    messages_out = [p.strip() for p in parts if p.strip()]
+    if not messages_out:
+        # Nothing streamed — recover the reply from the graph state.
         try:
             snapshot = await graph.aget_state(config)
             msgs = snapshot.values.get("messages", []) if snapshot else []
-            if msgs:
-                answer = str(msgs[-1].content)
+            text = str(msgs[-1].content).strip() if msgs else ""
+            if text:
+                messages_out = [text]
+                yield format_sse_event("token", content=text), None
         except Exception:  # noqa: BLE001
             logger.warning("chat_state_fetch_failed", run_id=run_id)
-        if answer:
-            yield format_sse_event("token", content=answer), None
+
+    answer = "\n\n".join(messages_out)
     title: str | None = None
-    if answer:
-        meta: dict = {}
-        if langsmith_run_id:
-            meta["langsmith_run_id"] = langsmith_run_id
-        await MessageRepository(db).add_message(
-            conversation.id, user.id, "assistant", answer, metadata=meta
-        )
+    if messages_out:
+        now = datetime.now(UTC)
+        last = len(messages_out) - 1
+        for i, part in enumerate(messages_out):
+            meta: dict = {}
+            if langsmith_run_id and i == last:
+                meta["langsmith_run_id"] = langsmith_run_id
+            await MessageRepository(db).add_message(
+                conversation.id,
+                user.id,
+                "assistant",
+                part,
+                metadata=meta,
+                created_at=now + timedelta(milliseconds=10 * i),
+            )
         await conv_repo.touch(conversation.id)
 
         # First real exchange in this chat → auto-title it (Claude-style heading).

@@ -202,7 +202,7 @@ async def test_executor_streams_a_segment_for_stream_results(monkeypatch) -> Non
     assert out["intermediate_results"]["t2"]["streamed"] is False
 
 
-async def test_synthesiser_keeps_streamed_greeting_and_composes_rest(monkeypatch) -> None:
+async def test_synthesiser_composes_only_the_request_not_the_greeting(monkeypatch) -> None:
     seen: dict = {}
 
     class FakeModel:
@@ -229,9 +229,9 @@ async def test_synthesiser_keeps_streamed_greeting_and_composes_rest(monkeypatch
         },
     }
     out = await synthesiser_node(state)
-    assert out["final_response"].startswith("Good evening!\n\n")
-    assert "22°C" in out["final_response"]
-    assert "already been shown" in seen["prompt"].lower()
+    # greeting is delivered as its own message — the synthesiser must NOT repeat it
+    assert out["final_response"] == "It is 22°C in Mussoorie [1]."
+    assert "greet again" in seen["prompt"].lower()
 
 
 # ─── validator + routing ─────────────────────────────────────────────────────

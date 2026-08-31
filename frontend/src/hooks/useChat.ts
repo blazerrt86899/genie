@@ -63,8 +63,10 @@ export function useChat(conversationId?: string, projectId?: string | null) {
 
       const s = useChatStore.getState();
       s.addMessage({ id: crypto.randomUUID(), role: "user", content: message });
-      const assistantId = crypto.randomUUID();
-      s.addMessage({ id: assistantId, role: "assistant", content: "", pending: true });
+      // One turn can produce several assistant messages (e.g. greeting, then the
+      // answer); `currentId` points at the one tokens currently flow into.
+      let currentId = crypto.randomUUID();
+      s.addMessage({ id: currentId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
 
       const token = await getToken();
@@ -94,24 +96,33 @@ export function useChat(conversationId?: string, projectId?: string | null) {
 
         await parseSseStream(res.body, (event) => {
           if (event.type === "token") {
-            s.appendToken(assistantId, event.content);
+            s.appendToken(currentId, event.content);
+          } else if (event.type === "message_break") {
+            s.setMessagePending(currentId, false);
+            currentId = crypto.randomUUID();
+            s.addMessage({
+              id: currentId,
+              role: "assistant",
+              content: "",
+              pending: true,
+            });
           } else if (event.type === "agent_start") {
             s.agentStarted(event.agent);
           } else if (event.type === "agent_end") {
             s.agentEnded(event.agent);
           } else if (event.type === "error") {
-            s.appendToken(assistantId, `\n\n⚠️ ${event.message}`);
+            s.appendToken(currentId, `\n\n⚠️ ${event.message}`);
           } else if (event.type === "title") {
             qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
           }
         });
       } catch (err) {
         s.appendToken(
-          assistantId,
+          currentId,
           `\n\n⚠️ ${err instanceof Error ? err.message : "Something went wrong"}`,
         );
       } finally {
-        s.setMessagePending(assistantId, false);
+        s.setMessagePending(currentId, false);
         s.setRunId(null);
         s.setActiveAgents([]);
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });

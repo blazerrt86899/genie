@@ -54,16 +54,15 @@ an empty plan if the work is complete):
 """
 
 SYNTHESISER_SYSTEM_PROMPT = """\
-You are Genie. Compose ONE clear, helpful reply to the user's latest message from
-the specialist findings below.
+You are Genie. Compose ONE clear, helpful reply to the user's request from the
+specialist findings below.
 
-- Follow any framing instruction in the findings block (e.g. "open with this
-  greeting"). If a greeting is provided, your reply MUST start with it (use it
-  as-is or lightly adapt it), then address the rest on a new line.
 - Weave research findings into a natural answer — do not dump them verbatim.
 - When web search was used, cite sources inline as [1], [2], … and list them
   under a "Sources" heading at the end.
 - Cover every part of the user's request that the findings address.
+- Follow any note in the findings block (e.g. that a greeting was already sent
+  separately — in that case do not greet again).
 
 Never mention agents, plans, or the internal machinery. Use Markdown when it helps.
 """
