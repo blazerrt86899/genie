@@ -28,6 +28,7 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 @router.post("/clerk", status_code=200)
 async def clerk_webhook(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
     if not settings.CLERK_WEBHOOK_SECRET:
+        logger.error("clerk_webhook_secret_missing")
         raise HTTPException(status_code=501, detail="CLERK_WEBHOOK_SECRET not configured")
 
     payload = await request.body()
@@ -41,11 +42,18 @@ async def clerk_webhook(request: Request, db: AsyncSession = Depends(get_db)) ->
         # signature raises ValueError (binascii), a wrong one WebhookVerificationError.
         Webhook(settings.CLERK_WEBHOOK_SECRET).verify(payload, headers)
     except (WebhookVerificationError, ValueError) as exc:
+        logger.warning("clerk_webhook_bad_signature", svix_id=headers["svix-id"], error=str(exc))
         raise HTTPException(status_code=400, detail="Invalid webhook signature") from exc
 
     event = json.loads(payload)
     event_type: str = event.get("type", "")
     data: dict = event.get("data") or {}
+    logger.info(
+        "clerk_webhook_received",
+        event_type=event_type,
+        svix_id=headers["svix-id"],
+        clerk_id=data.get("id"),
+    )
     repo = UserRepository(db)
 
     if event_type == "user.created":

@@ -156,7 +156,7 @@ These are non-negotiable. Do not violate them. Do not find clever workarounds.
 
 7. **User data isolation at every layer** — The RAG retriever, memory loader, and task queries ALL include `WHERE user_id = :user_id`. This is never optional. Write a test for this.
 
-8. **Observability from day one** — Every agent node emits a LangSmith trace. Every API request gets a `request_id` injected by middleware. Every SQS job gets a `job_id`. Logs are structured JSON.
+8. **Observability from day one** — Every module logs its every step through `structlog` (see §21 — event names, levels, `preview()` for user content, automatic secret redaction). Every agent node emits a LangSmith trace. Every API request gets a `request_id` injected by middleware. Every SQS job gets a `job_id`. Logs are structured JSON in prod, headed for Datadog.
 
 ---
 
@@ -258,7 +258,7 @@ genie/
 │           ├── redis.py               ← async Redis client singleton
 │           ├── streaming.py           ← SSE frame helpers (§11)
 │           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
-│           ├── logging.py             ← structlog JSON config
+│           ├── logging.py             ← structlog config + redact_processor + preview()/mask() (§21)
 │           ├── middleware.py          ← request_id injection, timing
 │           └── exceptions.py          ← Custom HTTP exception classes
 │
@@ -1440,10 +1440,11 @@ tests/
 # Type hints required on all function signatures
 # Repository pattern: no raw SQL outside app/db/repositories/
 
-# Log format (structured JSON via structlog)
-logger.info("agent_completed", agent="web_search", duration_ms=1240, user_id=user_id)
-
-# Never log: passwords, tokens, full message content (PII)
+# Logging — structlog, structured, every meaningful step (full policy in §21)
+logger = structlog.get_logger(__name__)
+logger.info("agent_run_done", agent="web_search", duration_ms=1240, sources=5)
+# user content → preview(text) or chars=len(text), never raw. Secrets are
+# auto-scrubbed by core/logging.py:redact_processor but don't log them on purpose.
 ```
 
 ### TypeScript Conventions
@@ -1495,7 +1496,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting & web_search (Tavily) agents. Supervisor splits multi-intent messages into ordered per-agent steps; the greeting is delivered as its **own** assistant message ahead of the answer; each assistant message is captioned above the bubble with the agent that produced it (SSE `message_agents`, live "Searching the web…" → "Searched the web"), replacing the bottom activity strip._
+_Last updated: 2026-08-31 — application-wide structured logging (§21): `structlog` step logs across middleware / auth / chat_service / the agent graph / repositories / startup, with an automatic secret-redaction processor and a `preview()` helper for user content; noisy third-party loggers pinned to WARNING. Datadog wiring is still pending._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1510,7 +1511,8 @@ _Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting &
 
 **Backend** (`@clerk/…` n/a — FastAPI + uv; deps in `backend/requirements.txt`)
 - ✅ App factory + lifespan (`main.py`): Redis ping, DB `SELECT 1`, `AsyncPostgresSaver.setup()` (non-fatal in dev)
-- ✅ `config.py` (pydantic-settings, all §6 vars), `core/logging.py` (structlog JSON), `core/middleware.py` (`request_id` + timing), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
+- ✅ `config.py` (pydantic-settings, all §6 vars), `core/middleware.py` (`request_id` + request lifecycle logs), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
+- ✅ **Application-wide logging** (§21) — `core/logging.py`: `structlog` (console in dev, JSON in prod), a `redact_processor` that scrubs secrets from every event, `preview()` for user content, noisy libs pinned to WARNING. Step logs across middleware, `core/clerk*`, `services/chat_service.py`, `agents/supervisor/nodes.py`, the greeting/web_search agents, `db/repositories/*`, `db/session.py`, and the `main.py` lifespan. **Datadog agent = pending.**
 - ✅ **LangSmith tracing** — `core/observability.py:configure_tracing()` (called first in the lifespan) copies `LANGSMITH_*` from Settings into `os.environ` so LangChain actually traces; each chat turn's root run id → `messages.metadata.langsmith_run_id` + the SSE `done` event.
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
 - ✅ **Chat**: `POST /chat` (persist user msg + stash run — incl. `client_hour` — in Redis) → `GET /chat/{id}/stream` SSE. Runs the real **supervisor graph** (`build_graph`: `supervisor → executor → synthesiser → validator`, capped re-plan loop) compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id`. `chat_service._generate` streams only the synthesiser's tokens, relays `agent_start`/`agent_end`/`plan` custom events as SSE, accumulates token usage, and falls back to `graph.aget_state` for the greeting fast-path (no streamed tokens). Both messages persist to `messages`.
@@ -1579,3 +1581,78 @@ _Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting &
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
+| Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |
+
+---
+
+## 21. Observability & Logging
+
+> **Datadog is the destination.** The Datadog agent will ship container stdout;
+> until it's wired, logs render to console (dev) / JSON (prod). Nothing about how
+> we log changes when Datadog lands — it just reads what's already emitted.
+
+### 21.1 The rule — log every step
+
+**Every module logs what flows through it.** When you write or change a feature,
+add `structlog` lines at each meaningful step — not one log per function, but one
+per *decision, external call, state transition, and error*. A reader should be
+able to reconstruct a request from the logs alone.
+
+- Get a logger per module: `logger = structlog.get_logger(__name__)`.
+- Structured only — `logger.info("event_name", key=value, …)`, never f-strings.
+  Event names are `snake_case`, past/near-tense, greppable
+  (`chat_turn_accepted`, `agent_run_done`, `web_search_results`).
+- **Levels**: `debug` = fine-grained trace (per-token, cache hits, model build);
+  `info` = the milestones of a request (accepted, planned, agent done, persisted,
+  completed); `warning` = handled-but-notable (fallback used, plan step dropped,
+  404, replan); `error` / `logger.exception(...)` = unhandled or config-broken.
+  Dev shows `debug`+, prod shows `info`+.
+- **Reference the variables that matter**: ids (`user_id`, `conversation_id`,
+  `run_id`, `task_id`), counts (`chars`, `tokens`, `sources`, `count`),
+  durations (`duration_ms`), decisions (`agent`, `status`, `via`, `reason`).
+- **Never log** raw user message bodies, full documents, or model outputs —
+  use `preview(text, limit=160)` from `core/logging.py` for a short single-line
+  excerpt, or just log `chars=len(text)`.
+- **Secrets are auto-scrubbed** but don't rely on it as a licence to log them:
+  `core/logging.py:redact_processor` runs on *every* event and masks any field
+  whose name is a known secret (`token`, `password`, `api_key`, `authorization`,
+  `*_secret`, `database_url`, `redis_url`, …) or whose value looks like a JWT /
+  `sk_…` / `Bearer …` / a URL with inline credentials. `total_tokens`,
+  `token_budget`, `token_usage` etc. are counts and pass through untouched. Add
+  new sensitive field names to `_SECRET_KEYS` / `_SECRET_SUFFIXES`.
+
+### 21.2 What already logs
+
+- **HTTP** — `core/middleware.py`: `request_started` / `request_completed`
+  (method, status, `duration_ms`, client) with a bound `request_id` +
+  `path` on every downstream log (`/health*` is silenced).
+- **Auth** — `core/clerk.py`: JWKS cache hit/fetch, token verified/expired/
+  invalid, `clerk_user_resolved` (`via` = redis_cache | db | autoprovision),
+  dev-user use. `core/clerk_api.py`: Backend-API fetch.
+- **Chat flow** — `services/chat_service.py`: `chat_create_turn_start` →
+  `chat_turn_accepted` → `chat_stream_start` → `chat_project_instructions_loaded`
+  → `chat_graph_invoke` → per-event (`chat_agent_start/end`, `chat_plan`,
+  `chat_segment`, `chat_model_call_done`) → `chat_graph_done` →
+  `message_persisted` (×N) → `chat_turn_completed`.
+- **Agent graph** — `agents/supervisor/nodes.py`: `supervisor_start` /
+  `supervisor_planned` (steps + rationale), `executor_start`, `agent_run_start` /
+  `agent_run_done` (`duration_ms`, sources) / `agent_run_failed`,
+  `synthesiser_compose` / `synthesiser_done`, `validator_verdict`,
+  `validator_replan`. `greeting` / `web_search` / `tavily_search` log their own
+  steps; `agents/models.py` logs every model build.
+- **DB** — `db/repositories/base.py`: `db_insert` on every write;
+  `db_get_by_id` / `*_listed` at debug. Each repo logs its mutations
+  (`conversation_created`, `message_persisted`, `project_updated`, `user_*`).
+  `db/session.py`: engine init (URL scrubbed), `db_session_rollback`.
+- **Startup** — `main.py`: `startup_begin` (which integrations are configured),
+  `agent_registry_loaded`, `redis_connected`, `database_connected`,
+  `checkpointer_ready`, `startup_complete`; `configure_tracing()` logs LangSmith
+  on/off.
+- Third-party noise (`httpx`, `httpcore`, `openai`, `sqlalchemy.engine`, …) is
+  pinned to WARNING in `core/logging.py:_NOISY_LOGGERS`.
+
+### 21.3 Still to wire
+
+Datadog agent + `ddtrace` (APM), log-based metrics/monitors, trace-id
+correlation with LangSmith, and structured logging in the Phase 2/3 stubs
+(`workers/*`, `memory/*`, `services/document_service.py`) as they are built.

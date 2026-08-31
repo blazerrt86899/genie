@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from app.core.clerk import get_current_user
 from app.db.models.user import User
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -26,6 +29,7 @@ async def read_me(user: User = Depends(get_current_user)) -> UserMe:
     The frontend calls this after sign-up and waits for 200 before redirecting
     to ``/chat`` (webhook race-condition guard — CLAUDE.md §7.8).
     """
+    logger.info("users_me", user_id=str(user.id))
     return UserMe(
         id=str(user.id),
         email=user.email,

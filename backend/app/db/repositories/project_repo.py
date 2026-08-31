@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import uuid
 
+import structlog
 from sqlalchemy import delete, func, select, update
 
 from app.db.models.conversation import Conversation
 from app.db.models.project import Project
 from app.db.repositories.base import BaseRepository
+
+logger = structlog.get_logger(__name__)
 
 _EDITABLE = {"name", "description", "instructions"}
 
@@ -23,7 +26,7 @@ class ProjectRepository(BaseRepository[Project]):
         description: str | None = None,
         instructions: str | None = None,
     ) -> Project:
-        return await self.add(
+        project = await self.add(
             Project(
                 user_id=user_id,
                 name=name,
@@ -31,6 +34,14 @@ class ProjectRepository(BaseRepository[Project]):
                 instructions=instructions,
             )
         )
+        logger.info(
+            "project_created",
+            project_id=str(project.id),
+            user_id=str(user_id),
+            name=name,
+            has_instructions=bool(instructions),
+        )
+        return project
 
     async def get_for_user(
         self, project_id: uuid.UUID, user_id: uuid.UUID
@@ -66,6 +77,12 @@ class ProjectRepository(BaseRepository[Project]):
                 .values(**values)
             )
             await self.db.commit()
+            logger.info(
+                "project_updated",
+                project_id=str(project_id),
+                user_id=str(user_id),
+                fields=sorted(values.keys()),
+            )
         return await self.get_for_user(project_id, user_id)
 
     async def delete_for_user(
@@ -77,4 +94,11 @@ class ProjectRepository(BaseRepository[Project]):
             )
         )
         await self.db.commit()
-        return (getattr(result, "rowcount", 0) or 0) > 0
+        deleted = (getattr(result, "rowcount", 0) or 0) > 0
+        logger.info(
+            "project_deleted",
+            project_id=str(project_id),
+            user_id=str(user_id),
+            deleted=deleted,
+        )
+        return deleted

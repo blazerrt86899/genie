@@ -21,6 +21,7 @@ _SYSTEM = (
 
 async def generate_title(user_msg: str, assistant_msg: str) -> str | None:
     if not settings.llm_configured:
+        logger.debug("title_skip", reason="llm_not_configured")
         return None
     try:
         model = ChatOpenAI(
@@ -39,7 +40,9 @@ async def generate_title(user_msg: str, assistant_msg: str) -> str | None:
             ]
         )
         raw = str(resp.content).strip().strip("\"'").rstrip(".").strip()
-        return raw[:60] or None
+        title = raw[:60] or None
+        logger.info("title_generated", model=settings.OPENAI_TITLE_MODEL, title=title)
+        return title
     except Exception as exc:  # noqa: BLE001
         logger.warning("title_generation_failed", error=str(exc))
         return None

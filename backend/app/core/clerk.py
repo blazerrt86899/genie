@@ -59,9 +59,16 @@ async def _get_jwks(redis: Redis, *, force_refresh: bool = False) -> dict:
     if not force_refresh:
         cached = await redis.get(_JWKS_KEY)
         if cached:
+            logger.debug("clerk_jwks_cache_hit", key=_JWKS_KEY)
             return json.loads(cached)
+    logger.info(
+        "clerk_jwks_fetching", domain=settings.clerk_domain, force_refresh=force_refresh
+    )
     jwks = await _fetch_jwks()
     await redis.setex(_JWKS_KEY, settings.JWKS_CACHE_TTL_SECONDS, json.dumps(jwks))
+    logger.info(
+        "clerk_jwks_cached", keys=len(jwks.get("keys", [])), ttl_s=settings.JWKS_CACHE_TTL_SECONDS
+    )
     return jwks
 
 
@@ -91,6 +98,7 @@ async def _verify_token(token: str, redis: Redis) -> dict:
 async def _resolve_user(payload: dict, db: AsyncSession, redis: Redis) -> User:
     clerk_id = payload.get("sub")
     if not clerk_id:
+        logger.warning("clerk_token_missing_sub", claims=sorted(payload.keys()))
         raise HTTPException(status_code=401, detail="Missing subject claim")
 
     repo = UserRepository(db)
@@ -98,13 +106,23 @@ async def _resolve_user(payload: dict, db: AsyncSession, redis: Redis) -> User:
 
     cached_id = await redis.get(cache_key)
     user = await repo.get_by_id(uuid.UUID(str(cached_id))) if cached_id else None
+    resolved_via = "redis_cache" if user else None
     if user is None:
         user = await repo.get_by_clerk_id(clerk_id)
+        resolved_via = "db" if user else None
     if user is None:
+        logger.info("clerk_user_autoprovision_start", clerk_id=clerk_id)
         user = await repo.create_from_clerk_token(payload)
+        resolved_via = "autoprovision"
 
     await redis.setex(cache_key, settings.CLERK_USER_CACHE_TTL_SECONDS, str(user.id))
     await repo.touch_last_active(user.id)
+    logger.info(
+        "clerk_user_resolved",
+        clerk_id=clerk_id,
+        user_id=str(user.id),
+        via=resolved_via,
+    )
     return user
 
 
@@ -115,18 +133,23 @@ async def get_current_user(
 ) -> User:
     if not settings.clerk_configured:
         if settings.is_production:
+            logger.error("clerk_not_configured_in_production")
             raise HTTPException(status_code=500, detail="Clerk is not configured")
+        logger.debug("clerk_dev_user_used", user_id=str(DEV_USER_ID))
         return _dev_user()
 
     if credentials is None:
+        logger.info("clerk_auth_missing_bearer")
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
     try:
         payload = await _verify_token(credentials.credentials, redis)
     except jwt.ExpiredSignatureError as exc:
+        logger.info("clerk_token_expired")
         raise HTTPException(status_code=401, detail="Token expired") from exc
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
         logger.info("clerk_token_invalid", error=str(exc))
         raise HTTPException(status_code=401, detail="Invalid token") from exc
 
+    logger.debug("clerk_token_verified", sub=payload.get("sub"))
     return await _resolve_user(payload, db, redis)

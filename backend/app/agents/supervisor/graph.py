@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.supervisor.nodes import (
@@ -21,8 +22,15 @@ from app.agents.supervisor.nodes import (
 )
 from app.agents.supervisor.state import GenieState
 
+logger = structlog.get_logger(__name__)
+
 
 def build_graph() -> StateGraph:
+    logger.info(
+        "graph_build",
+        nodes=["supervisor", "executor", "synthesiser", "validator"],
+        flow="START→supervisor→executor→synthesiser→validator→{supervisor|END}",
+    )
     graph = StateGraph(GenieState)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("executor", executor_node)
@@ -46,6 +54,10 @@ def set_runtime_graph(compiled: Any) -> None:
     """Called once from the FastAPI lifespan with the compiled+checkpointed graph."""
     global _runtime_graph
     _runtime_graph = compiled
+    logger.info(
+        "runtime_graph_set",
+        checkpointed=getattr(compiled, "checkpointer", None) is not None,
+    )
 
 
 def get_runtime_graph() -> Any:

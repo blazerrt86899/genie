@@ -32,17 +32,26 @@ def _query_for(state: GenieState, task: TaskRecord) -> str:
 
 async def run_web_search(state: GenieState, task: TaskRecord) -> AgentResult:
     if not settings.tavily_configured:
+        logger.error("web_search_no_api_key")
         raise RuntimeError("web_search unavailable — TAVILY_API_KEY is not set")
 
     query = _query_for(state, task)
+    logger.info("web_search_query", task_id=task.get("id"), query=query)
     data = await tavily_search(query)
     context = format_results(data)
     sources = extract_sources(data)
 
-    logger.info("web_search_completed", query=query, result_count=len(sources))
+    logger.info(
+        "web_search_results",
+        query=query,
+        result_count=len(sources),
+        has_tavily_answer=bool((data or {}).get("answer")),
+        context_chars=len(context),
+        source_urls=[s.get("url") for s in sources],
+    )
 
     if not settings.llm_configured:
-        # No LLM to summarise — hand the raw context to the synthesiser.
+        logger.info("web_search_no_llm", note="returning raw Tavily context")
         return AgentResult(
             summary=(data or {}).get("answer") or context[:1500],
             detail=context,
@@ -52,4 +61,6 @@ async def run_web_search(state: GenieState, task: TaskRecord) -> AgentResult:
     model = get_chat_model(streaming=False, temperature=0.2)
     prompt = WEB_SEARCH_SUMMARY_PROMPT.format(query=query, results=context)
     resp = await model.ainvoke([SystemMessage(content=prompt), HumanMessage(content=query)])
-    return AgentResult(summary=str(resp.content).strip(), detail=context, sources=sources)
+    summary = str(resp.content).strip()
+    logger.info("web_search_summarised", query=query, summary_chars=len(summary))
+    return AgentResult(summary=summary, detail=context, sources=sources)

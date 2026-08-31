@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import time
+
 import structlog
 from langchain_core.callbacks import adispatch_custom_event
 from langchain_core.messages import AIMessage, SystemMessage
@@ -34,6 +36,7 @@ from app.agents.supervisor.state import (
     TaskRecord,
 )
 from app.config import settings
+from app.core.logging import preview
 
 logger = structlog.get_logger(__name__)
 
@@ -50,7 +53,7 @@ async def _emit(name: str, data: dict) -> None:
     try:
         await adispatch_custom_event(name, data)
     except Exception:  # noqa: BLE001
-        pass
+        logger.debug("custom_event_not_dispatched", event=name)
 
 
 def _ledger_text(plan: list[TaskRecord]) -> str:
@@ -78,11 +81,16 @@ def _plan_to_ledger(steps: list[PlanStep]) -> list[TaskRecord]:
     seen: set[tuple[str, str]] = set()
     for idx, step in enumerate(steps, start=1):
         key = (step.agent, step.description.strip().lower())
-        if step.agent not in KNOWN_AGENTS or key in seen:
+        if step.agent not in KNOWN_AGENTS:
+            logger.warning("supervisor_plan_step_dropped", reason="unknown_agent", agent=step.agent)
+            continue
+        if key in seen:
+            logger.debug("supervisor_plan_step_dropped", reason="duplicate", agent=step.agent)
             continue
         seen.add(key)
         kept.append((idx, step))
         if len(kept) >= _MAX_PLAN_STEPS:
+            logger.warning("supervisor_plan_capped", cap=_MAX_PLAN_STEPS, proposed=len(steps))
             break
 
     orig_to_id = {orig: f"t{n}" for n, (orig, _) in enumerate(kept, start=1)}
@@ -130,8 +138,19 @@ def _format_findings(plan: list[TaskRecord], results: dict) -> str:
 async def supervisor_node(state: GenieState) -> dict:
     turns = state.get("supervisor_turns", 0)
     usage = state.get("token_usage") or {}
+    logger.info(
+        "supervisor_start",
+        turn=turns + 1,
+        replan=turns > 0,
+        tokens_used=usage.get("total", 0),
+        available_agents=sorted(KNOWN_AGENTS),
+    )
     if usage.get("total", 0) >= settings.MAX_TOKENS_PER_RUN:
-        logger.warning("token_budget_exhausted", total=usage.get("total"))
+        logger.warning(
+            "token_budget_exhausted",
+            total=usage.get("total"),
+            limit=settings.MAX_TOKENS_PER_RUN,
+        )
         return {"plan": [], "supervisor_turns": turns + 1, "intent": "token budget reached"}
 
     system = SUPERVISOR_SYSTEM_PROMPT.format(
@@ -155,7 +174,13 @@ async def supervisor_node(state: GenieState) -> dict:
         }
 
     ledger = _plan_to_ledger(plan_out.steps)
-    logger.info("supervisor_planned", agents=[t["agent"] for t in ledger], turn=turns + 1)
+    logger.info(
+        "supervisor_planned",
+        turn=turns + 1,
+        rationale=preview(plan_out.rationale, 200),
+        steps=[{"id": t["id"], "agent": t["agent"], "depends_on": t["depends_on"]} for t in ledger],
+        direct_answer=not ledger,
+    )
     return {"plan": ledger, "supervisor_turns": turns + 1, "intent": plan_out.rationale}
 
 
@@ -164,12 +189,18 @@ async def executor_node(state: GenieState) -> dict:
     results = dict(state.get("intermediate_results") or {})
     segments = list(state.get("streamed_segments") or [])
     if not plan:
+        logger.info("executor_skip", reason="empty plan — synthesiser answers directly")
         return {
             "plan": plan,
             "intermediate_results": results,
             "streamed_segments": segments,
             "active_agents": [],
         }
+
+    logger.info(
+        "executor_start",
+        tasks=[{"id": t["id"], "agent": t["agent"]} for t in plan],
+    )
 
     # A live view so a later agent can read an earlier one's ledger + results.
     state = {**state, "plan": plan, "intermediate_results": results}
@@ -186,6 +217,14 @@ async def executor_node(state: GenieState) -> dict:
             progressed = True
             spec = AGENT_REGISTRY.get(task["agent"])
             task["status"] = "in_progress"
+            started = time.perf_counter()
+            logger.info(
+                "agent_run_start",
+                task_id=task["id"],
+                agent=task["agent"],
+                task=preview(task["description"], 120),
+                depends_on=task["depends_on"],
+            )
             await _emit("agent_start", {"agent": task["agent"], "task": task["description"]})
             try:
                 if spec is None:
@@ -201,6 +240,16 @@ async def executor_node(state: GenieState) -> dict:
                     "streamed": bool(res.stream),
                 }
                 done.add(task["id"])
+                logger.info(
+                    "agent_run_done",
+                    task_id=task["id"],
+                    agent=task["agent"],
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    summary_chars=len(res.summary or ""),
+                    sources=len(res.sources or []),
+                    streamed=res.stream,
+                    summary_preview=preview(res.summary, 160),
+                )
                 if res.stream and res.summary.strip():
                     # user-ready now — its own message, shown before the rest runs
                     if segments_emitted:
@@ -212,9 +261,23 @@ async def executor_node(state: GenieState) -> dict:
             except Exception as exc:  # noqa: BLE001
                 task["status"] = "failed"
                 task["error"] = str(exc)
-                logger.warning("agent_failed", agent=task["agent"], error=str(exc))
+                logger.warning(
+                    "agent_run_failed",
+                    task_id=task["id"],
+                    agent=task["agent"],
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    error=str(exc),
+                    exc_info=True,
+                )
             await _emit("agent_end", {"agent": task["agent"], "status": task["status"]})
 
+    statuses = {t["id"]: t["status"] for t in plan}
+    logger.info(
+        "executor_done",
+        statuses=statuses,
+        segments=segments_emitted,
+        results=sorted(results.keys()),
+    )
     await _emit("plan", {"steps": plan})
     return {
         "plan": plan,
@@ -246,9 +309,11 @@ async def synthesiser_node(state: GenieState) -> dict:
     # Nothing left to compose — the streamed segment(s) are the whole reply.
     if not has_composable:
         if segments:
+            logger.info("synthesiser_relay_segment_only", segments=len(segments))
             text = "\n\n".join(segments)
             return {"messages": [AIMessage(content=text)], "final_response": text}
         # No agents ran → answer the user directly, in the current message.
+        logger.info("synthesiser_direct_answer")
         await _emit("message_agents", {"agents": []})
         model = get_chat_model(streaming=True)
         resp = await model.ainvoke(
@@ -262,6 +327,12 @@ async def synthesiser_node(state: GenieState) -> dict:
         dict.fromkeys(
             r["agent"] for t in plan if (r := results.get(t["id"])) and not r.get("streamed")
         )
+    )
+    logger.info(
+        "synthesiser_compose",
+        from_agents=composed_agents,
+        after_greeting=bool(segments),
+        finding_chars=sum(len(r.get("summary") or "") for r in results.values()),
     )
     if segments:
         await _emit("message_break", {})
@@ -278,6 +349,7 @@ async def synthesiser_node(state: GenieState) -> dict:
     convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
     model = get_chat_model(streaming=True)
     resp = await model.ainvoke([SystemMessage(content=system), *convo])
+    logger.info("synthesiser_done", answer_chars=len(str(resp.content)))
     return {"messages": [resp], "final_response": str(resp.content)}
 
 
@@ -287,6 +359,9 @@ async def validator_node(state: GenieState) -> dict:
     messages = state.get("messages") or []
     answer = str(messages[-1].content).strip() if messages else ""
     approved = bool(answer)
+    logger.info(
+        "validator_verdict", approved=approved, answer_chars=len(answer)
+    )
     return {"validation": {"approved": approved, "issues": [] if approved else ["empty response"]}}
 
 
@@ -294,7 +369,14 @@ def route_after_validator(state: GenieState) -> str:
     v = state.get("validation") or {}
     turns = state.get("supervisor_turns", 0)
     if not v.get("approved", True) and turns < settings.SUPERVISOR_MAX_TURNS:
+        logger.warning(
+            "validator_replan",
+            turn=turns,
+            max_turns=settings.SUPERVISOR_MAX_TURNS,
+            issues=v.get("issues"),
+        )
         return "supervisor"
+    logger.debug("graph_end", turns=turns, approved=v.get("approved", True))
     return END
 
 

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.supervisor.graph import get_runtime_graph
 from app.config import settings
+from app.core.logging import preview
 from app.core.streaming import format_sse_event, sse_done, sse_error
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
@@ -46,13 +47,28 @@ async def create_turn(
     client_hour: int | None = None,
 ) -> tuple[str, str]:
     """Persist the user message, return ``(run_id, conversation_id)``."""
+    logger.info(
+        "chat_create_turn_start",
+        user_id=str(user.id),
+        conversation_id=conversation_id,
+        project_id=project_id,
+        client_hour=client_hour,
+        message_chars=len(message),
+        message_preview=preview(message),
+    )
     conv_repo = ConversationRepository(db)
     msg_repo = MessageRepository(db)
 
     if conversation_id:
         conversation = await conv_repo.get_for_user(uuid.UUID(conversation_id), user.id)
         if conversation is None:
+            logger.warning(
+                "chat_conversation_not_found",
+                conversation_id=conversation_id,
+                user_id=str(user.id),
+            )
             raise ValueError("conversation not found")
+        logger.debug("chat_using_existing_conversation", conversation_id=conversation_id)
     else:
         pid: uuid.UUID | None = None
         if project_id:
@@ -60,6 +76,9 @@ async def create_turn(
                 uuid.UUID(project_id), user.id
             )
             if project is None:
+                logger.warning(
+                    "chat_project_not_found", project_id=project_id, user_id=str(user.id)
+                )
                 raise ValueError("project not found")
             pid = project.id
         conversation = await conv_repo.create(user.id, title=None, project_id=pid)
@@ -79,6 +98,12 @@ async def create_turn(
             }
         ),
     )
+    logger.info(
+        "chat_turn_accepted",
+        run_id=run_id,
+        conversation_id=str(conversation.id),
+        run_ttl_s=_RUN_TTL_SECONDS,
+    )
     return run_id, str(conversation.id)
 
 
@@ -91,8 +116,10 @@ async def _generate(
 ) -> AsyncIterator[tuple[str, dict | None]]:
     """Yield ``(sse_frame, done_info)`` — ``done_info`` is set only on the final
     yield: ``{"total_tokens", "langsmith_run_id"}``."""
+    logger.info("chat_stream_start", run_id=run_id, conversation_id=conversation_id)
     raw = await redis.get(_run_key(run_id))
     if raw is None:
+        logger.warning("chat_run_not_found", run_id=run_id)
         yield sse_error("unknown or expired run", "run_not_found"), None
         return
     payload = json.loads(raw)
@@ -100,16 +127,24 @@ async def _generate(
     client_hour = payload.get("client_hour")
 
     if payload["conversation_id"] != conversation_id:
+        logger.warning(
+            "chat_run_conversation_mismatch",
+            run_id=run_id,
+            run_conversation_id=payload["conversation_id"],
+            requested=conversation_id,
+        )
         yield sse_error("run does not belong to this conversation", "run_mismatch"), None
         return
 
     conv_repo = ConversationRepository(db)
     conversation = await conv_repo.get_for_user(uuid.UUID(conversation_id), user.id)
     if conversation is None:
+        logger.warning("chat_conversation_gone", conversation_id=conversation_id)
         yield sse_error("conversation not found", "not_found"), None
         return
 
     if not settings.llm_configured:
+        logger.error("chat_llm_not_configured")
         yield sse_error("OPENAI_API_KEY is not set", "llm_not_configured"), None
         return
 
@@ -118,6 +153,11 @@ async def _generate(
         project = await ProjectRepository(db).get_for_user(conversation.project_id, user.id)
         if project is not None:
             project_instructions = project.instructions
+            logger.info(
+                "chat_project_instructions_loaded",
+                project_id=str(conversation.project_id),
+                instruction_chars=len(project_instructions or ""),
+            )
 
     graph = get_runtime_graph()
     config = {"configurable": {"thread_id": conversation_id}}
@@ -141,7 +181,16 @@ async def _generate(
         "metadata": {},
     }
 
+    logger.info(
+        "chat_graph_invoke",
+        run_id=run_id,
+        thread_id=conversation_id,
+        has_project_instructions=project_instructions is not None,
+        client_hour=client_hour,
+    )
+
     total_tokens = 0
+    token_frames = 0
     langsmith_run_id: str | None = None
     parts: list[str] = [""]  # one entry per assistant message this turn
     part_agents: list[list[str]] = [[]]  # agents that produced each part
@@ -160,28 +209,57 @@ async def _generate(
             chunk = event["data"]["chunk"].content
             if chunk:
                 parts[-1] += chunk
+                token_frames += 1
                 yield format_sse_event("token", content=chunk), None
         elif kind == "on_chat_model_end":
             usage = getattr(event["data"].get("output"), "usage_metadata", None)
             if usage:
+                node = (event.get("metadata") or {}).get("langgraph_node")
                 total_tokens += usage.get("total_tokens", 0)
+                logger.debug(
+                    "chat_model_call_done",
+                    node=node,
+                    call_tokens=usage.get("total_tokens", 0),
+                    run_total_tokens=total_tokens,
+                )
         elif kind == "on_custom_event":
             name = event.get("name")
             data = event.get("data") or {}
             if name == "agent_start":
+                logger.info(
+                    "chat_agent_start",
+                    run_id=run_id,
+                    agent=data.get("agent"),
+                    task=preview(data.get("task", ""), 100),
+                )
                 yield format_sse_event(
                     "agent_start", agent=data.get("agent"), run_id=run_id
                 ), None
             elif name == "agent_end":
+                logger.info(
+                    "chat_agent_end",
+                    run_id=run_id,
+                    agent=data.get("agent"),
+                    status=data.get("status"),
+                )
                 yield format_sse_event(
                     "agent_end", agent=data.get("agent"), status=data.get("status")
                 ), None
             elif name == "plan":
-                yield format_sse_event("plan", steps=data.get("steps", [])), None
+                steps = data.get("steps", [])
+                logger.info(
+                    "chat_plan",
+                    run_id=run_id,
+                    steps=[
+                        {"agent": s.get("agent"), "status": s.get("status")} for s in steps
+                    ],
+                )
+                yield format_sse_event("plan", steps=steps), None
             elif name == "message_break":
                 # start a new assistant message
                 parts.append("")
                 part_agents.append([])
+                logger.debug("chat_message_break", run_id=run_id, message_index=len(parts) - 1)
                 yield format_sse_event("message_break"), None
             elif name == "message_agents":
                 agents = list(data.get("agents") or [])
@@ -192,11 +270,15 @@ async def _generate(
                 seg = str(data.get("text") or "").strip()
                 if seg:
                     parts[-1] += seg
+                    logger.debug(
+                        "chat_segment", run_id=run_id, agent=data.get("agent"), chars=len(seg)
+                    )
                     yield format_sse_event("token", content=seg), None
 
     pairs = [(p.strip(), a) for p, a in zip(parts, part_agents, strict=False) if p.strip()]
     if not pairs:
         # Nothing streamed — recover the reply from the graph state.
+        logger.warning("chat_no_streamed_output", run_id=run_id)
         try:
             snapshot = await graph.aget_state(config)
             msgs = snapshot.values.get("messages", []) if snapshot else []
@@ -207,6 +289,14 @@ async def _generate(
         except Exception:  # noqa: BLE001
             logger.warning("chat_state_fetch_failed", run_id=run_id)
 
+    logger.info(
+        "chat_graph_done",
+        run_id=run_id,
+        messages=len(pairs),
+        message_agents=[a for _, a in pairs],
+        streamed_token_frames=token_frames,
+        total_tokens=total_tokens,
+    )
     answer = "\n\n".join(p for p, _ in pairs)
     title: str | None = None
     if pairs:
@@ -230,6 +320,7 @@ async def _generate(
 
         # First real exchange in this chat → auto-title it (Claude-style heading).
         if conversation.title is None:
+            logger.debug("chat_title_generating", conversation_id=conversation_id)
             title = await generate_title(message, answer)
             if title:
                 await conv_repo.set_title(conversation.id, user.id, title)
@@ -244,8 +335,11 @@ async def _generate(
     logger.info(
         "chat_turn_completed",
         run_id=run_id,
+        conversation_id=conversation_id,
         langsmith_run_id=langsmith_run_id,
         total_tokens=total_tokens,
+        assistant_messages=len(pairs),
+        answer_chars=len(answer),
         titled=bool(title),
     )
     yield "", {
@@ -272,7 +366,7 @@ async def stream_turn(
             if info:
                 done_info = info
     except Exception as exc:  # noqa: BLE001
-        logger.exception("chat_stream_failed", run_id=run_id)
+        logger.exception("chat_stream_failed", run_id=run_id, conversation_id=conversation_id)
         yield sse_error(str(exc), "chat_error")
 
     yield sse_done(
@@ -285,15 +379,22 @@ async def stream_turn(
 
 async def delete_conversation(db: AsyncSession, user: User, conversation_id: str) -> bool:
     """Delete a conversation (+ its messages via cascade) and its LangGraph thread."""
+    logger.info(
+        "chat_delete_conversation_start",
+        conversation_id=conversation_id,
+        user_id=str(user.id),
+    )
     try:
         cid = uuid.UUID(conversation_id)
     except ValueError:
+        logger.warning("chat_delete_bad_uuid", conversation_id=conversation_id)
         return False
 
     ok = await ConversationRepository(db).delete_for_user(cid, user.id)
     if ok:
         try:
             await get_runtime_graph().checkpointer.adelete_thread(conversation_id)
+            logger.info("checkpointer_thread_deleted", conversation_id=conversation_id)
         except Exception:  # noqa: BLE001  — best-effort; orphan checkpoint rows are harmless
             logger.warning("checkpointer_thread_delete_failed", conversation_id=conversation_id)
     return ok

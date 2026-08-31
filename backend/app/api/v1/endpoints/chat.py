@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,6 +14,8 @@ from app.core.redis import get_redis
 from app.db.models.user import User
 from app.db.session import get_db
 from app.services import chat_service
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -38,12 +41,14 @@ async def create_chat_run(
 ) -> ChatAccepted:
     message = body.message.strip()
     if not message:
+        logger.info("chat_post_empty_message", user_id=str(user.id))
         raise HTTPException(status_code=422, detail="message must not be empty")
     try:
         run_id, conversation_id = await chat_service.create_turn(
             db, redis, user, message, body.conversation_id, body.project_id, body.client_hour
         )
     except ValueError as exc:
+        logger.warning("chat_post_rejected", user_id=str(user.id), error=str(exc))
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ChatAccepted(run_id=run_id, conversation_id=conversation_id)
 
@@ -57,6 +62,12 @@ async def stream_chat(
     redis: Redis = Depends(get_redis),
 ) -> StreamingResponse:
     """SSE stream — emits `token` frames then `done` (CLAUDE.md §11)."""
+    logger.info(
+        "chat_stream_opened",
+        conversation_id=conversation_id,
+        run_id=run_id,
+        user_id=str(user.id),
+    )
     return StreamingResponse(
         chat_service.stream_turn(db, redis, user, conversation_id, run_id),
         media_type="text/event-stream",

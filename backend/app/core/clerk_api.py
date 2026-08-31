@@ -21,6 +21,7 @@ _BASE = "https://api.clerk.com/v1"
 
 async def fetch_clerk_user(clerk_id: str) -> dict[str, Any] | None:
     if not settings.clerk_backend_api_enabled:
+        logger.debug("clerk_backend_api_disabled", clerk_id=clerk_id)
         return None
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -29,6 +30,7 @@ async def fetch_clerk_user(clerk_id: str) -> dict[str, Any] | None:
                 headers={"Authorization": f"Bearer {settings.CLERK_SECRET_KEY}"},
             )
         resp.raise_for_status()
+        logger.info("clerk_user_fetched", clerk_id=clerk_id, status=resp.status_code)
         return resp.json()
     except httpx.HTTPError as exc:
         logger.warning("clerk_user_fetch_failed", clerk_id=clerk_id, error=str(exc))

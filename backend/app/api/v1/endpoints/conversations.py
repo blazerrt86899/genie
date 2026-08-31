@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,8 @@ from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.project_repo import ProjectRepository
 from app.db.session import get_db
 from app.services import chat_service
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -78,6 +81,7 @@ async def get_conversation(
 
     conv = await ConversationRepository(db).get_for_user(cid, user.id)
     if conv is None:
+        logger.info("conversation_get_404", conversation_id=conversation_id, user_id=str(user.id))
         raise HTTPException(status_code=404, detail="conversation not found")
 
     project_ref: ProjectRef | None = None
@@ -111,5 +115,8 @@ async def delete_conversation(
 ) -> Response:
     ok = await chat_service.delete_conversation(db, user, conversation_id)
     if not ok:
+        logger.info(
+            "conversation_delete_404", conversation_id=conversation_id, user_id=str(user.id)
+        )
         raise HTTPException(status_code=404, detail="conversation not found")
     return Response(status_code=204)

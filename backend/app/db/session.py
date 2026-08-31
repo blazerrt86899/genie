@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import structlog
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -17,6 +18,8 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import settings
 from app.db.models.base import DB_SCHEMA
+
+logger = structlog.get_logger(__name__)
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
@@ -29,6 +32,13 @@ _SEARCH_PATH = f"{DB_SCHEMA},public,extensions"
 def get_engine() -> AsyncEngine:
     global _engine, _sessionmaker
     if _engine is None:
+        logger.info(
+            "db_engine_init",
+            url=settings.DATABASE_URL_POOL,  # credentials scrubbed by the log processor
+            search_path=_SEARCH_PATH,
+            pool_size=5,
+            max_overflow=10,
+        )
         _engine = create_async_engine(
             settings.DATABASE_URL_POOL,
             pool_pre_ping=True,
@@ -54,6 +64,7 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         try:
             yield session
         except Exception:
+            logger.warning("db_session_rollback", reason="exception in request handler")
             await session.rollback()
             raise
 
@@ -64,3 +75,4 @@ async def dispose_engine() -> None:
         await _engine.dispose()
         _engine = None
         _sessionmaker = None
+        logger.info("db_engine_disposed")

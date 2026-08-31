@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import uuid
 
+import structlog
 from sqlalchemy import delete, func, select, update
 
 from app.db.models.conversation import Conversation
 from app.db.repositories.base import BaseRepository
+
+logger = structlog.get_logger(__name__)
 
 
 class ConversationRepository(BaseRepository[Conversation]):
@@ -19,9 +22,16 @@ class ConversationRepository(BaseRepository[Conversation]):
         title: str | None = None,
         project_id: uuid.UUID | None = None,
     ) -> Conversation:
-        return await self.add(
+        conv = await self.add(
             Conversation(user_id=user_id, title=title, project_id=project_id)
         )
+        logger.info(
+            "conversation_created",
+            conversation_id=str(conv.id),
+            user_id=str(user_id),
+            project_id=str(project_id) if project_id else None,
+        )
+        return conv
 
     async def get_for_user(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID
@@ -44,7 +54,9 @@ class ConversationRepository(BaseRepository[Conversation]):
             )
             .limit(limit)
         )
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        logger.debug("conversations_listed", user_id=str(user_id), count=len(rows))
+        return rows
 
     async def list_for_project(
         self, project_id: uuid.UUID, user_id: uuid.UUID
@@ -80,6 +92,9 @@ class ConversationRepository(BaseRepository[Conversation]):
             .values(title=title)
         )
         await self.db.commit()
+        logger.info(
+            "conversation_titled", conversation_id=str(conversation_id), title=title
+        )
 
     async def delete_for_user(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID
@@ -91,4 +106,11 @@ class ConversationRepository(BaseRepository[Conversation]):
             )
         )
         await self.db.commit()
-        return (getattr(result, "rowcount", 0) or 0) > 0
+        deleted = (getattr(result, "rowcount", 0) or 0) > 0
+        logger.info(
+            "conversation_deleted",
+            conversation_id=str(conversation_id),
+            user_id=str(user_id),
+            deleted=deleted,
+        )
+        return deleted

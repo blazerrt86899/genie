@@ -5,10 +5,14 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from sqlalchemy import select
 
+from app.core.logging import preview
 from app.db.models.message import Message
 from app.db.repositories.base import BaseRepository
+
+logger = structlog.get_logger(__name__)
 
 
 class MessageRepository(BaseRepository[Message]):
@@ -35,7 +39,16 @@ class MessageRepository(BaseRepository[Message]):
         )
         if created_at is not None:
             msg.created_at = created_at
-        return await self.add(msg)
+        saved = await self.add(msg)
+        logger.info(
+            "message_persisted",
+            conversation_id=str(conversation_id),
+            role=role,
+            chars=len(content),
+            preview=preview(content, 120),
+            metadata_keys=sorted((metadata or {}).keys()) or None,
+        )
+        return saved
 
     async def list_for_conversation(
         self, conversation_id: uuid.UUID, limit: int = 200
@@ -46,4 +59,8 @@ class MessageRepository(BaseRepository[Message]):
             .order_by(Message.created_at.asc())
             .limit(limit)
         )
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        logger.debug(
+            "messages_loaded", conversation_id=str(conversation_id), count=len(rows)
+        )
+        return rows

@@ -9,9 +9,12 @@ Keys used across the app:
 
 from __future__ import annotations
 
+import structlog
 from redis.asyncio import Redis
 
 from app.config import settings
+
+logger = structlog.get_logger(__name__)
 
 _client: Redis | None = None
 
@@ -20,6 +23,8 @@ def get_redis_client() -> Redis:
     """Return the process-wide Redis client (lazy, connection-pooled)."""
     global _client
     if _client is None:
+        # settings.REDIS_URL may carry credentials — the log processor scrubs them.
+        logger.info("redis_client_init", url=settings.REDIS_URL)
         _client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
     return _client
 
@@ -34,3 +39,4 @@ async def close_redis() -> None:
     if _client is not None:
         await _client.aclose()
         _client = None
+        logger.info("redis_client_closed")

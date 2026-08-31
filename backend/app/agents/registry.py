@@ -11,10 +11,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+import structlog
+
 from app.agents.base import AgentResult
 from app.agents.greeting.agent import run_greeting
 from app.agents.supervisor.state import GenieState, TaskRecord
 from app.agents.web_search.agent import run_web_search
+
+logger = structlog.get_logger(__name__)
 
 AgentRunner = Callable[[GenieState, TaskRecord], Awaitable[AgentResult]]
 
@@ -53,6 +57,15 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
 }
 
 KNOWN_AGENTS: frozenset[str] = frozenset(AGENT_REGISTRY)
+
+
+def log_registry() -> None:
+    """Log the registered agents — called once from the app lifespan."""
+    logger.info(
+        "agent_registry_loaded",
+        agents=sorted(AGENT_REGISTRY),
+        streaming_agents=sorted(n for n, s in AGENT_REGISTRY.items() if s.stream),
+    )
 
 
 def agent_menu() -> str:

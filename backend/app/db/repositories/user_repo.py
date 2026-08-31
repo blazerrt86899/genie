@@ -10,12 +10,15 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core import clerk_api
 from app.db.models.user import User
 from app.db.repositories.base import BaseRepository
+
+logger = structlog.get_logger(__name__)
 
 _PLACEHOLDER_EMAIL = "{clerk_id}@users.noreply.clerk"
 
@@ -58,12 +61,19 @@ class UserRepository(BaseRepository[User]):
             await self.db.commit()
         except IntegrityError:
             # Concurrent provision for the same clerk_id — take the winner's row.
+            logger.warning("user_provision_race", clerk_id=clerk_id)
             await self.db.rollback()
             existing = await self.get_by_clerk_id(clerk_id)
             if existing is None:
                 raise
             return existing
         await self.db.refresh(user)
+        logger.info(
+            "user_provisioned_from_token",
+            user_id=str(user.id),
+            clerk_id=clerk_id,
+            profile_enriched=profile is not None,
+        )
         return user
 
     # ─── Webhook-driven sync (CLAUDE.md §7.4) ──────────────────────────────
@@ -71,6 +81,7 @@ class UserRepository(BaseRepository[User]):
         clerk_id: str = clerk_data["id"]
         existing = await self.get_by_clerk_id(clerk_id)
         if existing is not None:
+            logger.info("user_webhook_create_is_update", clerk_id=clerk_id)
             await self.update_from_clerk(clerk_data)
             return existing
         user = User(
@@ -84,6 +95,7 @@ class UserRepository(BaseRepository[User]):
         self.db.add(user)
         await self.db.commit()
         await self.db.refresh(user)
+        logger.info("user_created_from_webhook", user_id=str(user.id), clerk_id=clerk_id)
         return user
 
     async def update_from_clerk(self, clerk_data: dict) -> None:
@@ -99,6 +111,7 @@ class UserRepository(BaseRepository[User]):
             )
         )
         await self.db.commit()
+        logger.info("user_updated_from_webhook", clerk_id=clerk_data.get("id"))
 
     async def soft_delete_by_clerk_id(self, clerk_id: str) -> None:
         """Preserve conversation history — just detach the Clerk identity."""
@@ -112,6 +125,7 @@ class UserRepository(BaseRepository[User]):
             )
         )
         await self.db.commit()
+        logger.info("user_soft_deleted", clerk_id=clerk_id)
 
     async def touch_last_active(self, user_id: uuid.UUID) -> None:
         try:

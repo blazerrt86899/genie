@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.agents.registry import log_registry
 from app.agents.supervisor.graph import build_graph, set_runtime_graph
 from app.api.v1.router import api_router
 from app.config import settings
@@ -54,7 +55,15 @@ async def _seed_dev_user() -> None:
 async def lifespan(app: FastAPI):
     configure_logging()
     configure_tracing()  # must run before the graph is compiled / any chain runs
-    logger.info("startup_begin", env=settings.APP_ENV)
+    logger.info(
+        "startup_begin",
+        env=settings.APP_ENV,
+        clerk_configured=settings.clerk_configured,
+        llm_configured=settings.llm_configured,
+        tavily_configured=settings.tavily_configured,
+        langsmith_enabled=settings.langsmith_enabled,
+    )
+    log_registry()
 
     # Redis — required
     redis = get_redis_client()
@@ -65,11 +74,11 @@ async def lifespan(app: FastAPI):
     engine = get_engine()
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
-    logger.info("database_connected")
+    logger.info("database_connected", schema=DB_SCHEMA)
 
     if not settings.clerk_configured and not settings.is_production:
         await _seed_dev_user()
-        logger.info("dev_user_seeded")
+        logger.info("dev_user_seeded", user_id=str(DEV_USER_ID))
 
     # LangGraph checkpointer + compiled chat graph — held for the app lifetime.
     # Session-mode URL, psycopg (not asyncpg). Single connection is fine for now.
@@ -77,6 +86,7 @@ async def lifespan(app: FastAPI):
         try:
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
+            logger.info("checkpointer_setup_start")
             checkpointer = await stack.enter_async_context(
                 AsyncPostgresSaver.from_conn_string(_checkpointer_conn_string())
             )
@@ -85,12 +95,14 @@ async def lifespan(app: FastAPI):
             logger.info("checkpointer_ready")
         except Exception as exc:  # noqa: BLE001
             if settings.is_production:
+                logger.exception("checkpointer_setup_failed_fatal")
                 raise
             logger.warning("checkpointer_setup_failed", error=str(exc))
 
         logger.info("startup_complete")
         yield
 
+    logger.info("shutdown_begin")
     await close_redis()
     await dispose_engine()
     logger.info("shutdown_complete")

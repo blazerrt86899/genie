@@ -41,13 +41,21 @@ def _last_user_text(state: GenieState) -> str:
 
 
 async def run_greeting(state: GenieState, task: TaskRecord) -> AgentResult:  # noqa: ARG001
-    hour = state.get("client_hour")
-    if hour is None or not (0 <= hour <= 23):
-        hour = datetime.now().hour
+    client_hour = state.get("client_hour")
+    valid = client_hour is not None and 0 <= client_hour <= 23
+    hour = client_hour if valid else datetime.now().hour
     bucket = part_of_day(hour)
     fallback = TEMPLATE_GREETINGS[bucket]
+    logger.info(
+        "greeting_start",
+        client_hour=client_hour,
+        resolved_hour=hour,
+        part_of_day=bucket,
+        llm=settings.llm_configured,
+    )
 
     if not settings.llm_configured:
+        logger.info("greeting_template_used", reason="llm_not_configured")
         return AgentResult(summary=fallback, stream=True)
 
     try:
@@ -57,7 +65,8 @@ async def run_greeting(state: GenieState, task: TaskRecord) -> AgentResult:  # n
             [SystemMessage(content=system), HumanMessage(content=_last_user_text(state) or "Hello")]
         )
         text = str(resp.content).strip()
+        logger.info("greeting_generated", chars=len(text), fell_back=not text)
         return AgentResult(summary=text or fallback, stream=True)
     except Exception:  # noqa: BLE001 — greeting must never break a turn
-        logger.warning("greeting_llm_failed", exc_info=True)
+        logger.warning("greeting_llm_failed", part_of_day=bucket, exc_info=True)
         return AgentResult(summary=fallback, stream=True)

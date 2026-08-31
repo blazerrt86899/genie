@@ -9,6 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,8 @@ from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.project_repo import ProjectRepository
 from app.db.session import get_db
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -143,11 +146,17 @@ async def delete_project(
     thread_ids = [
         str(c.id) for c in await ConversationRepository(db).list_for_project(pid, user.id)
     ]
+    logger.info(
+        "project_delete_cascade",
+        project_id=project_id,
+        user_id=str(user.id),
+        conversations=len(thread_ids),
+    )
     await repo.delete_for_user(pid, user.id)  # cascades conversations + messages
 
     for tid in thread_ids:  # best-effort — orphan checkpoint rows are harmless
         try:
             await get_runtime_graph().checkpointer.adelete_thread(tid)
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("checkpointer_thread_delete_failed", conversation_id=tid)
     return Response(status_code=204)
