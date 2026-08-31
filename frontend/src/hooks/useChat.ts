@@ -45,6 +45,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
             id: m.id,
             role: m.role,
             content: m.content,
+            agents: m.agents ?? [],
           })),
         );
       } catch {
@@ -106,6 +107,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
               content: "",
               pending: true,
             });
+          } else if (event.type === "message_agents") {
+            s.setMessageAgents(currentId, event.agents);
           } else if (event.type === "agent_start") {
             s.agentStarted(event.agent);
           } else if (event.type === "agent_end") {

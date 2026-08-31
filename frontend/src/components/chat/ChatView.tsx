@@ -8,6 +8,7 @@ import { FolderKanban, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/hooks/useChat";
 import { useProjects } from "@/hooks/useProjects";
+import { useChatStore } from "@/store/chatStore";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
 import { GreetingHeadline } from "./GreetingHeadline";
@@ -86,8 +87,15 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const { user } = useUser();
   const userName =
     user?.firstName || user?.username || user?.fullName || "You";
+  const activeAgents = useChatStore((s) => s.activeAgents);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Active agents whose message hasn't started yet → shown at the list tail.
+  const pendingAgents = useMemo(() => {
+    const claimed = new Set(messages.flatMap((m) => m.agents ?? []));
+    return activeAgents.filter((a) => !claimed.has(a));
+  }, [activeAgents, messages]);
 
   // The chat's project: from the loaded conversation, else the ?project= param.
   const activeProject = useMemo(() => {
@@ -142,7 +150,6 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
             <GreetingHeadline />
           )}
           <div className="w-full max-w-2xl">
-            <AgentActivity className="justify-center px-0" />
             <Composer
               input={input}
               setInput={setInput}
@@ -160,12 +167,16 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         <>
           <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
             {messages.map((m) => (
-              <Message key={m.id} message={m} userName={userName} />
+              <Message
+                key={m.id}
+                message={m}
+                userName={userName}
+                activeAgents={activeAgents}
+              />
             ))}
+            {pendingAgents.length > 0 && <AgentActivity agents={pendingAgents} />}
             <div ref={endRef} />
           </div>
-
-          <AgentActivity />
 
           <div className="border-t border-border">
             <div className="p-3 sm:px-6">

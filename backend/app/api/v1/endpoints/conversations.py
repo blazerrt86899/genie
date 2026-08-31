@@ -38,6 +38,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     created_at: datetime
+    agents: list[str] = []  # which agents produced this message (assistant only)
 
 
 class ConversationDetail(ConversationSummary):
@@ -90,7 +91,13 @@ async def get_conversation(
         **conversation_summary(conv).model_dump(),
         project=project_ref,
         messages=[
-            MessageOut(id=str(m.id), role=m.role, content=m.content, created_at=m.created_at)
+            MessageOut(
+                id=str(m.id),
+                role=m.role,
+                content=m.content,
+                created_at=m.created_at,
+                agents=list((m.message_metadata or {}).get("agents", [])),
+            )
             for m in messages
         ],
     )

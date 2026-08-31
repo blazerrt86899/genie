@@ -1058,10 +1058,11 @@ findings only — it NEVER repeats a streamed segment (told "a greeting was alre
 sent separately — don't greet again"). Lone greeting / all-streamed ⇒ no LLM
 call. Empty plan ⇒ it answers the user directly.
 
-`chat_service` turns each `segment` into `token` frames of its **own** assistant
-message, emits `message_break`, then streams the **synthesiser's** tokens into
-the next message — so "Hi, weather in Mussoorie?" comes back as two messages
-(greeting, then forecast), each its own `messages` row.
+`chat_service` forwards the graph's `message_break` / `message_agents` / `segment`
+custom events, splitting the turn into one `messages` row per assistant message —
+so "Hi, weather in Mussoorie?" comes back as two messages (greeting, then
+forecast), each captioned in the UI with the agent that produced it
+(`AgentSpec.stream` marks an agent whose output is its own message).
 
 ---
 
@@ -1101,19 +1102,23 @@ async def hybrid_retrieve(
 ### Event Types (strict — frontend parses by `type` field)
 
 > Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `message_break`,
-> `title`, `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `done`
-> carries `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `task_created` /
-> `interrupt` arrive with their features. The stream **always** ends with `done`,
-> even after an `error` (§16).
+> `message_agents`, `title`, `error`, `done` (see `core/streaming.py` +
+> `lib/sse.ts`). `done` carries `total_tokens`, `run_id`, `langsmith_run_id?`,
+> `title?`. `task_created` / `interrupt` arrive with their features. The stream
+> **always** ends with `done`, even after an `error` (§16).
 >
-> **`message_break`** — one turn can produce several assistant messages (a
-> greeting, then the answer). `token` frames append to the *current* assistant
-> message; `message_break` finalises it and starts the next. The executor's
-> `segment` custom event (an already-user-ready agent output) becomes the first
-> message's tokens; the synthesiser's tokens land in the message after the break.
-> Backend only emits a break when more content actually follows — no trailing
-> empty bubble. Each message is persisted as its own `messages` row (10 ms apart
-> via `add_message(created_at=)` so reload order is stable).
+> **`message_break` / `message_agents`** — one turn can produce several assistant
+> messages (a greeting, then the answer). `token` frames append to the *current*
+> assistant message; `message_break` finalises it and starts the next;
+> `message_agents {agents:[…]}` tags the current message with the agent(s) that
+> produced it (the UI shows a small "Searching the web" / "Searched the web"
+> caption above the bubble, live vs. done by whether the agent is still in
+> `agent_start`/`agent_end` flight). The graph drives both: the executor emits
+> `message_agents` (+ a `message_break` if not first) right before each streamed
+> `segment`; the synthesiser emits them for its composed message. Each message is
+> persisted as its own `messages` row with `metadata.agents` (10 ms apart via
+> `add_message(created_at=)` so reload order is stable); `GET /conversations/{id}`
+> returns `agents` per message.
 
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
@@ -1121,6 +1126,7 @@ data: {"type": "token",         "content": "Based on"}
 data: {"type": "agent_end",     "agent": "web_search", "status": "done"}
 data: {"type": "plan",          "steps": [{"id":"t1","agent":"web_search","status":"done", ...}]}
 data: {"type": "message_break"}
+data: {"type": "message_agents", "agents": ["web_search"]}
 data: {"type": "title",         "conversation_id": "...", "title": "Learning ML"}
 data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo"}}
 data: {"type": "interrupt",     "reason": "calendar_write_confirmation", "details": {...}}
@@ -1221,7 +1227,7 @@ POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
 
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages + project{id,name}
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents`) + project{id,name}
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Projects ─────────────────────────────────────────────────────────────────
@@ -1489,7 +1495,7 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting & web_search (Tavily) agents. Supervisor splits multi-intent messages into ordered per-agent steps; the greeting is delivered as its **own** assistant message (SSE `message_break`) ahead of the answer message; one turn can now persist several `messages` rows. `agent_start`/`agent_end`/`plan` drive the AgentActivity strip._
+_Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting & web_search (Tavily) agents. Supervisor splits multi-intent messages into ordered per-agent steps; the greeting is delivered as its **own** assistant message ahead of the answer; each assistant message is captioned above the bubble with the agent that produced it (SSE `message_agents`, live "Searching the web…" → "Searched the web"), replacing the bottom activity strip._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1514,7 +1520,7 @@ _Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting &
 - ✅ Dev user row seeded on startup **only when Clerk is unconfigured**
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
-- ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting) are emitted as a `segment` event and become their **own** assistant message; `chat_service` emits `message_break` and the `synthesiser` then composes only the request answer into the next message (told the greeting was already sent). One turn → several `messages` rows (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
+- ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
 - ✅ **Agents** — `greeting` (time-of-day from `client_hour`, cheap LLM + template fallback, `stream=True`) and `web_search` (`tavily_search` → grounded summary + `sources`; falls back to Tavily's own answer without an LLM). Both registered; `prompt_enhancer`/`rag`/`calendar`/`task_creator` remain unregistered stubs.
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
@@ -1526,8 +1532,8 @@ _Last updated: 2026-08-31 — real supervisor graph + agent registry; greeting &
 - ✅ `(app)/` group — `Sidebar`: nav block (**New chat** · **Projects** · **Tasks**, same style) then the **Chats** list (always below every nav item, recency-ordered `useConversations`, active-highlight, hover-to-delete), then `BackendStatus` + Clerk `UserButton` pinned at the bottom.
 - ✅ Chat — `/chat` (new) and `/chat/[id]` (a conversation); `ChatView` + `useChat(conversationId?)` is **route-driven** (loads `GET /conversations/{id}` on nav; on the first message of a new chat it POSTs, learns the id, `router.replace('/chat/<id>')`, invalidates the sidebar list; the SSE `title` event refreshes the sidebar). Streams tokens live, input locked mid-turn. Each `Message` has a sender label — "GENIE" brand-gradient + sparkle, or the user's Clerk first name. **Empty state** = a vertically-centred greeting (`GreetingHeadline`: "What can Genie _<two words>_?" — the two words swap every 3.2s with a fade, `prefers-reduced-motion`-safe) above a centred composer; project chats show "New chat in _<name>_" instead.
 - ✅ `/tasks` — `TaskBoard` 3-column Kanban reading `taskStore`
-- ✅ **Agent activity** — `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded`; `AgentActivity` renders `activeAgents` as pulsing pills (friendly labels: `web_search` → "Searching the web"), shown in both the empty/centred state and above the docked composer. `plan` events are typed in `lib/sse.ts` but not yet rendered.
-- ✅ **Multi-message turns** — `useChat` tracks a `currentId`; on `message_break` it finalises that assistant bubble and starts a new one, so a greeting + answer render as two bubbles (matching the two persisted `messages` rows on reload).
+- ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" while the agent is in flight → "🔍 Searched the web" once done). `AgentActivity` now only renders the *unclaimed* active agents (an agent running before its message exists) as a pill at the **tail of the message list**. `plan` events typed but not rendered.
+- ✅ **Multi-message turns** — `useChat` tracks a `currentId`; `message_break` finalises the current assistant bubble and starts a new one, `message_agents` tags it. A greeting + answer render as two captioned bubbles, matching the two persisted `messages` rows (with `metadata.agents`) on reload.
 - ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
 - ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).

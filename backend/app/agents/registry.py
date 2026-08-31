@@ -24,6 +24,8 @@ class AgentSpec:
     name: str
     description: str  # shown to the supervisor LLM
     runner: AgentRunner
+    # True → its output is delivered as its own message, not composed by the synthesiser
+    stream: bool = False
 
 
 AGENT_REGISTRY: dict[str, AgentSpec] = {
@@ -37,6 +39,7 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
             "the request itself."
         ),
         runner=run_greeting,
+        stream=True,
     ),
     "web_search": AgentSpec(
         name="web_search",

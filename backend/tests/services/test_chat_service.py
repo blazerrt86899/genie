@@ -56,6 +56,7 @@ class FakeConvRepo:
 
 class FakeMsgRepo:
     added: list[tuple[str, str]] = []
+    added_full: list[tuple[str, str, dict | None]] = []
     last_metadata: dict | None = None
 
     def __init__(self, _db) -> None: ...
@@ -64,6 +65,7 @@ class FakeMsgRepo:
         self, conversation_id, user_id, role, content, metadata=None, created_at=None
     ):
         FakeMsgRepo.added.append((role, content))
+        FakeMsgRepo.added_full.append((role, content, metadata))
         FakeMsgRepo.last_metadata = metadata
         return SimpleNamespace(id=uuid.uuid4())
 
@@ -80,6 +82,7 @@ class FakeProjectRepo:
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     FakeMsgRepo.added = []
+    FakeMsgRepo.added_full = []
     FakeConvRepo.touched = 0
     FakeConvRepo.titled = None
     FakeConvRepo.conv = _conv()
@@ -170,13 +173,14 @@ async def test_stream_turn_splits_segment_and_answer_into_two_messages(monkeypat
         db=None, redis=redis, user=user, message="hi, weather?", conversation_id=None
     )
 
+    def custom(name, data):
+        return {"event": "on_custom_event", "name": name, "parent_ids": [], "data": data}
+
     async def fake_events(_state, config, version):  # noqa: ARG001
-        yield {
-            "event": "on_custom_event",
-            "name": "segment",
-            "parent_ids": [],
-            "data": {"agent": "greeting", "text": "Good evening!"},
-        }
+        yield custom("message_agents", {"agents": ["greeting"]})
+        yield custom("segment", {"agent": "greeting", "text": "Good evening!"})
+        yield custom("message_break", {})
+        yield custom("message_agents", {"agents": ["web_search"]})
         for piece in ("It is ", "22C."):
             yield {
                 "event": "on_chat_model_stream",
@@ -199,8 +203,10 @@ async def test_stream_turn_splits_segment_and_answer_into_two_messages(monkeypat
         async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
     ]
     assert [f["type"] for f in frames] == [
+        "message_agents",
         "token",
         "message_break",
+        "message_agents",
         "token",
         "token",
         "title",
@@ -211,8 +217,14 @@ async def test_stream_turn_splits_segment_and_answer_into_two_messages(monkeypat
         "It is ",
         "22C.",
     ]
-    assistant_msgs = [c for r, c in FakeMsgRepo.added if r == "assistant"]
-    assert assistant_msgs == ["Good evening!", "It is 22C."]
+    assert [f["agents"] for f in frames if f["type"] == "message_agents"] == [
+        ["greeting"],
+        ["web_search"],
+    ]
+    assistant = [(c, m) for r, c, m in FakeMsgRepo.added_full if r == "assistant"]
+    assert assistant[0] == ("Good evening!", {"agents": ["greeting"]})
+    assert assistant[1][0] == "It is 22C."
+    assert assistant[1][1]["agents"] == ["web_search"]
 
 
 async def test_stream_turn_unknown_run_emits_error_then_done():

@@ -197,6 +197,10 @@ async def test_executor_streams_a_segment_for_stream_results(monkeypatch) -> Non
     }
     out = await executor_node(state)
     assert out["streamed_segments"] == ["Good evening!"]
+    names = [n for n, _ in emitted]
+    # the greeting message is announced right before its content
+    assert ("message_agents", {"agents": ["greeting"]}) in emitted
+    assert names.index("message_agents") < names.index("segment")
     assert ("segment", {"agent": "greeting", "text": "Good evening!"}) in emitted
     assert out["intermediate_results"]["t1"]["streamed"] is True
     assert out["intermediate_results"]["t2"]["streamed"] is False
@@ -210,7 +214,13 @@ async def test_synthesiser_composes_only_the_request_not_the_greeting(monkeypatc
             seen["prompt"] = "\n".join(str(m.content) for m in messages)
             return SimpleNamespace(content="It is 22°C in Mussoorie [1].")
 
+    emitted: list[tuple[str, dict]] = []
+
+    async def fake_emit(name, data):
+        emitted.append((name, data))
+
     monkeypatch.setattr(nodes, "get_chat_model", lambda **_: FakeModel())
+    monkeypatch.setattr(nodes, "_emit", fake_emit)
 
     state = {
         "messages": [HumanMessage(content="hi, weather in Mussoorie?")],
@@ -232,6 +242,9 @@ async def test_synthesiser_composes_only_the_request_not_the_greeting(monkeypatc
     # greeting is delivered as its own message — the synthesiser must NOT repeat it
     assert out["final_response"] == "It is 22°C in Mussoorie [1]."
     assert "greet again" in seen["prompt"].lower()
+    # it breaks onto a new message and tags it with the composing agent
+    assert ("message_break", {}) in emitted
+    assert ("message_agents", {"agents": ["web_search"]}) in emitted
 
 
 # ─── validator + routing ─────────────────────────────────────────────────────

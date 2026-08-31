@@ -1,4 +1,4 @@
-import { Sparkles } from "lucide-react";
+import { Globe, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
@@ -9,18 +9,72 @@ function initials(name: string) {
   return letters.join("") || "Y";
 }
 
+const AGENT_LABELS: Record<string, { icon: typeof Globe; live: string; done: string }> = {
+  web_search: { icon: Globe, live: "Searching the web", done: "Searched the web" },
+  greeting: { icon: Sparkles, live: "Greeting you", done: "Greeted you" },
+  rag: { icon: Globe, live: "Reading your documents", done: "Read your documents" },
+};
+
+function AgentTrail({
+  agents,
+  activeAgents,
+}: {
+  agents: string[];
+  activeAgents: string[];
+}) {
+  const items = [...new Set(agents)];
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-1 flex flex-wrap items-center gap-2 px-1">
+      {items.map((agent) => {
+        const meta = AGENT_LABELS[agent];
+        const Icon = meta?.icon ?? Globe;
+        const live = activeAgents.includes(agent);
+        const label = meta ? (live ? meta.live : meta.done) : agent.replace(/_/g, " ");
+        return (
+          <span
+            key={agent}
+            className={cn(
+              "inline-flex items-center gap-1.5 text-[11px] font-medium",
+              live ? "text-brand" : "text-muted-foreground",
+            )}
+          >
+            {live ? (
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand opacity-75" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-brand" />
+              </span>
+            ) : (
+              <Icon className="h-3 w-3" />
+            )}
+            {label}
+            {live ? "…" : ""}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Message({
   message,
   userName = "You",
+  activeAgents = [],
 }: {
   message: ChatMessage;
   userName?: string;
+  activeAgents?: string[];
 }) {
   const isUser = message.role === "user";
   const name = isUser ? userName : "Genie";
 
   return (
     <div className={cn("flex flex-col gap-1.5", isUser ? "items-end" : "items-start")}>
+      {!isUser && message.agents && message.agents.length > 0 && (
+        <AgentTrail agents={message.agents} activeAgents={activeAgents} />
+      )}
+
       {/* sender label */}
       <div
         className={cn(

@@ -144,7 +144,7 @@ async def _generate(
     total_tokens = 0
     langsmith_run_id: str | None = None
     parts: list[str] = [""]  # one entry per assistant message this turn
-    pending_break = False  # a completed segment is waiting for the next content
+    part_agents: list[list[str]] = [[]]  # agents that produced each part
     async for event in graph.astream_events(state, config=config, version="v2"):
         # The first event with no parent is the root graph run — its id is the
         # LangSmith trace id (when tracing is enabled).
@@ -159,10 +159,6 @@ async def _generate(
                 continue
             chunk = event["data"]["chunk"].content
             if chunk:
-                if pending_break:
-                    yield format_sse_event("message_break"), None
-                    parts.append("")
-                    pending_break = False
                 parts[-1] += chunk
                 yield format_sse_event("token", content=chunk), None
         elif kind == "on_chat_model_end":
@@ -182,39 +178,44 @@ async def _generate(
                 ), None
             elif name == "plan":
                 yield format_sse_event("plan", steps=data.get("steps", [])), None
+            elif name == "message_break":
+                # start a new assistant message
+                parts.append("")
+                part_agents.append([])
+                yield format_sse_event("message_break"), None
+            elif name == "message_agents":
+                agents = list(data.get("agents") or [])
+                part_agents[-1] = agents
+                yield format_sse_event("message_agents", agents=agents), None
             elif name == "segment":
-                # an agent's output that's ready now (e.g. the greeting) — its own
-                # assistant message, streamed ahead of the composed answer
+                # an already-user-ready agent output (e.g. the greeting)
                 seg = str(data.get("text") or "").strip()
                 if seg:
-                    if pending_break:
-                        yield format_sse_event("message_break"), None
-                        parts.append("")
-                        pending_break = False
                     parts[-1] += seg
                     yield format_sse_event("token", content=seg), None
-                    pending_break = True
 
-    messages_out = [p.strip() for p in parts if p.strip()]
-    if not messages_out:
+    pairs = [(p.strip(), a) for p, a in zip(parts, part_agents, strict=False) if p.strip()]
+    if not pairs:
         # Nothing streamed — recover the reply from the graph state.
         try:
             snapshot = await graph.aget_state(config)
             msgs = snapshot.values.get("messages", []) if snapshot else []
             text = str(msgs[-1].content).strip() if msgs else ""
             if text:
-                messages_out = [text]
+                pairs = [(text, [])]
                 yield format_sse_event("token", content=text), None
         except Exception:  # noqa: BLE001
             logger.warning("chat_state_fetch_failed", run_id=run_id)
 
-    answer = "\n\n".join(messages_out)
+    answer = "\n\n".join(p for p, _ in pairs)
     title: str | None = None
-    if messages_out:
+    if pairs:
         now = datetime.now(UTC)
-        last = len(messages_out) - 1
-        for i, part in enumerate(messages_out):
+        last = len(pairs) - 1
+        for i, (part, agents) in enumerate(pairs):
             meta: dict = {}
+            if agents:
+                meta["agents"] = agents
             if langsmith_run_id and i == last:
                 meta["langsmith_run_id"] = langsmith_run_id
             await MessageRepository(db).add_message(

@@ -80,6 +80,7 @@ export interface ConversationMessage {
   role: "user" | "assistant" | "system";
   content: string;
   created_at: string;
+  agents?: string[];
 }
 
 export interface ConversationSummary {

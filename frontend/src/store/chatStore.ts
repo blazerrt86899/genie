@@ -5,6 +5,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   pending?: boolean;
+  agents?: string[]; // agents that produced this assistant message
 }
 
 export interface ProjectRef {
@@ -22,6 +23,7 @@ interface ChatState {
   setMessages: (messages: ChatMessage[]) => void;
   appendToken: (id: string, token: string) => void;
   setMessagePending: (id: string, pending: boolean) => void;
+  setMessageAgents: (id: string, agents: string[]) => void;
   setActiveAgents: (agents: string[]) => void;
   agentStarted: (agent: string) => void;
   agentEnded: (agent: string) => void;
@@ -49,6 +51,10 @@ export const useChatStore = create<ChatState>((set) => ({
   setMessagePending: (id, pending) =>
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, pending } : m)),
+    })),
+  setMessageAgents: (id, agents) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, agents } : m)),
     })),
   setActiveAgents: (agents) => set({ activeAgents: agents }),
   agentStarted: (agent) =>

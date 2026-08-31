@@ -19,6 +19,7 @@ export type SseEvent =
   | { type: "agent_end"; agent: string; status: string }
   | { type: "plan"; steps: PlanStepView[] }
   | { type: "message_break" } // finalize the current assistant message, start a new one
+  | { type: "message_agents"; agents: string[] } // which agents produce the current message
   | { type: "task_created"; task: Record<string, unknown> }
   | { type: "title"; conversation_id: string; title: string }
   | { type: "interrupt"; reason: string; details: Record<string, unknown> }

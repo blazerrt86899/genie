@@ -174,7 +174,9 @@ async def executor_node(state: GenieState) -> dict:
     # A live view so a later agent can read an earlier one's ledger + results.
     state = {**state, "plan": plan, "intermediate_results": results}
     await _emit("plan", {"steps": plan})
+
     done = {t["id"] for t in plan if t["status"] == "done"}
+    segments_emitted = 0
     progressed = True
     while progressed:
         progressed = False
@@ -200,9 +202,13 @@ async def executor_node(state: GenieState) -> dict:
                 }
                 done.add(task["id"])
                 if res.stream and res.summary.strip():
-                    # user-ready now — show it before the remaining steps run
+                    # user-ready now — its own message, shown before the rest runs
+                    if segments_emitted:
+                        await _emit("message_break", {})
+                    await _emit("message_agents", {"agents": [task["agent"]]})
                     segments.append(res.summary.strip())
                     await _emit("segment", {"agent": task["agent"], "text": res.summary.strip()})
+                    segments_emitted += 1
             except Exception as exc:  # noqa: BLE001
                 task["status"] = "failed"
                 task["error"] = str(exc)
@@ -242,12 +248,24 @@ async def synthesiser_node(state: GenieState) -> dict:
         if segments:
             text = "\n\n".join(segments)
             return {"messages": [AIMessage(content=text)], "final_response": text}
-        # No agents ran → answer the user directly.
+        # No agents ran → answer the user directly, in the current message.
+        await _emit("message_agents", {"agents": []})
         model = get_chat_model(streaming=True)
         resp = await model.ainvoke(
             [SystemMessage(content=_with_project(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
         )
         return {"messages": [resp], "final_response": str(resp.content)}
+
+    # This composed answer is its own message. If a segment (greeting) was already
+    # sent, break onto a new one; otherwise it fills the current (first) message.
+    composed_agents = list(
+        dict.fromkeys(
+            r["agent"] for t in plan if (r := results.get(t["id"])) and not r.get("streamed")
+        )
+    )
+    if segments:
+        await _emit("message_break", {})
+    await _emit("message_agents", {"agents": composed_agents})
 
     system = _with_project(SYNTHESISER_SYSTEM_PROMPT, state)
     findings = _format_findings(plan, results)
