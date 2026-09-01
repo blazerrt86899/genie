@@ -53,11 +53,24 @@ _retry_wait = wait_exponential(multiplier=2, min=2, max=30)  # patchable in test
 
 
 def _build(
-    model: str, *, streaming: bool, temperature: float, max_tokens: int | None
+    model: str,
+    *,
+    streaming: bool,
+    temperature: float,
+    max_tokens: int | None,
+    reasoning_effort: str | None = None,
 ) -> BaseChatModel:
     max_retries = 2 if streaming else 0  # streaming keeps langchain's own retry
     if settings.LLM_PROVIDER == "groq":
         from langchain_groq import ChatGroq
+
+        kwargs: dict[str, Any] = {}
+        # Groq's gpt-oss-* are reasoning models — they burn completion tokens on a
+        # hidden reasoning pass before emitting content, so a small max_tokens
+        # yields an EMPTY answer (finish_reason="length"). "low" keeps that pass
+        # short (and cheaper against the free-tier TPM cap).
+        if reasoning_effort and model.startswith("openai/gpt-oss"):
+            kwargs["reasoning_effort"] = reasoning_effort
 
         return ChatGroq(
             model=model,
@@ -66,6 +79,7 @@ def _build(
             max_tokens=max_tokens,
             max_retries=max_retries,
             api_key=settings.GROQ_API_KEY,
+            **kwargs,
         )
     from langchain_openai import ChatOpenAI
 
@@ -98,7 +112,11 @@ def get_chat_model(*, streaming: bool = True, temperature: float = 0.7) -> BaseC
 
 
 def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> BaseChatModel:
-    """A cheap model for small, non-streamed jobs (routing, greetings, titles)."""
+    """A cheap model for small, non-streamed jobs (routing, greetings, titles).
+
+    On Groq the utility model is a gpt-oss reasoning model, so callers that pass a
+    tight ``max_tokens`` must leave room for the reasoning pass — see ``_build``.
+    """
     model = settings.utility_model_name
     logger.debug(
         "llm_utility_model_build",
@@ -106,7 +124,13 @@ def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None
         model=model,
         max_tokens=max_tokens,
     )
-    return _build(model, streaming=False, temperature=temperature, max_tokens=max_tokens)
+    return _build(
+        model,
+        streaming=False,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning_effort="low",
+    )
 
 
 def _log_retry(retry_state) -> None:

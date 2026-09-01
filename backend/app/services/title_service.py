@@ -24,7 +24,9 @@ async def generate_title(user_msg: str, assistant_msg: str) -> str | None:
         logger.debug("title_skip", reason="llm_not_configured")
         return None
     try:
-        model = get_utility_model(temperature=0.2, max_tokens=24)
+        # A generous ceiling: on Groq the utility model is a reasoning model that
+        # spends tokens on a (short, reasoning_effort="low") pass before the title.
+        model = get_utility_model(temperature=0.2, max_tokens=64)
         resp = await ainvoke(
             model,
             [
