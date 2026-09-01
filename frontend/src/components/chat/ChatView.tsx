@@ -186,7 +186,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         </div>
       ) : (
         <>
-          <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-4 sm:px-6">
+          <div className="flex flex-1 flex-col gap-8 overflow-y-auto p-4 py-6 sm:px-6">
             {messages.map((m) => (
               <Message
                 key={m.id}

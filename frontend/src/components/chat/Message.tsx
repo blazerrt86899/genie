@@ -72,7 +72,7 @@ export function Message({
   const name = isUser ? userName : "Genie";
 
   return (
-    <div className={cn("flex flex-col gap-1.5", isUser ? "items-end" : "items-start")}>
+    <div className={cn("flex flex-col gap-2", isUser ? "items-end" : "items-start")}>
       {!isUser && message.agents && message.agents.length > 0 && (
         <AgentTrail agents={message.agents} activeAgents={activeAgents} />
       )}
