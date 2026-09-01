@@ -1608,6 +1608,8 @@ _Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (re
 
 _Also 2026-09-01 — **LLM provider switch** (`settings.LLM_PROVIDER` = `openai` | `groq`): `agents/models.py` builds `ChatGroq` or `ChatOpenAI`; `config.chat_model_name` / `utility_model_name` / `llm_configured` resolve by provider; `_transient_errors()` collects both SDKs' retryable exceptions; `title_service` + `task_service._summarise` now route through the shared factories. Verified live end-to-end through the real graph with `LLM_PROVIDER=groq` (`openai/gpt-oss-120b` + `openai/gpt-oss-20b`) — structured output (`include_raw`), `usage_metadata` token write-back, and streamed synthesiser tokens all work; `ainvoke` retry bumped to 4 attempts / ~30s to ride out the Groq free-tier 8k-TPM 429. Embeddings stay on OpenAI._
 
+_Also 2026-09-01 — **Groq gpt-oss reasoning-model fix**: `openai/gpt-oss-*` burn completion tokens on a hidden reasoning pass before emitting content, so a tight `max_tokens` returns an empty string (`finish_reason="length"`) — this silently broke auto conversation titles. `models._build()` now sends `reasoning_effort="low"` for Groq gpt-oss models (always via `get_utility_model()`); `title_service` `max_tokens` 24 → 64. Any new tight-budget utility call must leave headroom for the reasoning pass._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
