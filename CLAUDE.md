@@ -64,7 +64,7 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | ASGI Server | Uvicorn + Gunicorn | Multi-worker in prod |
 | Orchestration | LangGraph | Supervisor pattern, `astream_events v2` |
 | Tool servers | **FastMCP** (`fastmcp>=3`) | Centralized MCP layer — `app/mcp/*` (§22) |
-| LLM Provider | `settings.LLM_PROVIDER` — `openai` \| `groq` | `openai` (`gpt-4o-2024-08-06`, pin in prod) is default; `groq` (`openai/gpt-oss-120b` chat + `openai/gpt-oss-20b` utility) is the OpenAI-credit-free testing path. `agents/models.py` branches; both SDKs raise the same exception names so the retry/token helpers are provider-agnostic. |
+| LLM Provider | `settings.LLM_PROVIDER` — `openai` \| `groq` | `openai` (`gpt-4o-2024-08-06`, pin in prod) is default; `groq` (`openai/gpt-oss-120b` chat + `qwen/qwen3.8-27b` utility) is the OpenAI-credit-free testing path. `agents/models.py` branches; both SDKs raise the same exception names so the retry/token helpers are provider-agnostic. |
 | Embeddings | OpenAI `text-embedding-3-small` | 1536 dims — **always OpenAI**, regardless of `LLM_PROVIDER` |
 | Task Queue | AWS SQS | Standard queue, idempotent consumers |
 | Background Worker | Python SQS consumer | Separate ECS service |
@@ -400,7 +400,7 @@ OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # embeddings ALWAYS stay on Open
 # can brush it; models.ainvoke() retries the 429 (tenacity, up to ~30s).
 GROQ_API_KEY=
 GROQ_CHAT_MODEL=openai/gpt-oss-120b       # supervisor / synthesiser / agents
-GROQ_UTILITY_MODEL=openai/gpt-oss-20b     # enhancer / greeting / titles / validator
+GROQ_UTILITY_MODEL=qwen/qwen3.8-27b       # enhancer / greeting / titles / validator
 
 # ─── LangSmith (observability) ───────────────────────────────────────────────
 # `app/core/observability.py:configure_tracing()` copies these into os.environ at
@@ -1608,7 +1608,7 @@ _Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (re
 
 _Also 2026-09-01 — **LLM provider switch** (`settings.LLM_PROVIDER` = `openai` | `groq`): `agents/models.py` builds `ChatGroq` or `ChatOpenAI`; `config.chat_model_name` / `utility_model_name` / `llm_configured` resolve by provider; `_transient_errors()` collects both SDKs' retryable exceptions; `title_service` + `task_service._summarise` now route through the shared factories. Verified live end-to-end through the real graph with `LLM_PROVIDER=groq` (`openai/gpt-oss-120b` + `openai/gpt-oss-20b`) — structured output (`include_raw`), `usage_metadata` token write-back, and streamed synthesiser tokens all work; `ainvoke` retry bumped to 4 attempts / ~30s to ride out the Groq free-tier 8k-TPM 429. Embeddings stay on OpenAI._
 
-_Also 2026-09-01 — **Groq gpt-oss reasoning-model fix**: `openai/gpt-oss-*` burn completion tokens on a hidden reasoning pass before emitting content, so a tight `max_tokens` returns an empty string (`finish_reason="length"`) — this silently broke auto conversation titles. `models._build()` now sends `reasoning_effort="low"` for Groq gpt-oss models (always via `get_utility_model()`); `title_service` `max_tokens` 24 → 64. Any new tight-budget utility call must leave headroom for the reasoning pass._
+_Also 2026-09-01 — **Groq reasoning-model fix + utility model → `qwen/qwen3.8-27b`**: Groq's `openai/gpt-oss-*` and `qwen/qwen3*` burn completion tokens on a hidden reasoning pass before emitting content, so a tight `max_tokens` returns an empty string (`finish_reason="length"`) — this silently broke auto conversation titles. `models._build(light=True)` (always set by `get_utility_model()`) now sends the smallest valid `reasoning_effort` per model family (`_groq_light_reasoning()`: `"low"` for gpt-oss — it rejects `"none"` — `"none"` for qwen3); `title_service` `max_tokens` 24 → 64. `GROQ_UTILITY_MODEL` is now `qwen/qwen3.8-27b` (follows a terse system prompt better than gpt-oss-20b; verified titles + structured output + the full graph). Any new tight-budget utility call must still leave a little headroom for the pass._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|

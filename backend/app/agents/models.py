@@ -52,25 +52,39 @@ _RETRY_ATTEMPTS = 4
 _retry_wait = wait_exponential(multiplier=2, min=2, max=30)  # patchable in tests
 
 
+def _groq_light_reasoning(model: str) -> str | None:
+    """The smallest valid ``reasoning_effort`` for a Groq reasoning model.
+
+    gpt-oss-* and qwen3* burn completion tokens on a hidden reasoning pass before
+    emitting content, so a tight ``max_tokens`` returns an EMPTY answer
+    (finish_reason="length"). For utility calls we want that pass as short as
+    possible (also cheaper against the free-tier TPM cap). gpt-oss rejects
+    "none" — "low" is its floor; qwen3 accepts "none".
+    """
+    if model.startswith("openai/gpt-oss"):
+        return "low"
+    if model.startswith("qwen/qwen3"):
+        return "none"
+    return None
+
+
 def _build(
     model: str,
     *,
     streaming: bool,
     temperature: float,
     max_tokens: int | None,
-    reasoning_effort: str | None = None,
+    light: bool = False,
 ) -> BaseChatModel:
     max_retries = 2 if streaming else 0  # streaming keeps langchain's own retry
     if settings.LLM_PROVIDER == "groq":
         from langchain_groq import ChatGroq
 
         kwargs: dict[str, Any] = {}
-        # Groq's gpt-oss-* are reasoning models — they burn completion tokens on a
-        # hidden reasoning pass before emitting content, so a small max_tokens
-        # yields an EMPTY answer (finish_reason="length"). "low" keeps that pass
-        # short (and cheaper against the free-tier TPM cap).
-        if reasoning_effort and model.startswith("openai/gpt-oss"):
-            kwargs["reasoning_effort"] = reasoning_effort
+        if light:
+            effort = _groq_light_reasoning(model)
+            if effort:
+                kwargs["reasoning_effort"] = effort
 
         return ChatGroq(
             model=model,
@@ -114,8 +128,9 @@ def get_chat_model(*, streaming: bool = True, temperature: float = 0.7) -> BaseC
 def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> BaseChatModel:
     """A cheap model for small, non-streamed jobs (routing, greetings, titles).
 
-    On Groq the utility model is a gpt-oss reasoning model, so callers that pass a
-    tight ``max_tokens`` must leave room for the reasoning pass — see ``_build``.
+    On Groq the utility model (gpt-oss / qwen3) is a reasoning model — ``light=True``
+    trims the reasoning pass to its minimum, but callers passing a tight
+    ``max_tokens`` must still leave a little headroom for it (see ``_build``).
     """
     model = settings.utility_model_name
     logger.debug(
@@ -129,7 +144,7 @@ def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None
         streaming=False,
         temperature=temperature,
         max_tokens=max_tokens,
-        reasoning_effort="low",
+        light=True,
     )
 
 

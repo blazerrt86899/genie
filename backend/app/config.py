@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str | None = None
     GROQ_CHAT_MODEL: str = "openai/gpt-oss-120b"
     # cheap/fast Groq model: enhancer, greeting, titles, validator
-    GROQ_UTILITY_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_UTILITY_MODEL: str = "qwen/qwen3.8-27b"
 
     # ─── LangSmith ─────────────────────────────────────────────────────────
     # Accept both the current LANGSMITH_* names and the legacy LANGCHAIN_* ones.
