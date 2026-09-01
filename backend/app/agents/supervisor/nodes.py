@@ -89,6 +89,42 @@ def _format_attachments(state: GenieState) -> str:
     )
 
 
+_KB_CHAR_BUDGET = 12_000  # retrieved chunks are already trimmed to final_context_size
+
+
+def _kb_note(state: GenieState) -> str:
+    """Short — for the supervisor: the KB has relevant material, skip a web search."""
+    chunks = state.get("retrieved_chunks") or []
+    if not chunks:
+        return ""
+    srcs = ", ".join(dict.fromkeys(c["filename"] for c in chunks))
+    return (
+        f"\n\nThe project's knowledge base has {len(chunks)} passage(s) relevant to "
+        f"this request (from: {srcs}) — they're provided to the writer, so a web "
+        "search is usually unnecessary."
+    )
+
+
+def _format_kb(state: GenieState) -> str:
+    """The retrieved chunks, budgeted. Synthesiser only."""
+    chunks = state.get("retrieved_chunks") or []
+    if not chunks:
+        return ""
+    blocks: list[str] = []
+    used = 0
+    for c in chunks:
+        body = c["content"]
+        if used + len(body) > _KB_CHAR_BUDGET:
+            break
+        used += len(body)
+        head = f"{c['filename']}" + (f" — {c['heading']}" if c.get("heading") else "")
+        blocks.append(f"### {head}\n{body}")
+    return (
+        "\n\n---\nFrom the project knowledge base (cite the source file when you use "
+        "it; say so if it doesn't cover the question):\n\n" + "\n\n".join(blocks)
+    )
+
+
 def _ledger_text(plan: list[TaskRecord]) -> str:
     if not plan:
         return ""
@@ -144,6 +180,45 @@ def _plan_to_ledger(steps: list[PlanStep]) -> list[TaskRecord]:
     return ledger
 
 
+# ─── retriever node (project Knowledge Base — §10) ───────────────────────────
+
+
+async def retriever_node(state: GenieState) -> dict:
+    """Pull relevant chunks from the project's Knowledge Base. Not a registry
+    agent — a pipeline node between prompt_enhancer and supervisor. Runs only when
+    the project has a ready KB and the enhancer flagged ``needs_documents``."""
+    if not state.get("has_kb") or not state.get("needs_documents"):
+        return {}
+    if not settings.llm_configured:  # retrieval needs a query embedding
+        return {}
+
+    import uuid as _uuid
+
+    from app.db.session import get_sessionmaker
+    from app.schemas.rag import resolve as _resolve_rag
+    from app.services.rag import retrieval_service
+
+    query = state.get("enhanced_query") or ""
+    project_id = (state.get("metadata") or {}).get("project_id")
+    if not query.strip() or not project_id:
+        return {}
+
+    await _emit("agent_start", {"agent": "kb_search", "task": "Searching your knowledge base"})
+    try:
+        rag = _resolve_rag(state.get("rag_settings"))
+        async with get_sessionmaker()() as db:
+            chunks = await retrieval_service.retrieve(
+                db, _uuid.UUID(project_id), _uuid.UUID(state["user_id"]), query, rag
+            )
+        logger.info("retriever_done", chunks=len(chunks), strategy=str(rag.search_strategy))
+        return {"retrieved_chunks": chunks}
+    except Exception:  # noqa: BLE001 — never block the turn on retrieval
+        logger.warning("retriever_failed", exc_info=True)
+        return {}
+    finally:
+        await _emit("agent_end", {"agent": "kb_search", "status": "done"})
+
+
 def _format_findings(plan: list[TaskRecord], results: dict) -> str:
     """Render non-streamed findings in plan order, with globally-numbered sources."""
     blocks: list[str] = []
@@ -193,6 +268,7 @@ async def supervisor_node(state: GenieState) -> dict:
     if state.get("project_instructions"):
         system += f"\n\nProject instructions to respect:\n{state['project_instructions']}"
     system += _attachment_note(state)
+    system += _kb_note(state)
     if state.get("enhanced_query"):
         system += (
             f"\n\nResolved request (from the prompt enhancer — use this as the "
@@ -332,12 +408,12 @@ async def executor_node(state: GenieState) -> dict:
 
 
 def _augment_system(system: str, state: GenieState) -> str:
-    """Append project instructions + the full attachment text to a system prompt.
-    Used by the synthesiser (the node that actually answers from the file)."""
+    """Append project instructions + attachment text + retrieved KB chunks to a
+    system prompt. Used by the synthesiser (the node that actually answers)."""
     instructions = state.get("project_instructions")
     if instructions:
         system = f"{system}\n\n---\nProject instructions (follow these):\n{instructions}"
-    return system + _format_attachments(state)
+    return system + _format_attachments(state) + _format_kb(state)
 
 
 async def synthesiser_node(state: GenieState) -> dict:

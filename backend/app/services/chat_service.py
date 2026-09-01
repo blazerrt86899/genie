@@ -24,6 +24,7 @@ from app.core.logging import preview
 from app.core.streaming import format_sse_event, sse_done, sse_error
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
+from app.db.repositories.document_repo import DocumentRepository
 from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.project_repo import ProjectRepository
 from app.services import attachment_service
@@ -183,14 +184,21 @@ async def _generate(
         return
 
     project_instructions: str | None = None
+    rag_settings: dict | None = None
+    has_kb = False
     if conversation.project_id is not None:
         project = await ProjectRepository(db).get_for_user(conversation.project_id, user.id)
         if project is not None:
             project_instructions = project.instructions
+            rag_settings = project.rag_settings or {}
+            has_kb = (
+                await DocumentRepository(db).count_ready_for_project(conversation.project_id)
+            ) > 0
             logger.info(
-                "chat_project_instructions_loaded",
+                "chat_project_context_loaded",
                 project_id=str(conversation.project_id),
                 instruction_chars=len(project_instructions or ""),
+                has_kb=has_kb,
             )
 
     attachments: list[dict] = []
@@ -216,6 +224,10 @@ async def _generate(
         "client_hour": client_hour,
         "model": conversation.model,
         "attachments": attachments,
+        "rag_settings": rag_settings,
+        "has_kb": has_kb,
+        "needs_documents": False,
+        "retrieved_chunks": [],
         "intent": None,
         "enhanced_query": None,
         "plan": [],
@@ -228,7 +240,9 @@ async def _generate(
         "token_usage": {"total": 0, "by_agent": {}},
         "user_memories": [],
         "should_interrupt": False,
-        "metadata": {},
+        "metadata": {
+            "project_id": str(conversation.project_id) if conversation.project_id else None
+        },
     }
 
     logger.info(

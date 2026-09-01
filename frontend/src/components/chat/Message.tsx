@@ -11,6 +11,11 @@ function initials(name: string) {
 
 const AGENT_LABELS: Record<string, { icon: typeof Globe; live: string; done: string }> = {
   web_search: { icon: Globe, live: "Searching the web", done: "Searched the web" },
+  kb_search: {
+    icon: FileText,
+    live: "Searching your knowledge base",
+    done: "Searched your knowledge base",
+  },
   greeting: { icon: Sparkles, live: "Greeting you", done: "Greeted you" },
   rag: { icon: Globe, live: "Reading your documents", done: "Read your documents" },
   task_creator: { icon: CheckSquare, live: "Updating your tasks", done: "Updated your tasks" },

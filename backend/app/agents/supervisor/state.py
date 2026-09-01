@@ -35,6 +35,10 @@ class GenieState(TypedDict):
     client_hour: int | None  # the user's local hour (0-23), for time-aware agents
     model: str | None  # picked chat-model id (MODEL_CATALOG); None → server default
     attachments: list[dict]  # [{filename, kind, text}] — files sent with THIS turn only
+    rag_settings: dict | None  # the project's RagSettings (§10); None outside a KB project
+    has_kb: bool  # the project has >=1 ready document
+    needs_documents: bool  # the enhancer's gate for running retrieval this turn
+    retrieved_chunks: list[dict]  # [{content, similarity, heading, filename}] from the KB
     intent: str | None  # short label from the prompt_enhancer
     enhanced_query: str | None  # the latest message rewritten self-contained (prompt_enhancer)
     plan: list[TaskRecord]  # the task ledger — supervisor writes, executor updates
@@ -89,4 +93,10 @@ class EnhancedPrompt(BaseModel):
     enhanced_query: str = Field(
         description="The latest message rewritten as a precise, self-contained request "
         "(resolve pronouns / references using the conversation). Do NOT answer it."
+    )
+    needs_documents: bool = Field(
+        default=False,
+        description="True if answering well would need the user's project documents / "
+        "knowledge base (a real question about a topic, code, a doc). False for "
+        "greetings, thanks, small talk, or tasks about the task board.",
     )

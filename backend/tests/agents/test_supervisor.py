@@ -288,6 +288,59 @@ async def test_validator_runs_grounding_check_when_agents_ran(monkeypatch) -> No
     assert "contradicts sources" in out["validation"]["issues"]
 
 
+async def test_retriever_node_gated(monkeypatch) -> None:
+    # no KB → no-op
+    assert await nodes.retriever_node({"has_kb": False, "needs_documents": True}) == {}
+    # KB but the enhancer said no → no-op
+    assert await nodes.retriever_node({"has_kb": True, "needs_documents": False}) == {}
+
+    calls = {}
+
+    async def _retrieve(db, pid, uid, query, s):
+        calls["query"] = query
+        return [{"content": "chunk", "similarity": 0.9, "heading": None, "filename": "f.md"}]
+
+    async def _noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("app.services.rag.retrieval_service.retrieve", _retrieve)
+    monkeypatch.setattr(nodes, "_emit", _noop)
+
+    class _CM:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.db.session.get_sessionmaker", lambda: (lambda: _CM()))
+    monkeypatch.setattr(nodes, "settings", SimpleNamespace(llm_configured=True))
+
+    import uuid
+
+    out = await nodes.retriever_node(
+        {
+            "has_kb": True,
+            "needs_documents": True,
+            "enhanced_query": "what does the doc say",
+            "user_id": str(uuid.uuid4()),
+            "rag_settings": {},
+            "metadata": {"project_id": str(uuid.uuid4())},
+        }
+    )
+    assert calls["query"] == "what does the doc say"
+    assert out["retrieved_chunks"][0]["content"] == "chunk"
+
+
+def test_kb_helpers() -> None:
+    assert nodes._kb_note({}) == ""
+    assert nodes._format_kb({}) == ""
+    st = {"retrieved_chunks": [{"content": "body text", "filename": "spec.md", "heading": "Intro"}]}
+    assert "spec.md" in nodes._kb_note(st)
+    full = nodes._format_kb(st)
+    assert "spec.md — Intro" in full and "body text" in full
+
+
 def test_attachment_helpers() -> None:
     assert nodes._attachment_note({}) == ""
     assert nodes._format_attachments({}) == ""

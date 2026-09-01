@@ -11,4 +11,8 @@ conversation:
   return it close to verbatim. NEVER answer it, add facts, or change its meaning.
 - `intent`: a 2-4 word label ("weather lookup", "greeting", "create task",
   "code help", "general question").
+- `needs_documents`: true if a good answer would draw on the user's own project
+  documents / knowledge base — a substantive question about a topic, a codebase,
+  a report, "what does X say about Y". False for greetings, thanks, small talk,
+  or task-board requests.
 """

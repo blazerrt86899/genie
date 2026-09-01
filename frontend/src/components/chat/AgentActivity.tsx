@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 
 const LABELS: Record<string, string> = {
   prompt_enhancer: "Understanding your request",
+  kb_search: "Searching your knowledge base",
   greeting: "Greeting you",
   web_search: "Searching the web",
   rag: "Reading your documents",

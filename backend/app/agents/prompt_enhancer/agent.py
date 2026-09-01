@@ -49,16 +49,19 @@ async def prompt_enhancer_node(state: GenieState) -> dict:
             "prompt_enhanced",
             intent=intent,
             rewritten=enhanced != original.strip(),
+            needs_documents=parsed.needs_documents,
         )
         return {
             "intent": intent,
             "enhanced_query": enhanced,
+            "needs_documents": bool(parsed.needs_documents),
             "token_usage": bump_tokens(
                 state.get("token_usage"), tokens_of(result), "prompt_enhancer"
             ),
         }
     except Exception:  # noqa: BLE001 — never block the turn on enhancement
         logger.warning("prompt_enhance_failed", exc_info=True)
-        return {"intent": "unknown", "enhanced_query": original}
+        # be safe: if we can't tell, allow retrieval (the retriever still gates on has_kb)
+        return {"intent": "unknown", "enhanced_query": original, "needs_documents": True}
     finally:
         await emit("agent_end", {"agent": "prompt_enhancer", "status": "done"})

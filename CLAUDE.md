@@ -200,7 +200,7 @@ genie/
 │       │   ├── models.py              ← MODEL_CATALOG + resolve_model_spec · _build(openai|anthropic|groq) · get_chat_model(model_id) / get_utility_model / ainvoke (retry) / tokens_of
 │       │   ├── registry.py            ← AGENT_REGISTRY, AgentSpec, agent_menu()
 │       │   ├── supervisor/
-│       │   │   ├── graph.py           ← build_graph(): prompt_enhancer→supervisor→executor→synthesiser→validator
+│       │   │   ├── graph.py           ← build_graph(): prompt_enhancer→retriever→supervisor→executor→synthesiser→validator
 │       │   │   ├── state.py           ← GenieState + TaskRecord + SupervisorPlan + EnhancedPrompt + Validation
 │       │   │   ├── nodes.py           ← supervisor / executor / synthesiser / validator nodes
 │       │   │   └── prompts.py         ← supervisor (registry-driven) / synthesiser / validator prompts
@@ -269,7 +269,8 @@ genie/
 │       │   ├── document_service.py    ← KB: validate → S3 put → row → SQS enqueue; list/get/chunks/delete
 │       │   └── rag/
 │       │       ├── partition_service.py  ← pdf (pdfminer) / md·txt (unstructured) → typed Elements
-│       │       └── chunk_service.py      ← chunk_by_title → Chunk[] (size/overlap from RagSettings)
+│       │       ├── chunk_service.py      ← chunk_by_title → Chunk[] (size/overlap from RagSettings)
+│       │       └── retrieval_service.py  ← retrieve(project, query, RagSettings) — vector / hybrid RPC / multi-query + RRF
 │       │
 │       ├── workers/
 │       │   ├── sqs_consumer.py        ← (stub)
@@ -1019,11 +1020,13 @@ ALTER TABLE user_memory      ENABLE ROW LEVEL SECURITY;
 ## 9. LangGraph: GenieState & Graph Wiring
 
 > **Current reality (see §19):** the real graph runs —
-> `START → prompt_enhancer → supervisor → executor → synthesiser → validator → {supervisor | END}`.
+> `START → prompt_enhancer → retriever → supervisor → executor → synthesiser → validator → {supervisor | END}`.
 > Three agents are registered (`greeting`, `web_search`, `task_creator`);
-> `prompt_enhancer` is a node not a registry agent; `rag`/`calendar` dirs are
-> still stubs. The compiled graph + `AsyncPostgresSaver` checkpointer are created
-> once in the FastAPI lifespan and held via `set_runtime_graph()` / `get_runtime_graph()`.
+> `prompt_enhancer` and `retriever` are **pipeline nodes**, not registry agents
+> (`retriever` = the project Knowledge Base, §10 — runs only when the chat's
+> project has a ready KB and the enhancer set `needs_documents`); the `rag`/`calendar`
+> dirs are still stubs. The compiled graph + `AsyncPostgresSaver` checkpointer are
+> created once in the FastAPI lifespan and held via `set_runtime_graph()` / `get_runtime_graph()`.
 
 ### GenieState (`app/agents/supervisor/state.py`)
 ```python
@@ -1044,6 +1047,10 @@ class GenieState(TypedDict):
     client_hour:          int | None                     # user's local hour 0-23 (time-aware agents)
     model:                str | None                     # picked chat-model id (MODEL_CATALOG); None → server default
     attachments:          list[dict]                     # [{filename,kind,text}] — files sent with THIS turn only
+    rag_settings:         dict | None                    # the project's RagSettings (§10); None outside a KB project
+    has_kb:               bool                           # the project has ≥1 ready document
+    needs_documents:      bool                           # the enhancer's gate for running retrieval this turn
+    retrieved_chunks:     list[dict]                     # [{content, similarity, heading, filename}] from the KB
     intent:               str | None                     # short label from the prompt_enhancer
     enhanced_query:       str | None                     # latest message rewritten self-contained (prompt_enhancer)
     plan:                 list[TaskRecord]               # the task ledger — supervisor writes, executor updates
@@ -1082,14 +1089,16 @@ Add an agent = add an `AgentSpec` here (+ its module) — no graph node needed, 
 ### Graph wiring (`app/agents/supervisor/graph.py`)
 ```python
 graph = StateGraph(GenieState)
-graph.add_node("prompt_enhancer", prompt_enhancer_node)  # rewrite the message self-contained + intent
+graph.add_node("prompt_enhancer", prompt_enhancer_node)  # rewrite self-contained + intent + needs_documents
+graph.add_node("retriever",   retriever_node)    # project Knowledge Base (§10) — runs iff has_kb & needs_documents
 graph.add_node("supervisor",  supervisor_node)   # LLM plan → task ledger
 graph.add_node("executor",    executor_node)     # walk ledger, run agents in dep order, update statuses
 graph.add_node("synthesiser", synthesiser_node)  # compose the one user-facing reply (streams)
 graph.add_node("validator",   validator_node)    # non-empty + LLM grounding check when agents ran
 
 graph.add_edge(START, "prompt_enhancer")
-graph.add_edge("prompt_enhancer", "supervisor")
+graph.add_edge("prompt_enhancer", "retriever")
+graph.add_edge("retriever", "supervisor")
 graph.add_edge("supervisor", "executor")
 graph.add_edge("executor", "synthesiser")
 graph.add_edge("synthesiser", "validator")
@@ -1168,14 +1177,22 @@ ingestion_worker.poll_loop()                # dev: in-process; prod: separate EC
 `GET /api/v1/documents/{id}/stream` (SSE) relays the Redis channel so the
 Knowledge-Base pipeline modal updates live.
 
-### Retrieval (commit 2 — TODO)
-`services/rag/retrieval_service.retrieve(project_id, query, RagSettings)` — the
-strategy comes from `projects.rag_settings` (`schemas/rag.py:RagSettings`):
-`vector` (pgvector cosine top-k) · `hybrid` (the `hybrid_search_project_chunks`
-RPC, RRF) · `multi_query_*` (utility-model paraphrases → per-query search → RRF
-fuse). Gated by the prompt-enhancer's `needs_documents`; a `retriever` graph node
-between `prompt_enhancer` and `supervisor` injects the chunks (note → supervisor,
-full text → synthesiser, like attachments §9).
+### Retrieval (commit 2 — DONE)
+`services/rag/retrieval_service.retrieve(db, project_id, user_id, query, RagSettings)`
+— strategy from `projects.rag_settings` (`schemas/rag.py:RagSettings`):
+`vector` (pgvector cosine top-k, `similarity_threshold` floor) · `hybrid` (the
+`genie.hybrid_search_project_chunks` RPC — RRF over semantic + FTS) ·
+`multi_query_*` (utility-model writes `num_queries` paraphrases → base strategy
+per query → RRF-fuse → top `final_context_size`).
+
+Wired as a **`retriever` graph node** (`nodes.retriever_node`) between
+`prompt_enhancer` and `supervisor`. Runs only when `state.has_kb` (the project has
+a ready document) **and** `state.needs_documents` (the enhancer's gate — false for
+greetings / small talk). Emits `agent_start`/`agent_end` for `kb_search` (the
+"Searching your knowledge base" pill). Injection mirrors attachments (§9):
+`nodes._kb_note` (source filenames) → supervisor prompt (skip a web search);
+`nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`.
+`chat_service._generate` loads `rag_settings` + `has_kb` into the initial state.
 
 ---
 
@@ -1390,7 +1407,7 @@ DELETE /api/v1/documents/{id}           → 204 (S3 object + chunks + row)
 - [x] Prompt Enhancer node — first node; rewrites the latest message self-contained (resolves pronouns) + an `intent` label → `state.enhanced_query`
 - [x] Synthesiser node — composes the one streamed reply (greeting fast-path skips the LLM)
 - [x] Validator node — non-empty check + an LLM grounding check when agents ran; a reject re-plans (capped)
-- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (prompt_enhancer→supervisor→executor→synthesiser→validator)
+- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (prompt_enhancer→retriever→supervisor→executor→synthesiser→validator)
 - [x] `POST /chat` (+ `client_hour`) + `GET /chat/{id}/stream` SSE endpoints
 - [x] SSE event protocol: `agent_start`, `agent_end`, `plan`, `token`, `message_break`, `message_agents`, `task_*`, `title`, `error`, `done` emitted
 - [x] Redis L1: `rate_limit` — `memory/short_term.check_rate_limit` (INCR/EXPIRE), enforced in `POST /chat` (429). _`recent_messages` → Phase 6._
@@ -1430,8 +1447,7 @@ already gives per-chat memory.)_
 - [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
 - [x] **Composer attachments** (`0b4ae74dbb70`) — `attachment_service` parses pdf/txt/md → text → the `attachments` table → one-shot into the turn's prompts. The parser + `attachments.content` are the stepping stone for the ingestion pipeline below (chunk + embed the stored text).
 - [x] **Project Knowledge Base — commit 1 (ingestion)** (`883a87726339`) — `documents` + `document_chunks` (pgvector `vector(1536)` + ivfflat + gin + fts trigger) + `projects.rag_settings`; `core/aws.py` (S3/SQS, LocalStack-auto); `document_service` (validate → S3 → SQS); `ingestion_worker` (partition via pdfminer/unstructured → `chunk_by_title` → OpenAI embeddings → bulk store, Redis progress, idempotent); `POST/GET/DELETE /documents` + `/{id}/stream` + `/{id}/chunks`; `PATCH /projects/{id} {rag_settings}` (409-locked embedding model)
-- [ ] **Project Knowledge Base — commit 2 (retrieval)** — `retrieval_service` (vector / hybrid RPC / multi-query), `retriever` graph node gated by the enhancer's `needs_documents`, chunks injected into the answer
-- [ ] Run `setup_supabase.sql` — the `hybrid_search_project_chunks` RPC (added; used by commit 2)
+- [x] **Project Knowledge Base — commit 2 (retrieval)** — `retrieval_service` (vector / hybrid RPC / multi-query + RRF); `retriever` graph node (`prompt_enhancer → retriever → supervisor`) gated by `has_kb` + the enhancer's `needs_documents`; `_kb_note` → supervisor, `_format_kb` → synthesiser. `hybrid_search_project_chunks` RPC in `setup_supabase.sql`. Verified live end-to-end (embeddings faked — OpenAI at $0).
 
 **Frontend tasks**:
 - [x] Task Board: `/tasks` — 3 columns, HTML5 drag between columns, "Archive done" button, collapsible "Archived (N)"
@@ -1575,7 +1591,7 @@ brand-new chat; `/memory` lets the user see and remove what Genie knows.
 ```
 tests/  (≈90 tests, all green)
 ├── agents/
-│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing, attachment helpers
+│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing, attachment + KB helpers, retriever gate
 │   ├── test_registry.py        ← registry integrity
 │   ├── test_models.py          ← ainvoke retry, bump_tokens, MODEL_CATALOG resolve/filter
 │   ├── test_prompt_enhancer.py ← rewrite + token track + passthrough/error
@@ -1591,7 +1607,8 @@ tests/  (≈90 tests, all green)
 │   ├── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
 │   ├── test_partition_service.py  ← md/txt/pdf → typed elements + stats
 │   ├── test_chunk_service.py      ← chunk index/tokens/metadata; size affects count
-│   └── test_document_service.py   ← create_and_enqueue: S3 put + SQS send; reject bad type/oversize
+│   ├── test_document_service.py   ← create_and_enqueue: S3 put + SQS send; reject bad type/oversize
+│   └── test_retrieval_service.py  ← strategy dispatch (vector/hybrid/multi-query) + RRF fusion
 ├── schemas/
 │   └── test_rag_settings.py    ← defaults / clamping / enum / resolve
 ├── workers/
@@ -1691,13 +1708,15 @@ _Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL
 
 _Also 2026-09-01 — **Composer "+" menu: file attachments + Add to project**: `POST /attachments` (multipart, pdf/txt/md ≤ 5 MB) → `attachment_service.parse_upload` (`pypdf` for PDF; utf-8 for txt/md) → `attachments` table. `POST /chat` `attachment_ids` → `create_turn` links them to the user message (+ `message_metadata.attachments`) → `_generate` → `GenieState['attachments']` (**one-shot** — that turn only). `nodes._attachment_note` (filenames) → enhancer + supervisor (skip web search); `nodes._format_attachments` (24k-char budget, visible `…[truncated]`) → synthesiser only. New `PATCH /conversations/{id} {project_id}`. Frontend: `PlusMenu` (Add files hidden `<input>` · Add to project submenu → `patchConversation` or `chatStore.pendingProjectId` for a new chat), `AttachmentChips`, `useAttachments`, `chatStore.pendingAttachments`. Verified live: small file → supervisor plans empty (no web search), synthesiser answers from it; 30k-char file → truncation marker, run stays well under `MAX_TOKENS_PER_RUN`._
 
-_Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: `documents` + `document_chunks` (pgvector `vector(1536)`, ivfflat + gin + fts trigger) + `projects.rag_settings` (migration `883a87726339`). `core/aws.py` (boto3 s3/sqs, LocalStack auto-provisions bucket + queue on boot). `POST /api/v1/documents` (multipart, pdf/md/txt ≤ 25 MB) → `document_service` uploads to S3 + enqueues SQS. `workers/ingestion_worker.py` (dev: in-process from the lifespan; prod: `python -m`) polls SQS → `ingest_document` runs `partition_service` (pdfminer for PDF, `unstructured` for md/txt → typed Elements + "Elements Discovered" stats) → `chunk_service` (`chunk_by_title`, size/overlap from `RagSettings`) → `embedder.embed_batch` (**OpenAI `text-embedding-3-small`**) → `document_chunk_repo.bulk_insert`; idempotent (skips `ready`/`processed_at`); per-phase status on the row + `redis PUBLISH doc_pipeline:{id}`. `GET /documents/{id}/stream` (SSE) relays it; `/{id}/chunks` browses them. Frontend: `KnowledgeBasePanel` in `ProjectView` (Documents + Settings tabs) — `DocumentUpload`, `DocumentList`, `PipelineModal` (live), `ChunkViewer`, `RagSettingsForm`. Verified end-to-end against LocalStack + Postgres (embeddings faked — the OpenAI account is at $0; the vectorize phase needs a top-up). Commit 2 (retrieval into the chat flow) is next; `hybrid_search_project_chunks` RPC is already in `setup_supabase.sql`._
+_Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: `documents` + `document_chunks` (pgvector `vector(1536)`, ivfflat + gin + fts trigger) + `projects.rag_settings` (migration `883a87726339`). `core/aws.py` (boto3 s3/sqs, LocalStack auto-provisions bucket + queue on boot). `POST /api/v1/documents` (multipart, pdf/md/txt ≤ 25 MB) → `document_service` uploads to S3 + enqueues SQS. `workers/ingestion_worker.py` (dev: in-process from the lifespan; prod: `python -m`) polls SQS → `ingest_document` runs `partition_service` (pdfminer for PDF, `unstructured` for md/txt → typed Elements + "Elements Discovered" stats) → `chunk_service` (`chunk_by_title`, size/overlap from `RagSettings`) → `embedder.embed_batch` (**OpenAI `text-embedding-3-small`**) → `document_chunk_repo.bulk_insert`; idempotent (skips `ready`/`processed_at`); per-phase status on the row + `redis PUBLISH doc_pipeline:{id}`. `GET /documents/{id}/stream` (SSE) relays it; `/{id}/chunks` browses them. Frontend: `KnowledgeBasePanel` in `ProjectView` (Documents + Settings tabs) — `DocumentUpload`, `DocumentList`, `PipelineModal` (live), `ChunkViewer`, `RagSettingsForm`. Verified end-to-end against LocalStack + Postgres (embeddings faked — the OpenAI account is at $0; the vectorize phase needs a top-up)._
+
+_Also 2026-09-01 — **Project Knowledge Base, commit 2 (retrieval)**: `services/rag/retrieval_service.retrieve()` — `vector` (pgvector cosine + threshold) / `hybrid` (`hybrid_search_project_chunks` RPC, RRF) / `multi_query_*` (utility-model paraphrases → per-query search → RRF-fuse → top `final_context_size`). New **`retriever` graph node** (`prompt_enhancer → retriever → supervisor`), a pipeline node (not a registry agent), runs only when `state.has_kb and state.needs_documents`; `EnhancedPrompt` gained `needs_documents` (the enhancer's gate — false for greetings/small talk). `nodes._kb_note` (filenames) → supervisor; `nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`. `GenieState` += `rag_settings` / `has_kb` / `needs_documents` / `retrieved_chunks`; `chat_service._generate` loads them from the project. Frontend labels `kb_search`. Verified live through the graph: "how does retrieval work?" in a KB project → enhancer flags it → 5 chunks retrieved → grounded answer; "hi there" → gate off, skipped._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
 | Phase 1 — Foundation | 🟢 Complete | 100% |
-| Phase 2 — Tasks + RAG / Documents | 🟡 In Progress | ~70% (tasks ✅, KB ingestion ✅, KB retrieval ⬜) |
+| Phase 2 — Tasks + RAG / Documents | 🟢 Complete | 100% (tasks ✅, KB ingestion + retrieval ✅) — multimodal/website/RAG-agent → backlog |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
@@ -1719,7 +1738,8 @@ _Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: 
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
-- ✅ **prompt_enhancer node** — runs first (`START → prompt_enhancer → supervisor`): `get_utility_model().with_structured_output(EnhancedPrompt, include_raw=True)` rewrites the latest message self-contained (resolves "it"/"the second one") → `state.enhanced_query` (fed to the supervisor prompt) + `state.intent`; passthrough on any error; emits `agent_start`/`agent_end` for the "Understanding your request…" pill.
+- ✅ **prompt_enhancer node** — runs first: `get_utility_model().with_structured_output(EnhancedPrompt, include_raw=True)` rewrites the latest message self-contained (resolves "it"/"the second one") → `state.enhanced_query` + `state.intent` + `state.needs_documents` (the KB retrieval gate); passthrough on any error; emits `agent_start`/`agent_end` for the "Understanding your request…" pill.
+- ✅ **retriever node** (`nodes.retriever_node`, §10) — `prompt_enhancer → retriever → supervisor`. A pipeline node, not a registry agent. No-op unless `state.has_kb and state.needs_documents`; else opens its own session → `retrieval_service.retrieve(project_id, enhanced_query, RagSettings)` → `state.retrieved_chunks`. `kb_search` pill. `_kb_note` → supervisor, `_format_kb` → synthesiser.
 - ✅ **Unified LLM layer + model picker** (`agents/models.py`) — `MODEL_CATALOG` (8 models · OpenAI/Anthropic/Groq); `_build(provider, model, …)` → `ChatOpenAI` / `ChatAnthropic` / `ChatGroq`; `get_chat_model(model_id=…)` → `resolve_model_spec` (unknown/keyless → `_default_spec()` = `LLM_PROVIDER` + `chat_model_name`, logged `model_id_unresolved`). The 4 chat-model call sites (`supervisor` / `synthesiser` ×2 / `web_search` / `task_creator`) pass `model_id=state.get("model")`; `get_utility_model()` untouched. `conversations.model` persists the pick (`chat_service.create_turn` sets/updates it; `_generate` → `GenieState['model']`). `GET /api/v1/models` lists the catalog filtered to configured providers. `ainvoke()` = tenacity `AsyncRetrying` (4 attempts, `wait_exponential(2..30s)`) on `openai` / `anthropic` / `groq` transient errors (dynamic `_transient_errors()`); streaming keeps langchain's `max_retries=2`. `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node.
 - ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
 - ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).

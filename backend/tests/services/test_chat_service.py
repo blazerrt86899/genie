@@ -85,7 +85,16 @@ class FakeProjectRepo:
     def __init__(self, _db) -> None: ...
 
     async def get_for_user(self, project_id, user_id):
-        return SimpleNamespace(id=project_id, instructions=FakeProjectRepo.instructions)
+        return SimpleNamespace(
+            id=project_id, instructions=FakeProjectRepo.instructions, rag_settings={}
+        )
+
+
+class FakeDocRepo:
+    def __init__(self, _db) -> None: ...
+
+    async def count_ready_for_project(self, project_id):
+        return 0
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +109,7 @@ def _patch(monkeypatch):
     monkeypatch.setattr(chat_service, "ConversationRepository", FakeConvRepo)
     monkeypatch.setattr(chat_service, "MessageRepository", FakeMsgRepo)
     monkeypatch.setattr(chat_service, "ProjectRepository", FakeProjectRepo)
+    monkeypatch.setattr(chat_service, "DocumentRepository", FakeDocRepo)
     monkeypatch.setattr(chat_service, "settings", SimpleNamespace(llm_configured=True))
 
     async def _fake_title(_u, _a):
