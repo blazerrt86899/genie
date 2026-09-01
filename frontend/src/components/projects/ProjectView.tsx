@@ -10,6 +10,7 @@ import {
   useProject,
   useUpdateProject,
 } from "@/hooks/useProjects";
+import { KnowledgeBasePanel } from "./knowledge-base/KnowledgeBasePanel";
 
 export function ProjectView({ projectId }: { projectId: string }) {
   const router = useRouter();
@@ -117,6 +118,8 @@ export function ProjectView({ projectId }: { projectId: string }) {
           </Button>
         </div>
       </section>
+
+      <KnowledgeBasePanel project={project} />
 
       <section>
         <div className="flex items-center justify-between">

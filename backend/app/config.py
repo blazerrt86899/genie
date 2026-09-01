@@ -112,11 +112,16 @@ class Settings(BaseSettings):
 
     # ─── AWS ───────────────────────────────────────────────────────────────
     AWS_REGION: str = "ap-south-1"
-    AWS_ENDPOINT_URL: str | None = None
+    AWS_ENDPOINT_URL: str | None = None  # set → LocalStack; unset → real AWS
     SQS_QUEUE_URL: str | None = None
     S3_BUCKET_NAME: str | None = None
     AWS_ACCESS_KEY_ID: str | None = None
     AWS_SECRET_ACCESS_KEY: str | None = None
+
+    # ─── Knowledge Base / RAG ingestion ────────────────────────────────────
+    RUN_INGESTION_WORKER: bool | None = None  # None → not is_production
+    INGESTION_CONCURRENCY: int = 3
+    DOCUMENT_MAX_MB: int = 25
 
     # ─── Limits ────────────────────────────────────────────────────────────
     MAX_TOKENS_PER_RUN: int = 50000
@@ -171,6 +176,17 @@ class Settings(BaseSettings):
     @property
     def langsmith_enabled(self) -> bool:
         return bool(self.LANGSMITH_TRACING and self.LANGSMITH_API_KEY)
+
+    @property
+    def aws_configured(self) -> bool:
+        """True once S3 + SQS targets exist (LocalStack or real AWS)."""
+        return bool(self.S3_BUCKET_NAME and self.SQS_QUEUE_URL)
+
+    @property
+    def run_ingestion_worker(self) -> bool:
+        if self.RUN_INGESTION_WORKER is not None:
+            return self.RUN_INGESTION_WORKER
+        return not self.is_production  # prod runs it as a separate ECS service
 
 
 @lru_cache

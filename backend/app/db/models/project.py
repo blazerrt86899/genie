@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base, TimestampMixin
@@ -28,6 +29,10 @@ class Project(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500))
     instructions: Mapped[str | None] = mapped_column(Text)
+    # Knowledge-Base retrieval config (schemas/rag.py:RagSettings). {} → defaults.
+    rag_settings: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
 
     user: Mapped[User] = relationship(back_populates="projects")
     conversations: Mapped[list[Conversation]] = relationship(

@@ -13,7 +13,7 @@ from app.db.repositories.base import BaseRepository
 
 logger = structlog.get_logger(__name__)
 
-_EDITABLE = {"name", "description", "instructions"}
+_EDITABLE = {"name", "description", "instructions", "rag_settings"}
 
 
 class ProjectRepository(BaseRepository[Project]):
@@ -67,7 +67,7 @@ class ProjectRepository(BaseRepository[Project]):
         return [(p, count) for p, count in result.all()]
 
     async def update(
-        self, project_id: uuid.UUID, user_id: uuid.UUID, **fields: str | None
+        self, project_id: uuid.UUID, user_id: uuid.UUID, **fields: object
     ) -> Project | None:
         values = {k: v for k, v in fields.items() if k in _EDITABLE}
         if values:

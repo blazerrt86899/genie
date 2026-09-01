@@ -5,6 +5,8 @@ Run:  uv run uvicorn "app.main:create_app" --factory --reload
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from contextlib import AsyncExitStack, asynccontextmanager
 
 import structlog
@@ -64,6 +66,8 @@ async def lifespan(app: FastAPI):
         chat_model=settings.chat_model_name,
         tavily_configured=settings.tavily_configured,
         langsmith_enabled=settings.langsmith_enabled,
+        aws_configured=settings.aws_configured,
+        ingestion_worker=settings.run_ingestion_worker,
     )
     log_registry()
 
@@ -101,8 +105,27 @@ async def lifespan(app: FastAPI):
                 raise
             logger.warning("checkpointer_setup_failed", error=str(exc))
 
+        # Knowledge-Base ingestion worker (dev: in-process; prod: separate ECS).
+        ingest_task: asyncio.Task | None = None
+        if settings.run_ingestion_worker and settings.aws_configured:
+            from app.core import aws
+            from app.workers import ingestion_worker
+
+            try:
+                await asyncio.to_thread(aws.ensure_infra)
+                ingest_task = asyncio.create_task(ingestion_worker.poll_loop())
+                logger.info("ingestion_worker_started")
+            except Exception as exc:  # noqa: BLE001 — non-fatal in dev
+                logger.warning("ingestion_worker_start_failed", error=str(exc))
+
         logger.info("startup_complete")
         yield
+
+        if ingest_task is not None:
+            ingest_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ingest_task
+            logger.info("ingestion_worker_stopped")
 
     logger.info("shutdown_begin")
     await close_redis()

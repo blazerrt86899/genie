@@ -23,6 +23,7 @@ def _project(name="Demo", instructions=None):
         name=name,
         description=None,
         instructions=instructions,
+        rag_settings={},
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -63,11 +64,22 @@ class FakeConvRepo:
         return []
 
 
+class FakeDocRepo:
+    count = 0
+
+    def __init__(self, _db) -> None: ...
+
+    async def count_for_project(self, project_id):
+        return FakeDocRepo.count
+
+
 @pytest.fixture
 def client(monkeypatch):
     FakeProjectRepo.store = {}
+    FakeDocRepo.count = 0
     monkeypatch.setattr(proj_ep, "ProjectRepository", FakeProjectRepo)
     monkeypatch.setattr(proj_ep, "ConversationRepository", FakeConvRepo)
+    monkeypatch.setattr(proj_ep, "DocumentRepository", FakeDocRepo)
     monkeypatch.setattr(
         proj_ep,
         "get_runtime_graph",
@@ -112,6 +124,28 @@ async def test_project_crud(client):
         assert gone.status_code == 204
 
         assert (await c.get(f"/api/v1/projects/{pid}")).status_code == 404
+
+
+async def test_rag_settings_merge_and_lock(client):
+    async with client as c:
+        pid = (await c.post("/api/v1/projects", json={"name": "KB"})).json()["id"]
+
+        r = await c.patch(
+            f"/api/v1/projects/{pid}",
+            json={"rag_settings": {"search_strategy": "vector", "chunks_per_search": 20}},
+        )
+        assert r.status_code == 200
+        rs = r.json()["rag_settings"]
+        assert rs["search_strategy"] == "vector" and rs["chunks_per_search"] == 20
+        assert r.json()["rag_locked"] is False
+
+        # embedding model change is fine while there are no documents
+        FakeDocRepo.count = 2
+        r2 = await c.patch(
+            f"/api/v1/projects/{pid}",
+            json={"rag_settings": {"embedding_model": "text-embedding-3-large"}},
+        )
+    assert r2.status_code == 409
 
 
 async def test_missing_project_is_404(client):

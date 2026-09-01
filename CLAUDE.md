@@ -67,8 +67,9 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | Chat model | **Per-conversation, user-picked** — `MODEL_CATALOG` in `agents/models.py` (OpenAI · Anthropic · Groq) | The composer's model picker sets `conversations.model` (a catalog id, e.g. `claude-sonnet`); `resolve_model_spec(None)` falls back to `settings.LLM_PROVIDER` + `settings.chat_model_name`. One unified `_build(provider, model, …)` — `ChatOpenAI` / `ChatAnthropic` / `ChatGroq` — used by the supervisor plan, the streamed answer, and the `web_search` / `task_creator` agents. All SDKs share exception names so retry/token helpers stay provider-agnostic. |
 | Utility model | `settings.LLM_PROVIDER` + `settings.utility_model_name` (never user-picked) | The cheap internal calls: `prompt_enhancer` / `greeting` / title / `validator`. `groq` default = `qwen/qwen3.8-27b`. |
 | Embeddings | OpenAI `text-embedding-3-small` | 1536 dims — **always OpenAI**, regardless of `LLM_PROVIDER` |
-| Task Queue | AWS SQS | Standard queue, idempotent consumers |
-| Background Worker | Python SQS consumer | Separate ECS service |
+| Task Queue | AWS SQS (LocalStack local) | Standard queue, idempotent consumers. `core/aws.py` — `boto3`, endpoint-override for LocalStack |
+| Background Worker | `workers/ingestion_worker.py` | KB ingestion. Dev: in-process from the lifespan (`RUN_INGESTION_WORKER`). Prod: separate ECS service (`python -m`) |
+| Doc parsing | `pdfminer.six` (PDF) · `unstructured` (md/txt + `chunk_by_title`) · `pypdf` (attachments) | "fast" — no OCR / layout ML model |
 | Auth | **Clerk** | Hosted auth, webhook sync to DB, JWKS-verified JWT in FastAPI |
 | Observability | LangSmith + AWS X-Ray | Trace every graph run |
 | LLM SDKs | `langchain-openai` · `langchain-anthropic` · `langchain-groq` | All via `agents/models.py` — no direct imports elsewhere |
@@ -217,10 +218,10 @@ genie/
 │       │   │   ├── prompts.py
 │       │   │   └── tools.py           ← tavily_search(), format_results(), extract_sources()
 │       │   │
-│       │   ├── rag/
-│       │   │   ├── agent.py
-│       │   │   ├── retriever.py       ← hybrid_search() calls Supabase RPC
-│       │   │   └── embedder.py        ← embed_text() → text-embedding-3-small
+│       │   ├── rag/                   ← ⬜ the future RAG *agent* (multi-store routing) — NOT the project KB pipeline (§10)
+│       │   │   ├── agent.py           ← stub
+│       │   │   ├── retriever.py       ← stub
+│       │   │   └── embedder.py        ← ✅ embed_batch/embed_text → OpenAI text-embedding-3-small
 │       │   │
 │       │   ├── calendar/
 │       │   │   ├── agent.py           ← interrupt_before writes
@@ -237,6 +238,9 @@ genie/
 │       │   ├── tasks_server.py        ← FastMCP("genie-tasks"): task CRUD tools
 │       │   └── client.py              ← call_tasks_tool() — in-process in-memory client
 │       │
+│       ├── schemas/
+│       │   └── rag.py                 ← RagSettings (projects.rag_settings) — search strategy + params (§10)
+│       │
 │       ├── memory/
 │       │   ├── short_term.py          ← Redis ops: recent_messages, rate_limit
 │       │   ├── long_term.py           ← Supabase: user_memory hybrid search
@@ -252,7 +256,8 @@ genie/
 │       │       ├── message_repo.py
 │       │       ├── task_repo.py
 │       │       ├── attachment_repo.py
-│       │       ├── document_repo.py
+│       │       ├── document_repo.py         ← ✅ KB documents (status/phase/stats)
+│       │       ├── document_chunk_repo.py   ← ✅ bulk_insert chunks (embedding + fts)
 │       │       └── memory_repo.py
 │       │
 │       ├── services/
@@ -261,16 +266,20 @@ genie/
 │       │   ├── attachment_service.py  ← parse pdf/txt/md → text; persist; link to a message
 │       │   ├── title_service.py       ← cheap-LLM conversation titles
 │       │   ├── memory_service.py      ← Memory consolidation logic
-│       │   └── document_service.py    ← Chunking, embedding, upsert
+│       │   ├── document_service.py    ← KB: validate → S3 put → row → SQS enqueue; list/get/chunks/delete
+│       │   └── rag/
+│       │       ├── partition_service.py  ← pdf (pdfminer) / md·txt (unstructured) → typed Elements
+│       │       └── chunk_service.py      ← chunk_by_title → Chunk[] (size/overlap from RagSettings)
 │       │
 │       ├── workers/
-│       │   ├── sqs_consumer.py        ← Polling loop, dispatch by job_type
+│       │   ├── sqs_consumer.py        ← (stub)
 │       │   ├── memory_consolidation.py
-│       │   └── document_ingestion.py
+│       │   └── ingestion_worker.py    ← ✅ SQS poll → ingest_document (partition→chunk→vectorize→store) + Redis progress
 │       │
 │       └── core/
 │           ├── clerk.py               ← JWKS fetch+cache, RS256 verify, get_current_user()
 │           ├── clerk_api.py           ← thin Clerk Backend API client (profile enrichment)
+│           ├── aws.py                 ← boto3 s3()/sqs() singletons (LocalStack ↔ real AWS) + ensure_infra()
 │           ├── redis.py               ← async Redis client singleton
 │           ├── streaming.py           ← SSE frame helpers (§11)
 │           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
@@ -302,6 +311,7 @@ genie/
 │       │   ├── Sidebar.tsx            ← New chat · Projects link · all-conversations list · account
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
+│       │   │   └── knowledge-base/    ← KnowledgeBasePanel · DocumentUpload · DocumentList · PipelineModal · ChunkViewer · RagSettingsForm
 │       │   ├── landing/               ← SiteHeader, Hero, CallOrb (hero animation),
 │       │   │                              ThemeToggle, LogoMarquee, HowItWorks, Features,
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
@@ -326,6 +336,7 @@ genie/
 │       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
 │       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
+│       │   ├── useDocuments.ts        ← KB list (polls while ingesting) + upload/delete + useDocumentPipeline (SSE)
 │       │   └── useTasks.ts            ← tasks list + patch/archive-done/delete (TanStack Query)
 │       │
 │       ├── providers/
@@ -1132,34 +1143,39 @@ forecast), each captioned in the UI with the agent that produced it
 
 ---
 
-## 10. RAG Retriever Pattern
+## 10. Project Knowledge Base (project-scoped RAG)
 
-```python
-# app/agents/rag/retriever.py
-# ALWAYS use hybrid_search — never pure vector or pure FTS alone
+> Each **project** has a Knowledge Base. This is a **project pipeline**, not a
+> registry agent — `agents/rag/` stays reserved for a future RAG *agent* (intelligent
+> multi-store routing). Retrieval is wired into the chat flow in **commit 2**.
 
-async def hybrid_retrieve(
-    query: str,
-    user_id: str,
-    match_count: int = 10
-) -> list[dict]:
-    embedding = await embed_text(query)  # text-embedding-3-small → 1536 dims
-    
-    result = await supabase.rpc(
-        "hybrid_search_documents",
-        {
-            "query_text":      query,
-            "query_embedding": embedding,
-            "target_user_id":  user_id,
-            "match_count":     match_count,
-            "fts_weight":      1.0,      # tweak per use case
-            "semantic_weight": 1.0,
-            "rrf_k":           50
-        }
-    ).execute()
-    
-    return result.data   # [{id, content, metadata, document_id, score}]
+### Ingestion (commit 1 — DONE)
 ```
+POST /api/v1/documents (multipart)          # document_service.create_and_enqueue
+  → validate pdf/md/txt ≤ 25 MB
+  → aws.s3().put_object  (LocalStack local; S3 on prod)
+  → documents row (status=queued, phase=upload)
+  → aws.sqs().send_message {"job":"ingest_document","document_id":…}
+
+ingestion_worker.poll_loop()                # dev: in-process; prod: separate ECS
+  → ingest_document(id)  [idempotent: skip when status=ready / processed_at set]
+      partition   partition_service.partition(kind, s3 bytes) → typed Elements + stats
+      chunk       chunk_service.chunk(elements, chunk_size, chunk_overlap)  (unstructured chunk_by_title)
+      vectorize   embedder.embed_batch(chunk texts) → OpenAI text-embedding-3-small (1536-d)
+      store       document_chunk_repo.bulk_insert  (embedding + trigger-filled fts_content)
+      → documents.status=ready, processed_at=now(); each phase → documents.phase + redis PUBLISH doc_pipeline:{id}
+```
+`GET /api/v1/documents/{id}/stream` (SSE) relays the Redis channel so the
+Knowledge-Base pipeline modal updates live.
+
+### Retrieval (commit 2 — TODO)
+`services/rag/retrieval_service.retrieve(project_id, query, RagSettings)` — the
+strategy comes from `projects.rag_settings` (`schemas/rag.py:RagSettings`):
+`vector` (pgvector cosine top-k) · `hybrid` (the `hybrid_search_project_chunks`
+RPC, RRF) · `multi_query_*` (utility-model paraphrases → per-query search → RRF
+fuse). Gated by the prompt-enhancer's `needs_documents`; a `retriever` graph node
+between `prompt_enhancer` and `supervisor` injects the chunks (note → supervisor,
+full text → synthesiser, like attachments §9).
 
 ---
 
@@ -1267,7 +1283,10 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default). Migration `f6703a0bb868`.
-- `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text; `conversation_id`/`message_id` FKs). Conversation-scoped, one-shot turn context — **distinct** from Phase-2 `documents` (a project RAG knowledge base). Migration `0b4ae74dbb70`.
+- `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
+- `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
+- `documents` — a project Knowledge-Base source (`kind`, `s3_key`, `status`, `phase`, `stats`, `processed_at`). Migration `883a87726339`.
+- `document_chunks` — one row per chunk: `content`, `embedding vector(1536)`, trigger-filled `fts_content`, `chunk_metadata`; `project_id` denormalized. ivfflat + gin indexes (in the migration). Migration `883a87726339`.
 - `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
@@ -1323,8 +1342,8 @@ DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the La
 POST   /api/v1/projects                → 201 {id,name,description,instructions,...}
 GET    /api/v1/projects                → [{...project, conversation_count}]
 GET    /api/v1/projects/{id}           → project + its conversations
-PATCH  /api/v1/projects/{id}           → update name/description/instructions
-DELETE /api/v1/projects/{id}           → 204 (CASCADE: deletes its chats + messages + threads)
+PATCH  /api/v1/projects/{id}           → update name/description/instructions/rag_settings (409 if embedding_model changes with docs)
+DELETE /api/v1/projects/{id}           → 204 (CASCADE: deletes its chats + messages + threads + documents)
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
 GET    /api/v1/tasks?include_archived=  → [TaskOut] (board + the Archived section)
@@ -1336,10 +1355,13 @@ POST   /api/v1/tasks/archive-done       → {archived: N}  (done → archived; t
 DELETE /api/v1/tasks/{id}               → 204
 # chat-driven moves ("start the report task", "summarise this task") go via the task_creator agent → the tasks MCP
 
-# ── Documents ────────────────────────────────────────────────────────────────
-POST   /api/v1/documents               → upload (multipart) → S3 → SQS ingestion job → 202
-GET    /api/v1/documents               → list user's documents
-DELETE /api/v1/documents/{id}          → 204
+# ── Documents (project Knowledge Base — §10) ─────────────────────────────────
+POST   /api/v1/documents               → 201 DocumentOut  (multipart: project_id + file; pdf/md/txt ≤ 25 MB → S3 → SQS)
+GET    /api/v1/documents?project_id=    → [DocumentOut]  (status/phase/stats/chunk_count)
+GET    /api/v1/documents/{id}           → DocumentOut
+GET    /api/v1/documents/{id}/stream    → SSE  (live ingestion pipeline progress — relays redis doc_pipeline:{id})
+GET    /api/v1/documents/{id}/chunks    → [ChunkOut]  (chunk_index, content, token_count, metadata)
+DELETE /api/v1/documents/{id}           → 204 (S3 object + chunks + row)
 ```
 
 **No `/auth/login`, `/auth/refresh`, `/auth/logout` routes.** Clerk handles all of this on the frontend. The backend only verifies JWTs — it never issues them.
@@ -1407,23 +1429,22 @@ already gives per-chat memory.)_
 - [x] Task Creator agent — registered; parses → `TaskOps` → **`genie-tasks` FastMCP** (§22) → `task_created`/`task_updated`/`tasks_archived` SSE
 - [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
 - [x] **Composer attachments** (`0b4ae74dbb70`) — `attachment_service` parses pdf/txt/md → text → the `attachments` table → one-shot into the turn's prompts. The parser + `attachments.content` are the stepping stone for the ingestion pipeline below (chunk + embed the stored text).
-- [ ] Alembic migration: `documents`, `document_chunks` (with `embedding vector(1536)`, `fts_content tsvector`)
-- [ ] Run `setup_supabase.sql` sections: hybrid search functions, IVFFlat indexes, FTS triggers
-- [ ] `document_service.py`: PDF/text → chunks (512 tokens, 50-token overlap) → embed → upsert
-- [ ] Document ingestion SQS worker (`workers/document_ingestion.py`)
-- [ ] `POST /documents` endpoint (upload → S3 → SQS job)
-- [ ] RAG agent: calls `hybrid_search_documents` Supabase RPC, formats context; register in `AGENT_REGISTRY`
+- [x] **Project Knowledge Base — commit 1 (ingestion)** (`883a87726339`) — `documents` + `document_chunks` (pgvector `vector(1536)` + ivfflat + gin + fts trigger) + `projects.rag_settings`; `core/aws.py` (S3/SQS, LocalStack-auto); `document_service` (validate → S3 → SQS); `ingestion_worker` (partition via pdfminer/unstructured → `chunk_by_title` → OpenAI embeddings → bulk store, Redis progress, idempotent); `POST/GET/DELETE /documents` + `/{id}/stream` + `/{id}/chunks`; `PATCH /projects/{id} {rag_settings}` (409-locked embedding model)
+- [ ] **Project Knowledge Base — commit 2 (retrieval)** — `retrieval_service` (vector / hybrid RPC / multi-query), `retriever` graph node gated by the enhancer's `needs_documents`, chunks injected into the answer
+- [ ] Run `setup_supabase.sql` — the `hybrid_search_project_chunks` RPC (added; used by commit 2)
 
 **Frontend tasks**:
 - [x] Task Board: `/tasks` — 3 columns, HTML5 drag between columns, "Archive done" button, collapsible "Archived (N)"
 - [x] Task detail modal — status, linked chat (`/chat/<id>`), editable description, "Summarise from chat", delete
 - [x] `useTasks` / `usePatchTask` / `useArchiveDone` / `useDeleteTask` / `useSummarizeTask`; `useChat` invalidates `["tasks"]` on the `task_*` SSE events
-- [ ] Document upload UI in sidebar (drag-drop + file picker)
-- [ ] Ingestion progress indicator (poll document status)
+- [x] **Knowledge Base panel** in `ProjectView` — `DocumentUpload` (drag-drop, parallel), `DocumentList` (status pills, polls while ingesting), `PipelineModal` (live SSE: Upload→Partition→Chunk→Vectorize→Store→Chunks, "Elements Discovered", per-step state), `ChunkViewer`, `RagSettingsForm` (embedding model locked + strategy + param sliders)
 
-**Phase 2 done when**: Tasks are managed by chat + the board (✅). User uploads a
-PDF, asks about it, and gets an answer grounded in their document (verify the RAG
-agent ran via the LangSmith trace).
+**Phase 2 done when**: Tasks are managed by chat + the board (✅). A project has a
+Knowledge Base: files upload → the pipeline processes them visibly → chunks are
+browsable (✅ commit 1); a chat in that project answers grounded in the KB
+(commit 2). _Deferred to a backlog: multimodal RAG (images/tables as vectors),
+"Paste website URL" ingestion, per-chunk contextual summarisation, the RAG
+routing agent (`agents/rag/`)._
 
 ---
 
@@ -1567,12 +1588,20 @@ tests/  (≈90 tests, all green)
 ├── services/
 │   ├── test_chat_service.py    ← SSE framing, message splitting
 │   ├── test_task_service.py    ← create / move / archive_done / summarise
-│   └── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
+│   ├── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
+│   ├── test_partition_service.py  ← md/txt/pdf → typed elements + stats
+│   ├── test_chunk_service.py      ← chunk index/tokens/metadata; size affects count
+│   └── test_document_service.py   ← create_and_enqueue: S3 put + SQS send; reject bad type/oversize
+├── schemas/
+│   └── test_rag_settings.py    ← defaults / clamping / enum / resolve
+├── workers/
+│   └── test_ingestion_worker.py ← ingest_document happy path / idempotent skip / failure → failed
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
     ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project)
-    ├── test_projects.py · test_tasks.py · test_health.py · test_models_endpoint.py · test_attachments.py
+    ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
+    ├── test_models_endpoint.py · test_attachments.py · test_documents.py
 ```
 
 ### Key Test Assertions
@@ -1662,11 +1691,13 @@ _Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL
 
 _Also 2026-09-01 — **Composer "+" menu: file attachments + Add to project**: `POST /attachments` (multipart, pdf/txt/md ≤ 5 MB) → `attachment_service.parse_upload` (`pypdf` for PDF; utf-8 for txt/md) → `attachments` table. `POST /chat` `attachment_ids` → `create_turn` links them to the user message (+ `message_metadata.attachments`) → `_generate` → `GenieState['attachments']` (**one-shot** — that turn only). `nodes._attachment_note` (filenames) → enhancer + supervisor (skip web search); `nodes._format_attachments` (24k-char budget, visible `…[truncated]`) → synthesiser only. New `PATCH /conversations/{id} {project_id}`. Frontend: `PlusMenu` (Add files hidden `<input>` · Add to project submenu → `patchConversation` or `chatStore.pendingProjectId` for a new chat), `AttachmentChips`, `useAttachments`, `chatStore.pendingAttachments`. Verified live: small file → supervisor plans empty (no web search), synthesiser answers from it; 30k-char file → truncation marker, run stays well under `MAX_TOKENS_PER_RUN`._
 
+_Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: `documents` + `document_chunks` (pgvector `vector(1536)`, ivfflat + gin + fts trigger) + `projects.rag_settings` (migration `883a87726339`). `core/aws.py` (boto3 s3/sqs, LocalStack auto-provisions bucket + queue on boot). `POST /api/v1/documents` (multipart, pdf/md/txt ≤ 25 MB) → `document_service` uploads to S3 + enqueues SQS. `workers/ingestion_worker.py` (dev: in-process from the lifespan; prod: `python -m`) polls SQS → `ingest_document` runs `partition_service` (pdfminer for PDF, `unstructured` for md/txt → typed Elements + "Elements Discovered" stats) → `chunk_service` (`chunk_by_title`, size/overlap from `RagSettings`) → `embedder.embed_batch` (**OpenAI `text-embedding-3-small`**) → `document_chunk_repo.bulk_insert`; idempotent (skips `ready`/`processed_at`); per-phase status on the row + `redis PUBLISH doc_pipeline:{id}`. `GET /documents/{id}/stream` (SSE) relays it; `/{id}/chunks` browses them. Frontend: `KnowledgeBasePanel` in `ProjectView` (Documents + Settings tabs) — `DocumentUpload`, `DocumentList`, `PipelineModal` (live), `ChunkViewer`, `RagSettingsForm`. Verified end-to-end against LocalStack + Postgres (embeddings faked — the OpenAI account is at $0; the vectorize phase needs a top-up). Commit 2 (retrieval into the chat flow) is next; `hybrid_search_project_chunks` RPC is already in `setup_supabase.sql`._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
 | Phase 1 — Foundation | 🟢 Complete | 100% |
-| Phase 2 — Tasks + RAG / Documents | 🟡 In Progress | ~40% (tasks ✅, docs/RAG ⬜) |
+| Phase 2 — Tasks + RAG / Documents | 🟡 In Progress | ~70% (tasks ✅, KB ingestion ✅, KB retrieval ⬜) |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
 | Phase 5 — Expansion | 🔴 Not Started | 0% |
@@ -1761,6 +1792,9 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
 | Add a model to the picker | `MODEL_CATALOG` in `agents/models.py` (one `ModelSpec` row) — no other change; `GET /models` filters by which provider keys are set |
 | Support a new attachment file type | `attachment_service._KINDS` + a parse branch in `parse_upload` |
+| Support a new KB file type | `document_service._KIND` + `Document.DOCUMENT_KINDS` + a branch in `partition_service.partition` |
+| Tune project retrieval | `projects.rag_settings` (via `PATCH /projects/{id}`) — `schemas/rag.py:RagSettings` |
+| Add an ingestion pipeline phase | `Document.DOCUMENT_PHASES` + a step in `ingestion_worker.ingest_document` + a `_publish` |
 | Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |
 
 ---

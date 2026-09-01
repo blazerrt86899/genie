@@ -212,11 +212,31 @@ export function patchConversation(
 
 // ─── Projects ──────────────────────────────────────────────────────────────
 
+export type SearchStrategy =
+  | "vector"
+  | "hybrid"
+  | "multi_query_vector"
+  | "multi_query_hybrid";
+
+export interface RagSettings {
+  embedding_model: string;
+  search_strategy: SearchStrategy;
+  chunks_per_search: number;
+  final_context_size: number;
+  similarity_threshold: number;
+  num_queries: number;
+  chunk_size: number;
+  chunk_overlap: number;
+}
+
 export interface Project {
   id: string;
   name: string;
   description: string | null;
   instructions: string | null;
+  rag_settings: RagSettings;
+  document_count: number;
+  rag_locked: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -233,6 +253,7 @@ export interface ProjectInput {
   name?: string;
   description?: string | null;
   instructions?: string | null;
+  rag_settings?: Partial<RagSettings>;
 }
 
 export function listProjects(token?: string | null): Promise<ProjectSummary[]> {
@@ -278,6 +299,81 @@ export function deleteProject(
 
 export function chatStreamUrl(conversationId: string, runId: string): string {
   return `${API_BASE_URL}/api/v1/chat/${conversationId}/stream?run_id=${encodeURIComponent(runId)}`;
+}
+
+// ─── Knowledge Base documents ──────────────────────────────────────────────
+
+export interface DocumentDto {
+  id: string;
+  project_id: string;
+  filename: string;
+  kind: "pdf" | "md" | "txt";
+  status: "queued" | "processing" | "ready" | "failed";
+  phase: "upload" | "partition" | "chunk" | "vectorize" | "store" | "done";
+  error: string | null;
+  stats: {
+    elements?: Record<string, number>;
+    chunk_count?: number;
+  };
+  chunk_count: number;
+  byte_size: number;
+  created_at: string;
+  processed_at: string | null;
+}
+
+export interface ChunkDto {
+  chunk_index: number;
+  content: string;
+  token_count: number;
+  metadata: { page?: number | null; element_types?: string[]; heading?: string | null };
+}
+
+export async function uploadDocument(
+  projectId: string,
+  file: File,
+  token?: string | null,
+): Promise<DocumentDto> {
+  const form = new FormData();
+  form.append("project_id", projectId);
+  form.append("file", file);
+  const res = await fetch(`${API_BASE_URL}/api/v1/documents`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
+  return (await res.json()) as DocumentDto;
+}
+
+export function listDocuments(
+  projectId: string,
+  token?: string | null,
+): Promise<DocumentDto[]> {
+  return apiFetch<DocumentDto[]>(`/api/v1/documents?project_id=${projectId}`, { token });
+}
+
+export function getDocument(id: string, token?: string | null): Promise<DocumentDto> {
+  return apiFetch<DocumentDto>(`/api/v1/documents/${id}`, { token });
+}
+
+export function listChunks(
+  id: string,
+  token?: string | null,
+  opts: { limit?: number; offset?: number } = {},
+): Promise<ChunkDto[]> {
+  const q = new URLSearchParams({
+    limit: String(opts.limit ?? 50),
+    offset: String(opts.offset ?? 0),
+  });
+  return apiFetch<ChunkDto[]>(`/api/v1/documents/${id}/chunks?${q}`, { token });
+}
+
+export function deleteDocument(id: string, token?: string | null): Promise<void> {
+  return apiFetch<void>(`/api/v1/documents/${id}`, { method: "DELETE", token });
+}
+
+export function documentStreamUrl(id: string): string {
+  return `${API_BASE_URL}/api/v1/documents/${id}/stream`;
 }
 
 // ─── Tasks ─────────────────────────────────────────────────────────────────

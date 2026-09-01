@@ -76,6 +76,67 @@ AS $$
   LIMIT match_count;
 $$;
 
+-- ─── 2b. Hybrid search — project Knowledge Base (CLAUDE.md §10) ──────────────
+-- Project-scoped variant used by the RAG retrieval pipeline (commit 2). Filters
+-- chunks by project_id (and user_id, defence in depth) and drops matches below a
+-- cosine-similarity floor.
+CREATE OR REPLACE FUNCTION hybrid_search_project_chunks(
+  query_text           TEXT,
+  query_embedding      vector(1536),
+  target_project_id    UUID,
+  target_user_id       UUID,
+  match_count          INT DEFAULT 10,
+  similarity_threshold FLOAT DEFAULT 0.0,
+  fts_weight           FLOAT DEFAULT 1.0,
+  semantic_weight      FLOAT DEFAULT 1.0,
+  rrf_k                INT DEFAULT 50
+)
+RETURNS TABLE (
+  id          UUID,
+  content     TEXT,
+  metadata    JSONB,
+  document_id UUID,
+  similarity  FLOAT,
+  score       FLOAT
+)
+LANGUAGE sql
+STABLE
+SET search_path = genie, public, extensions
+AS $$
+  WITH scoped AS (
+    SELECT dc.id, dc.content, dc.metadata, dc.document_id, dc.fts_content, dc.embedding,
+           1 - (dc.embedding <=> query_embedding) AS similarity
+    FROM document_chunks dc
+    WHERE dc.project_id = target_project_id AND dc.user_id = target_user_id
+  ),
+  full_text AS (
+    SELECT id, ROW_NUMBER() OVER (
+      ORDER BY ts_rank_cd(fts_content, plainto_tsquery('english', query_text)) DESC
+    ) AS rank_ix
+    FROM scoped
+    WHERE fts_content @@ plainto_tsquery('english', query_text)
+    LIMIT LEAST(match_count, 40) * 2
+  ),
+  semantic AS (
+    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> query_embedding) AS rank_ix
+    FROM scoped
+    ORDER BY embedding <=> query_embedding
+    LIMIT LEAST(match_count, 40) * 2
+  )
+  SELECT s.id, s.content, s.metadata, s.document_id, s.similarity,
+    (
+      COALESCE(1.0 / (rrf_k + ft.rank_ix), 0.0) * fts_weight +
+      COALESCE(1.0 / (rrf_k + sm.rank_ix), 0.0) * semantic_weight
+    ) AS score
+  FROM scoped s
+  LEFT JOIN full_text ft ON s.id = ft.id
+  LEFT JOIN semantic sm  ON s.id = sm.id
+  WHERE (ft.id IS NOT NULL OR sm.id IS NOT NULL)
+    AND s.similarity >= similarity_threshold
+  ORDER BY score DESC
+  LIMIT match_count;
+$$;
+
 -- ─── 3. Hybrid search — user_memory (CLAUDE.md §8.4) ────────────────────────
 CREATE OR REPLACE FUNCTION hybrid_search_memories(
   query_text      TEXT,
