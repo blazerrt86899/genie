@@ -59,7 +59,7 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
       {open && (
         <ul
           role="listbox"
-          className="absolute bottom-full left-0 z-20 mb-1.5 max-h-72 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg"
+          className="absolute bottom-full right-0 z-20 mb-1.5 max-h-72 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg"
         >
           {models.map((m) => (
             <li key={m.id}>
