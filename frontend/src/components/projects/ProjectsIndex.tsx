@@ -12,7 +12,7 @@ export function ProjectsIndex() {
   const [dialogOpen, setDialogOpen] = useState(false);
 
   return (
-    <div className="mx-auto max-w-4xl p-6 sm:p-10">
+    <div className="mx-auto max-w-4xl p-6 pb-16 sm:p-10">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>

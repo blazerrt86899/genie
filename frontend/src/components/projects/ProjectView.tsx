@@ -67,7 +67,7 @@ export function ProjectView({ projectId }: { projectId: string }) {
   };
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 p-6 sm:p-10">
+    <div className="mx-auto max-w-3xl space-y-8 p-6 pb-16 sm:p-10 sm:pb-16">
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <input

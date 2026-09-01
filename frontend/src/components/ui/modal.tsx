@@ -33,7 +33,7 @@ export function Modal({
       <div
         role="dialog"
         aria-modal="true"
-        className={`w-full rounded-2xl border border-border bg-card p-5 shadow-xl ${className}`}
+        className={`max-h-[85vh] w-full overflow-y-auto rounded-2xl border border-border bg-card p-5 shadow-xl ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">

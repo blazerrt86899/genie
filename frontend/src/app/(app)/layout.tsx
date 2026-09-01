@@ -13,7 +13,9 @@ export default async function AppLayout({
   return (
     <div className="flex h-screen">
       <Sidebar />
-      <main className="flex-1 overflow-hidden">{children}</main>
+      {/* min-h-0 lets a `h-full` child (chat/tasks) own its own scroll;
+          overflow-y-auto lets a plain document child (projects) scroll here. */}
+      <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
     </div>
   );
 }
