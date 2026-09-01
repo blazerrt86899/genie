@@ -124,6 +124,7 @@ async def test_create_turn_persists_user_message_and_stashes_run():
         "conversation_id": conversation_id,
         "message": "hello",
         "client_hour": None,
+        "attachment_ids": [],
     }
 
 

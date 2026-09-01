@@ -6,6 +6,7 @@ imported yet (and do not inherit ``Base``) so the first migration only creates
 ``users`` / ``conversations`` / ``messages``.
 """
 
+from app.db.models.attachment import Attachment
 from app.db.models.base import Base
 from app.db.models.conversation import Conversation
 from app.db.models.message import Message
@@ -13,4 +14,4 @@ from app.db.models.project import Project
 from app.db.models.task import Task
 from app.db.models.user import User
 
-__all__ = ["Base", "User", "Conversation", "Message", "Project", "Task"]
+__all__ = ["Base", "User", "Conversation", "Message", "Project", "Task", "Attachment"]

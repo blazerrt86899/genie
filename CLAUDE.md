@@ -188,8 +188,9 @@ genie/
 │       │       ├── webhooks.py        ← POST /webhooks/clerk (user.created/updated/deleted)
 │       │       ├── users.py           ← GET /users/me (resolve Clerk token → internal user)
 │       │       ├── chat.py            ← /chat (POST), /chat/{id}/stream (GET SSE)
-│       │       ├── conversations.py   ← /conversations CRUD
+│       │       ├── conversations.py   ← /conversations list · GET · PATCH (move to project) · DELETE
 │       │       ├── models.py          ← GET /models (the composer's model-picker catalog)
+│       │       ├── attachments.py     ← POST/DELETE /attachments (composer "+" file uploads)
 │       │       ├── tasks.py           ← /tasks CRUD
 │       │       └── documents.py       ← /documents upload + list
 │       │
@@ -250,12 +251,14 @@ genie/
 │       │       ├── conversation_repo.py  ← + project_repo.py
 │       │       ├── message_repo.py
 │       │       ├── task_repo.py
+│       │       ├── attachment_repo.py
 │       │       ├── document_repo.py
 │       │       └── memory_repo.py
 │       │
 │       ├── services/
 │       │   ├── chat_service.py        ← Orchestrates memory load + graph run + SSE
 │       │   ├── task_service.py        ← task board logic (REST + MCP + tests call this)
+│       │   ├── attachment_service.py  ← parse pdf/txt/md → text; persist; link to a message
 │       │   ├── title_service.py       ← cheap-LLM conversation titles
 │       │   ├── memory_service.py      ← Memory consolidation logic
 │       │   └── document_service.py    ← Chunking, embedding, upsert
@@ -308,6 +311,8 @@ genie/
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
 │       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
+│       │   │   ├── PlusMenu.tsx       ← composer "+" — Add files · Add to project
+│       │   │   ├── AttachmentChips.tsx← staged uploads shown in the composer
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← 3 cols + HTML5 drag + "Archive done" + "Archived (N)"
@@ -319,6 +324,7 @@ genie/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
 │       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
 │       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
+│       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
 │       │   └── useTasks.ts            ← tasks list + patch/archive-done/delete (TanStack Query)
 │       │
@@ -815,7 +821,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";  -- uuid_generate_v4()
 ```
 
 ### 8.2 Core Tables (run via Alembic after this)
-Alembic manages schema for: `users`, `conversations`, `messages`, `tasks`, `documents`, `document_chunks`, `user_memory`, `agent_runs`, `oauth_credentials`.
+Alembic manages schema for: `users`, `conversations`, `messages`, `tasks`, `attachments`, `documents`, `document_chunks`, `user_memory`, `agent_runs`, `oauth_credentials`.
 
 **DO NOT** add LangGraph checkpointer tables to Alembic. They are created by:
 ```python
@@ -1026,6 +1032,7 @@ class GenieState(TypedDict):
     project_instructions: str | None                     # prepended to the system prompt (Projects)
     client_hour:          int | None                     # user's local hour 0-23 (time-aware agents)
     model:                str | None                     # picked chat-model id (MODEL_CATALOG); None → server default
+    attachments:          list[dict]                     # [{filename,kind,text}] — files sent with THIS turn only
     intent:               str | None                     # short label from the prompt_enhancer
     enhanced_query:       str | None                     # latest message rewritten self-contained (prompt_enhancer)
     plan:                 list[TaskRecord]               # the task ledger — supervisor writes, executor updates
@@ -1091,6 +1098,17 @@ from `conversations.model` (the picker). The four chat-model call sites —
 pass `model_id=state.get("model")` into `get_chat_model()`, which resolves it
 against `MODEL_CATALOG` (unknown / keyless id → the server default, logged). The
 `get_utility_model()` call sites are unaffected.
+
+**Attachments per turn** — the composer "+" menu uploads a `pdf` / `txt` / `md`
+file (`POST /attachments` → `attachment_service.parse_upload` → the `attachments`
+table). `POST /chat` carries `attachment_ids`; `create_turn` links them to the
+user message + writes `message_metadata.attachments`; `_generate` loads the text
+into `GenieState['attachments']` (this turn only — **one-shot**). In `nodes.py`:
+`_attachment_note()` (filenames + rough size) goes to the prompt_enhancer +
+supervisor so they know a file is in play and skip a web search; `_augment_system`
+appends the **full** budgeted text (`_format_attachments`, `_ATTACHMENT_CHAR_BUDGET
+= 24_000` ≈ 6k tokens, per-file `…[truncated N chars]`) to the synthesiser's
+system prompt only.
 
 **Executor** runs agents **sequentially** in dependency order — a later agent
 sees earlier `intermediate_results` (keyed by **task id**, not agent name, so an
@@ -1249,6 +1267,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default). Migration `f6703a0bb868`.
+- `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text; `conversation_id`/`message_id` FKs). Conversation-scoped, one-shot turn context — **distinct** from Phase-2 `documents` (a project RAG knowledge base). Migration `0b4ae74dbb70`.
 - `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
@@ -1283,16 +1302,21 @@ GET    /api/v1/users/me                → {id, email, full_name, avatar_url, to
                                          Use this to confirm user is synced after sign-up
 
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
-POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?, model?, client_hour?)
+POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?, model?, attachment_ids?, client_hour?)
 GET    /api/v1/chat/{conv_id}/stream   → SSE stream  (query param: run_id)
 POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
 
 # ── Models (Clerk JWT required) ──────────────────────────────────────────────
 GET    /api/v1/models                  → {models:[{id,label,provider,hint}], default}  — the composer picker; only providers with a key
 
+# ── Attachments (Clerk JWT required) ─────────────────────────────────────────
+POST   /api/v1/attachments             → 201 {id,filename,kind,char_count,token_estimate}  (multipart: file; pdf/txt/md ≤ 5 MB; 422 on reject)
+DELETE /api/v1/attachments/{id}        → 204
+
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents`) + project{id,name} + model
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments`) + project{id,name} + model
+PATCH  /api/v1/conversations/{id}      → {project_id: str|null}  move the chat into a project / detach it
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Projects ─────────────────────────────────────────────────────────────────
@@ -1382,6 +1406,7 @@ already gives per-chat memory.)_
 **Backend tasks**:
 - [x] Task Creator agent — registered; parses → `TaskOps` → **`genie-tasks` FastMCP** (§22) → `task_created`/`task_updated`/`tasks_archived` SSE
 - [x] Alembic migration: `tasks` table (`bed5223f2a47`); `task_repo` + `task_service` + `/tasks` REST + `app/mcp/tasks_server.py`
+- [x] **Composer attachments** (`0b4ae74dbb70`) — `attachment_service` parses pdf/txt/md → text → the `attachments` table → one-shot into the turn's prompts. The parser + `attachments.content` are the stepping stone for the ingestion pipeline below (chunk + embed the stored text).
 - [ ] Alembic migration: `documents`, `document_chunks` (with `embedding vector(1536)`, `fts_content tsvector`)
 - [ ] Run `setup_supabase.sql` sections: hybrid search functions, IVFFlat indexes, FTS triggers
 - [ ] `document_service.py`: PDF/text → chunks (512 tokens, 50-token overlap) → embed → upsert
@@ -1529,7 +1554,7 @@ brand-new chat; `/memory` lets the user see and remove what Genie knows.
 ```
 tests/  (≈90 tests, all green)
 ├── agents/
-│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator (grounding), routing
+│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing, attachment helpers
 │   ├── test_registry.py        ← registry integrity
 │   ├── test_models.py          ← ainvoke retry, bump_tokens, MODEL_CATALOG resolve/filter
 │   ├── test_prompt_enhancer.py ← rewrite + token track + passthrough/error
@@ -1541,12 +1566,13 @@ tests/  (≈90 tests, all green)
 │   └── test_tasks_server.py    ← in-memory Client, task_service faked
 ├── services/
 │   ├── test_chat_service.py    ← SSE framing, message splitting
-│   └── test_task_service.py    ← create / move / archive_done / summarise
+│   ├── test_task_service.py    ← create / move / archive_done / summarise
+│   └── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py · test_conversations.py
-    ├── test_projects.py · test_tasks.py · test_health.py · test_models_endpoint.py
+    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project)
+    ├── test_projects.py · test_tasks.py · test_health.py · test_models_endpoint.py · test_attachments.py
 ```
 
 ### Key Test Assertions
@@ -1634,6 +1660,8 @@ _Also 2026-09-01 — **Groq reasoning-model fix + utility model → `qwen/qwen3.
 
 _Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL_CATALOG` in `agents/models.py` (8 models across OpenAI · Anthropic · Groq); `_build(provider, model, …)` covers all three (`langchain-anthropic` added — the Anthropic branch omits `temperature` since Claude 5 models 400 on it, defaults `max_tokens` 8192, sends `anthropic-workspace-id` from `ANTHROPIC_WORKSPACE_ID` when set). `get_chat_model(model_id=…)` → `resolve_model_spec` (unknown / keyless id → server default, logged). `GenieState['model']`, `conversations.model` (migration `f6703a0bb868`), `POST /chat` `model?`, new `GET /api/v1/models`. Composer `ModelPicker` (`useModels`, `chatStore.model`, per-conversation + `localStorage` default for new chats). Only the **chat** model is picked — the utility model is unchanged. Verified: catalog resolution, the graph threading a per-call model, and the picker via the frontend build. NB: the current `ANTHROPIC_API_KEY` is identity-linked and needs `ANTHROPIC_WORKSPACE_ID` set for the Claude options to actually call._
 
+_Also 2026-09-01 — **Composer "+" menu: file attachments + Add to project**: `POST /attachments` (multipart, pdf/txt/md ≤ 5 MB) → `attachment_service.parse_upload` (`pypdf` for PDF; utf-8 for txt/md) → `attachments` table. `POST /chat` `attachment_ids` → `create_turn` links them to the user message (+ `message_metadata.attachments`) → `_generate` → `GenieState['attachments']` (**one-shot** — that turn only). `nodes._attachment_note` (filenames) → enhancer + supervisor (skip web search); `nodes._format_attachments` (24k-char budget, visible `…[truncated]`) → synthesiser only. New `PATCH /conversations/{id} {project_id}`. Frontend: `PlusMenu` (Add files hidden `<input>` · Add to project submenu → `patchConversation` or `chatStore.pendingProjectId` for a new chat), `AttachmentChips`, `useAttachments`, `chatStore.pendingAttachments`. Verified live: small file → supervisor plans empty (no web search), synthesiser answers from it; 30k-char file → truncation marker, run stays well under `MAX_TOKENS_PER_RUN`._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
@@ -1667,7 +1695,8 @@ _Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
-- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
+- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `PATCH /conversations/{id}` (`project_id` → move into / detach from a project), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
+- ✅ **Attachments** (`attachment_service` + `attachment_repo` + `endpoints/attachments.py` + `models/attachment.py`, migration `0b4ae74dbb70`) — `parse_upload` (pure: extension → text; `pypdf` PDF, utf-8 txt/md; 5 MB cap; `AttachmentError` → 422). `create_turn` accepts `attachment_ids`, links rows to the user message, stashes them in the Redis run payload; `_generate` loads the text into `GenieState['attachments']`. `nodes._attachment_note` / `_format_attachments` (§9). One-shot per turn.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ `rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), SQS workers, per-user token quotas
 
@@ -1679,13 +1708,14 @@ _Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL
 - ✅ `/tasks` — `TaskBoard`: 3 columns from `useTasks`, **HTML5 drag** a card between columns (`usePatchTask`), **"Archive done"** button (`useArchiveDone`), collapsible **"Archived (N)"**, card → **`TaskModal`** (status, linked chat `/chat/<id>`, editable description, **"Summarise from chat"** = `useSummarizeTask`, delete). `useChat` invalidates `["tasks"]` on `task_created`/`task_updated`/`tasks_archived`. `AgentActivity`/`Message` label `task_summary` → "Summarising the task".
 - ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" in flight → "🔍 Searched the web" done). `AgentActivity` renders the *unclaimed* active agents as a tail pill (incl. `prompt_enhancer` → "Understanding your request", `task_summary` → "Summarising the task").
 - ✅ **Plan strip** (`components/chat/PlanStrip.tsx`) — `useChat` puts the `plan` SSE event into `chatStore.plan`; renders below the project chip bar as numbered steps + a per-step status icon (pending / in_progress / done / failed); cleared on the next send.
-- ✅ **Model picker** (`components/chat/ModelPicker.tsx`) — dropdown at the right of the composer footer, just left of the Send button (menu opens upward, `right-0`); `useModels()` (`GET /models`, `staleTime ∞`) + `chatStore.model`. `useChat` seeds it from `conv.model` on load / `localStorage["genie.chat_model"]` for a new chat, and sends it with `postChat`. `chatStore.reset()` keeps `model` so the pick carries across new chats. Hidden when < 2 models. Controls the chat model only. Composer layout: the "Enter to send" hint sits directly under the textarea; the footer's left slot is reserved for a future "+" menu.
+- ✅ **Model picker** (`components/chat/ModelPicker.tsx`) — dropdown at the right of the composer footer, just left of the Send button (menu opens upward, `right-0`); `useModels()` (`GET /models`, `staleTime ∞`) + `chatStore.model`. `useChat` seeds it from `conv.model` on load / `localStorage["genie.chat_model"]` for a new chat, and sends it with `postChat`. `chatStore.reset()` keeps `model` so the pick carries across new chats. Hidden when < 2 models. Controls the chat model only. Composer layout: the "Enter to send" hint sits directly under the textarea.
+- ✅ **Composer "+" menu** (`components/chat/PlusMenu.tsx`) — footer left slot. **Add files** → hidden `<input accept=".pdf,.txt,.md" multiple>` → `useUploadAttachment` → `chatStore.pendingAttachments` (chips via `AttachmentChips`, shown in the composer; × removes, `useDeleteAttachment`). **Add to project** → submenu (`useProjects` + "Remove from project"): with a conversation → `patchConversation` + `chatStore.setProject`; on a new chat → `chatStore.pendingProjectId` (passed as `project_id` on first send). `useChat.send` collects the `ready` attachment ids + the pending project id. Send is blocked while any upload is in flight. User messages render their file chips (`Message.tsx`).
 - ✅ **Post-sign-up gate** — `app/welcome/page.tsx` (client, top-level): after `<SignUp forceRedirectUrl="/welcome">`, polls `getMe()` (`/api/v1/users/me`) every 800 ms (12 s cap) then `router.replace('/chat')` — dodges the Clerk-webhook / `users`-row race (§7.8).
 - ✅ **Multi-message turns** — `useChat` tracks a `currentId`; `message_break` finalises the current assistant bubble and starts a new one, `message_agents` tags it. A greeting + answer render as two captioned bubbles, matching the two persisted `messages` rows (with `metadata.agents`) on reload.
 - ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`, `model`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour` + `model`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, `listModels`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
 - ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).
-- ⬜ conversation rename/search, per-project default model, project knowledge docs, live optimistic task board (SSE currently just invalidates the query)
+- ⬜ conversation rename/search, per-project default model, project knowledge docs (RAG), image attachments / vision, live optimistic task board (SSE currently just invalidates the query)
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.
@@ -1730,6 +1760,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
 | Add a model to the picker | `MODEL_CATALOG` in `agents/models.py` (one `ModelSpec` row) — no other change; `GET /models` filters by which provider keys are set |
+| Support a new attachment file type | `attachment_service._KINDS` + a parse branch in `parse_upload` |
 | Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |
 
 ---

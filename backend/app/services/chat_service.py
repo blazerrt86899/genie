@@ -26,6 +26,7 @@ from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.project_repo import ProjectRepository
+from app.services import attachment_service
 from app.services.title_service import generate_title
 
 logger = structlog.get_logger(__name__)
@@ -46,8 +47,10 @@ async def create_turn(
     project_id: str | None = None,
     client_hour: int | None = None,
     model: str | None = None,
+    attachment_ids: list[str] | None = None,
 ) -> tuple[str, str]:
     """Persist the user message, return ``(run_id, conversation_id)``."""
+    attachment_ids = attachment_ids or []
     logger.info(
         "chat_create_turn_start",
         user_id=str(user.id),
@@ -55,6 +58,7 @@ async def create_turn(
         project_id=project_id,
         client_hour=client_hour,
         model=model,
+        attachments=len(attachment_ids),
         message_chars=len(message),
         message_preview=preview(message),
     )
@@ -90,7 +94,26 @@ async def create_turn(
             user.id, title=None, project_id=pid, model=model
         )
 
-    await msg_repo.add_message(conversation.id, user.id, "user", message)
+    msg_meta: dict = {}
+    linked_ids: list[str] = []
+    if attachment_ids:
+        atts = await attachment_service.list_for_ids(db, user.id, attachment_ids)
+        linked_ids = [str(a.id) for a in atts]
+        msg_meta["attachments"] = [
+            {"id": str(a.id), "filename": a.filename, "kind": a.kind, "char_count": a.char_count}
+            for a in atts
+        ]
+
+    user_msg = await msg_repo.add_message(
+        conversation.id, user.id, "user", message, metadata=msg_meta or None
+    )
+    if linked_ids:
+        await attachment_service.link(db, user.id, linked_ids, conversation.id, user_msg.id)
+        logger.info(
+            "chat_turn_attachments",
+            conversation_id=str(conversation.id),
+            attachments=len(linked_ids),
+        )
     await conv_repo.touch(conversation.id)
 
     run_id = str(uuid.uuid4())
@@ -102,6 +125,7 @@ async def create_turn(
                 "conversation_id": str(conversation.id),
                 "message": message,
                 "client_hour": client_hour,
+                "attachment_ids": linked_ids,
             }
         ),
     )
@@ -132,6 +156,7 @@ async def _generate(
     payload = json.loads(raw)
     message: str = payload["message"]
     client_hour = payload.get("client_hour")
+    attachment_ids: list[str] = payload.get("attachment_ids") or []
 
     if payload["conversation_id"] != conversation_id:
         logger.warning(
@@ -168,6 +193,19 @@ async def _generate(
                 instruction_chars=len(project_instructions or ""),
             )
 
+    attachments: list[dict] = []
+    if attachment_ids:
+        atts = await attachment_service.list_for_ids(db, user.id, attachment_ids)
+        attachments = [
+            {"filename": a.filename, "kind": a.kind, "text": a.content} for a in atts
+        ]
+        logger.info(
+            "chat_attachments_loaded",
+            run_id=run_id,
+            count=len(attachments),
+            total_chars=sum(a.char_count for a in atts),
+        )
+
     graph = get_runtime_graph()
     config = {"configurable": {"thread_id": conversation_id}}
     state = {
@@ -177,6 +215,7 @@ async def _generate(
         "project_instructions": project_instructions,
         "client_hour": client_hour,
         "model": conversation.model,
+        "attachments": attachments,
         "intent": None,
         "enhanced_query": None,
         "plan": [],

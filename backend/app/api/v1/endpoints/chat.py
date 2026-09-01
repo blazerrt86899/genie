@@ -28,6 +28,7 @@ class ChatRequest(BaseModel):
     project_id: str | None = None  # start a new chat inside this project
     client_hour: int | None = None  # the user's local hour (0-23), for time-aware agents
     model: str | None = None  # picked chat-model id (MODEL_CATALOG); None → server default
+    attachment_ids: list[str] | None = None  # files from POST /attachments, this turn only
 
 
 class ChatAccepted(BaseModel):
@@ -65,6 +66,7 @@ async def create_chat_run(
             body.project_id,
             body.client_hour,
             body.model,
+            body.attachment_ids,
         )
     except ValueError as exc:
         logger.warning("chat_post_rejected", user_id=str(user.id), error=str(exc))

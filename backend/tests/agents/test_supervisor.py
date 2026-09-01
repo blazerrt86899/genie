@@ -288,6 +288,23 @@ async def test_validator_runs_grounding_check_when_agents_ran(monkeypatch) -> No
     assert "contradicts sources" in out["validation"]["issues"]
 
 
+def test_attachment_helpers() -> None:
+    assert nodes._attachment_note({}) == ""
+    assert nodes._format_attachments({}) == ""
+
+    small = {"attachments": [{"filename": "a.md", "kind": "md", "text": "short body"}]}
+    note = nodes._attachment_note(small)
+    assert "a.md" in note and "md" in note
+    full = nodes._format_attachments(small)
+    assert "### a.md" in full and "short body" in full
+    assert "truncated" not in full
+
+    big = {"attachments": [{"filename": "big.txt", "kind": "txt", "text": "x" * 30_000}]}
+    full = nodes._format_attachments(big)
+    assert "…[truncated" in full
+    assert len(full) < 30_000 + 500  # capped near the budget, not the full 30k
+
+
 def test_route_after_validator() -> None:
     assert route_after_validator({"validation": {"approved": True}, "supervisor_turns": 1}) == END
     assert (

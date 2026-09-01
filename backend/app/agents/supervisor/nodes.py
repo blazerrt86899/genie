@@ -48,6 +48,47 @@ logger = structlog.get_logger(__name__)
 # ``_emit`` is ``app.agents.events.emit`` (imported above).
 
 
+_ATTACHMENT_CHAR_BUDGET = 24_000  # ~6k tokens total across all files in one turn
+
+
+def _attachment_note(state: GenieState) -> str:
+    """Short — filenames + rough size only. For the enhancer + supervisor so they
+    know a file is in play (and can skip a web search) without paying for its body."""
+    atts = state.get("attachments") or []
+    if not atts:
+        return ""
+    rows = "\n".join(
+        f"- {a['filename']} ({a['kind']}, ~{max(1, len(a['text']) // 5)} words)" for a in atts
+    )
+    return (
+        "\n\nThe user attached these files with their message — their request is "
+        f"probably about them (a web search is usually unnecessary):\n{rows}"
+    )
+
+
+def _format_attachments(state: GenieState) -> str:
+    """The full extracted text, budgeted + visibly truncated. Synthesiser only."""
+    atts = state.get("attachments") or []
+    if not atts:
+        return ""
+    blocks: list[str] = []
+    used = 0
+    for a in atts:
+        room = _ATTACHMENT_CHAR_BUDGET - used
+        if room <= 0:
+            blocks.append(f"### {a['filename']}\n…[skipped — attachment budget reached]")
+            continue
+        body = a["text"]
+        if len(body) > room:
+            body = body[:room] + f"\n…[truncated {len(a['text']) - room} chars]"
+        used += len(body)
+        blocks.append(f"### {a['filename']}\n{body}")
+    return (
+        "\n\n---\nAttached documents (the user included these with their message — "
+        "answer from them):\n\n" + "\n\n".join(blocks)
+    )
+
+
 def _ledger_text(plan: list[TaskRecord]) -> str:
     if not plan:
         return ""
@@ -151,6 +192,7 @@ async def supervisor_node(state: GenieState) -> dict:
     )
     if state.get("project_instructions"):
         system += f"\n\nProject instructions to respect:\n{state['project_instructions']}"
+    system += _attachment_note(state)
     if state.get("enhanced_query"):
         system += (
             f"\n\nResolved request (from the prompt enhancer — use this as the "
@@ -289,11 +331,13 @@ async def executor_node(state: GenieState) -> dict:
     }
 
 
-def _with_project(system: str, state: GenieState) -> str:
+def _augment_system(system: str, state: GenieState) -> str:
+    """Append project instructions + the full attachment text to a system prompt.
+    Used by the synthesiser (the node that actually answers from the file)."""
     instructions = state.get("project_instructions")
     if instructions:
-        return f"{system}\n\n---\nProject instructions (follow these):\n{instructions}"
-    return system
+        system = f"{system}\n\n---\nProject instructions (follow these):\n{instructions}"
+    return system + _format_attachments(state)
 
 
 async def synthesiser_node(state: GenieState) -> dict:
@@ -319,7 +363,7 @@ async def synthesiser_node(state: GenieState) -> dict:
         await _emit("message_agents", {"agents": []})
         model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
         resp = await model.ainvoke(
-            [SystemMessage(content=_with_project(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
+            [SystemMessage(content=_augment_system(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
         )
         return {
             "messages": [resp],
@@ -346,7 +390,7 @@ async def synthesiser_node(state: GenieState) -> dict:
         await _emit("message_break", {})
     await _emit("message_agents", {"agents": composed_agents})
 
-    system = _with_project(SYNTHESISER_SYSTEM_PROMPT, state)
+    system = _augment_system(SYNTHESISER_SYSTEM_PROMPT, state)
     findings = _format_findings(plan, results)
     if segments:
         findings += (

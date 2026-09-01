@@ -43,6 +43,11 @@ class MessageOut(BaseModel):
     content: str
     created_at: datetime
     agents: list[str] = []  # which agents produced this message (assistant only)
+    attachments: list[dict] = []  # files sent with this message (user only)
+
+
+class ConversationPatch(BaseModel):
+    project_id: str | None = None  # move into a project, or null to detach
 
 
 class ConversationDetail(ConversationSummary):
@@ -103,10 +108,43 @@ async def get_conversation(
                 content=m.content,
                 created_at=m.created_at,
                 agents=list((m.message_metadata or {}).get("agents", [])),
+                attachments=list((m.message_metadata or {}).get("attachments", [])),
             )
             for m in messages
         ],
     )
+
+
+@router.patch("/{conversation_id}", response_model=ConversationSummary)
+async def patch_conversation(
+    conversation_id: str,
+    body: ConversationPatch,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ConversationSummary:
+    """Move the chat into a project (``project_id``) or detach it (``null``)."""
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
+
+    conv_repo = ConversationRepository(db)
+    conv = await conv_repo.get_for_user(cid, user.id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    pid: uuid.UUID | None = None
+    if body.project_id is not None:
+        try:
+            pid = uuid.UUID(body.project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="project not found") from exc
+        if await ProjectRepository(db).get_for_user(pid, user.id) is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+    await conv_repo.set_project(cid, user.id, pid)
+    updated = await conv_repo.get_for_user(cid, user.id)
+    return conversation_summary(updated)
 
 
 @router.delete("/{conversation_id}", status_code=204)

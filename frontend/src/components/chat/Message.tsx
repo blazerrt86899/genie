@@ -1,4 +1,4 @@
-import { CheckSquare, Globe, Sparkles } from "lucide-react";
+import { CheckSquare, FileText, Globe, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
@@ -104,6 +104,20 @@ export function Message({
           {name}
         </span>
       </div>
+
+      {isUser && message.attachments && message.attachments.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-1.5 px-1">
+          {message.attachments.map((a, i) => (
+            <span
+              key={i}
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2 py-1 text-xs text-foreground"
+            >
+              <FileText className="h-3 w-3 text-muted-foreground" />
+              {a.filename}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* bubble */}
       <div

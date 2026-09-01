@@ -14,6 +14,8 @@ import { AgentActivity } from "./AgentActivity";
 import { PlanStrip } from "./PlanStrip";
 import { GreetingHeadline } from "./GreetingHeadline";
 import { ModelPicker } from "./ModelPicker";
+import { PlusMenu } from "./PlusMenu";
+import { AttachmentChips } from "./AttachmentChips";
 
 const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
 
@@ -23,12 +25,14 @@ function Composer({
   onSend,
   isStreaming,
   autoFocus,
+  conversationId,
 }: {
   input: string;
   setInput: (v: string) => void;
   onSend: () => void;
   isStreaming: boolean;
   autoFocus?: boolean;
+  conversationId?: string;
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,6 +46,7 @@ function Composer({
 
   return (
     <div className="rounded-2xl border border-input bg-background shadow-sm transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring">
+      <AttachmentChips />
       <textarea
         ref={taRef}
         // eslint-disable-next-line jsx-a11y/no-autofocus
@@ -65,8 +70,7 @@ function Composer({
         <kbd className="font-sans">Enter</kbd> for a new line
       </p>
       <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1.5">
-        {/* leftmost — reserved for the "+" menu */}
-        <div className="flex items-center gap-1.5" />
+        <PlusMenu conversationId={conversationId} disabled={isStreaming} />
         <div className="flex items-center gap-1.5">
           <ModelPicker disabled={isStreaming} />
           <Button
@@ -95,8 +99,12 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const userName =
     user?.firstName || user?.username || user?.fullName || "You";
   const activeAgents = useChatStore((s) => s.activeAgents);
+  const pendingAttachments = useChatStore((s) => s.pendingAttachments);
+  const pendingProjectId = useChatStore((s) => s.pendingProjectId);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+
+  const uploading = pendingAttachments.some((a) => a.status === "uploading");
 
   // Active agents whose message hasn't started yet → shown at the list tail.
   const pendingAgents = useMemo(() => {
@@ -104,15 +112,17 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
     return activeAgents.filter((a) => !claimed.has(a));
   }, [activeAgents, messages]);
 
-  // The chat's project: from the loaded conversation, else the ?project= param.
+  // The chat's project: from the loaded conversation, the "+ → Add to project"
+  // pick on a new chat, else the ?project= param.
   const activeProject = useMemo(() => {
     if (project) return project;
-    if (projectParam && projects) {
-      const p = projects.find((x) => x.id === projectParam);
+    const pid = pendingProjectId ?? projectParam;
+    if (pid && projects) {
+      const p = projects.find((x) => x.id === pid);
       if (p) return { id: p.id, name: p.name };
     }
     return null;
-  }, [project, projectParam, projects]);
+  }, [project, pendingProjectId, projectParam, projects]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -120,7 +130,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
 
   function handleSend() {
     const text = input.trim();
-    if (!text || isStreaming) return;
+    if (!text || isStreaming || uploading) return;
     setInput("");
     void send(text);
   }
@@ -165,6 +175,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               setInput={setInput}
               onSend={handleSend}
               isStreaming={isStreaming}
+              conversationId={conversationId}
               autoFocus
             />
             <p className="mt-2 text-center text-xs text-muted-foreground">
@@ -195,6 +206,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 setInput={setInput}
                 onSend={handleSend}
                 isStreaming={isStreaming}
+                conversationId={conversationId}
               />
             </div>
           </div>

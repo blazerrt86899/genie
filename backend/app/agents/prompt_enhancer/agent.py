@@ -33,11 +33,14 @@ async def prompt_enhancer_node(state: GenieState) -> dict:
 
     await emit("agent_start", {"agent": "prompt_enhancer", "task": "Understanding your request"})
     try:
+        from app.agents.supervisor.nodes import _attachment_note
+
         model = get_utility_model(temperature=0).with_structured_output(
             EnhancedPrompt, include_raw=True
         )
+        system = PROMPT_ENHANCER_SYSTEM_PROMPT + _attachment_note(state)
         result = await ainvoke(
-            model, [SystemMessage(content=PROMPT_ENHANCER_SYSTEM_PROMPT), *state["messages"]]
+            model, [SystemMessage(content=system), *state["messages"]]
         )
         parsed: EnhancedPrompt = result["parsed"]
         intent = parsed.intent.strip() or "unknown"

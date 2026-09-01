@@ -74,6 +74,7 @@ export function postChat(
   token?: string | null,
   projectId?: string | null,
   model?: string | null,
+  attachmentIds?: string[],
 ): Promise<ChatAccepted> {
   return apiFetch<ChatAccepted>("/api/v1/chat", {
     method: "POST",
@@ -83,10 +84,47 @@ export function postChat(
       conversation_id: conversationId,
       project_id: projectId ?? null,
       model: model ?? null,
+      attachment_ids: attachmentIds ?? [],
       // the user's local hour — lets time-aware agents (greeting) get it right
       client_hour: new Date().getHours(),
     }),
   });
+}
+
+// ─── Attachments (composer "+" menu) ───────────────────────────────────────
+
+export interface AttachmentDto {
+  id: string;
+  filename: string;
+  kind: "pdf" | "txt" | "md";
+  char_count: number;
+  token_estimate: number;
+}
+
+export async function uploadAttachment(
+  file: File,
+  token?: string | null,
+): Promise<AttachmentDto> {
+  const form = new FormData();
+  form.append("file", file);
+  // NOT apiFetch — multipart needs the browser to set the boundary header.
+  const res = await fetch(`${API_BASE_URL}/api/v1/attachments`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: form,
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new ApiError(res.status, body || res.statusText);
+  }
+  return (await res.json()) as AttachmentDto;
+}
+
+export function deleteAttachment(
+  id: string,
+  token?: string | null,
+): Promise<void> {
+  return apiFetch<void>(`/api/v1/attachments/${id}`, { method: "DELETE", token });
 }
 
 // ─── Models (the composer's model picker) ──────────────────────────────────
@@ -107,12 +145,20 @@ export function listModels(token?: string | null): Promise<ModelsResponse> {
   return apiFetch<ModelsResponse>("/api/v1/models", { token });
 }
 
+export interface MessageAttachment {
+  id: string;
+  filename: string;
+  kind: string;
+  char_count: number;
+}
+
 export interface ConversationMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   created_at: string;
   agents?: string[];
+  attachments?: MessageAttachment[];
 }
 
 export interface ConversationSummary {
@@ -149,6 +195,18 @@ export function deleteConversation(
   return apiFetch<void>(`/api/v1/conversations/${id}`, {
     method: "DELETE",
     token,
+  });
+}
+
+export function patchConversation(
+  id: string,
+  body: { project_id: string | null },
+  token?: string | null,
+): Promise<ConversationSummary> {
+  return apiFetch<ConversationSummary>(`/api/v1/conversations/${id}`, {
+    method: "PATCH",
+    token,
+    body: JSON.stringify(body),
   });
 }
 

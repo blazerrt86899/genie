@@ -7,11 +7,19 @@ export interface ChatMessage {
   content: string;
   pending?: boolean;
   agents?: string[]; // agents that produced this assistant message
+  attachments?: { filename: string; kind: string }[]; // files sent with a user message
 }
 
 export interface ProjectRef {
   id: string;
   name: string;
+}
+
+export interface PendingAttachment {
+  id: string; // real id once ready; a temp uuid while uploading
+  filename: string;
+  kind: string;
+  status: "uploading" | "ready" | "error";
 }
 
 interface ChatState {
@@ -23,6 +31,13 @@ interface ChatState {
   project: ProjectRef | null;
   model: string | null; // picked chat-model id; null → server default
   setModel: (model: string | null) => void;
+  pendingAttachments: PendingAttachment[]; // staged for the next message
+  addPendingAttachment: (a: PendingAttachment) => void;
+  updatePendingAttachment: (id: string, patch: Partial<PendingAttachment>) => void;
+  removePendingAttachment: (id: string) => void;
+  clearPendingAttachments: () => void;
+  pendingProjectId: string | null; // "Add to project" chosen before a new chat exists
+  setPendingProjectId: (id: string | null) => void;
   setPlan: (plan: PlanStepView[]) => void;
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -47,6 +62,22 @@ export const useChatStore = create<ChatState>((set) => ({
   project: null,
   model: null,
   setModel: (model) => set({ model }),
+  pendingAttachments: [],
+  addPendingAttachment: (a) =>
+    set((s) => ({ pendingAttachments: [...s.pendingAttachments, a] })),
+  updatePendingAttachment: (id, patch) =>
+    set((s) => ({
+      pendingAttachments: s.pendingAttachments.map((a) =>
+        a.id === id ? { ...a, ...patch } : a,
+      ),
+    })),
+  removePendingAttachment: (id) =>
+    set((s) => ({
+      pendingAttachments: s.pendingAttachments.filter((a) => a.id !== id),
+    })),
+  clearPendingAttachments: () => set({ pendingAttachments: [] }),
+  pendingProjectId: null,
+  setPendingProjectId: (pendingProjectId) => set({ pendingProjectId }),
   setPlan: (plan) => set({ plan }),
   addMessage: (message) =>
     set((s) => ({ messages: [...s.messages, message] })),
@@ -85,6 +116,8 @@ export const useChatStore = create<ChatState>((set) => ({
       runId: null,
       conversationId: null,
       project: null,
+      pendingAttachments: [],
+      pendingProjectId: null,
       // `model` is intentionally kept — the pick carries across new chats.
     }),
 }));

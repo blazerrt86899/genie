@@ -87,3 +87,80 @@ async def test_delete_bad_uuid_is_404(client):
     async with client as c:
         resp = await c.delete("/api/v1/conversations/not-a-uuid")
     assert resp.status_code == 404
+
+
+# ─── PATCH /conversations/{id} — move into / out of a project ────────────────
+
+
+@pytest.fixture
+def patch_client(monkeypatch):
+    conv = SimpleNamespace(
+        id=uuid.uuid4(), title="X", project_id=None, model=None,
+        created_at=_NOW, last_message_at=_NOW,
+    )
+    proj_id = uuid.uuid4()
+
+    class FakeConvRepo2:
+        def __init__(self, _db): ...
+
+        async def get_for_user(self, cid, uid):
+            return conv if cid == conv.id else None
+
+        async def set_project(self, cid, uid, pid):
+            conv.project_id = pid
+
+    class FakeProjectRepo:
+        def __init__(self, _db): ...
+
+        async def get_for_user(self, pid, uid):
+            return SimpleNamespace(id=pid) if pid == proj_id else None
+
+    monkeypatch.setattr(conv_ep, "ConversationRepository", FakeConvRepo2)
+    monkeypatch.setattr(conv_ep, "ProjectRepository", FakeProjectRepo)
+
+    def _fake_db():
+        yield None
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _fake_db
+    app.dependency_overrides[get_current_user] = lambda: _USER
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test"), conv, proj_id
+
+
+async def test_patch_moves_into_project(patch_client):
+    client, conv, proj_id = patch_client
+    async with client as c:
+        resp = await c.patch(
+            f"/api/v1/conversations/{conv.id}", json={"project_id": str(proj_id)}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["project_id"] == str(proj_id)
+
+
+async def test_patch_detaches(patch_client):
+    client, conv, _ = patch_client
+    conv.project_id = uuid.uuid4()
+    async with client as c:
+        resp = await c.patch(
+            f"/api/v1/conversations/{conv.id}", json={"project_id": None}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["project_id"] is None
+
+
+async def test_patch_unknown_project_404(patch_client):
+    client, conv, _ = patch_client
+    async with client as c:
+        resp = await c.patch(
+            f"/api/v1/conversations/{conv.id}", json={"project_id": str(uuid.uuid4())}
+        )
+    assert resp.status_code == 404
+
+
+async def test_patch_unknown_conversation_404(patch_client):
+    client, _, proj_id = patch_client
+    async with client as c:
+        resp = await c.patch(
+            f"/api/v1/conversations/{uuid.uuid4()}", json={"project_id": str(proj_id)}
+        )
+    assert resp.status_code == 404

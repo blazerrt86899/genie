@@ -111,6 +111,21 @@ class ConversationRepository(BaseRepository[Conversation]):
             "conversation_model_set", conversation_id=str(conversation_id), model=model
         )
 
+    async def set_project(
+        self, conversation_id: uuid.UUID, user_id: uuid.UUID, project_id: uuid.UUID | None
+    ) -> None:
+        await self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+            .values(project_id=project_id)
+        )
+        await self.db.commit()
+        logger.info(
+            "conversation_project_set",
+            conversation_id=str(conversation_id),
+            project_id=str(project_id) if project_id else None,
+        )
+
     async def delete_for_user(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID
     ) -> bool:

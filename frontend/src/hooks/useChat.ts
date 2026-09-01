@@ -56,6 +56,10 @@ export function useChat(conversationId?: string, projectId?: string | null) {
             role: m.role,
             content: m.content,
             agents: m.agents ?? [],
+            attachments: (m.attachments ?? []).map((a) => ({
+              filename: a.filename,
+              kind: a.kind,
+            })),
           })),
         );
       } catch {
@@ -73,32 +77,43 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       if (!message || useChatStore.getState().runId) return;
 
       const s = useChatStore.getState();
-      s.addMessage({ id: crypto.randomUUID(), role: "user", content: message });
+      const ready = s.pendingAttachments.filter((a) => a.status === "ready");
+      s.addMessage({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: message,
+        attachments: ready.map((a) => ({ filename: a.filename, kind: a.kind })),
+      });
       // One turn can produce several assistant messages (e.g. greeting, then the
       // answer); `currentId` points at the one tokens currently flow into.
       let currentId = crypto.randomUUID();
       s.addMessage({ id: currentId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
       s.setPlan([]);
+      s.clearPendingAttachments();
 
       const token = await getToken();
       const existingCid = useChatStore.getState().conversationId;
       const model = useChatStore.getState().model;
+      const pendingProjectId = useChatStore.getState().pendingProjectId;
 
       try {
         const { run_id, conversation_id } = await postChat(
           message,
           existingCid,
           token,
-          existingCid ? null : projectId,
+          existingCid ? null : (pendingProjectId ?? projectId),
           model,
+          ready.map((a) => a.id),
         );
         s.setRunId(run_id);
         s.setConversationId(conversation_id);
+        s.setPendingProjectId(null);
         if (!existingCid) {
           qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
-          if (projectId) {
-            qc.invalidateQueries({ queryKey: ["project", projectId] });
+          const newProj = pendingProjectId ?? projectId;
+          if (newProj) {
+            qc.invalidateQueries({ queryKey: ["project", newProj] });
           }
           router.replace(`/chat/${conversation_id}`);
         }
