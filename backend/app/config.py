@@ -61,11 +61,20 @@ class Settings(BaseSettings):
     CLERK_USER_CACHE_TTL_SECONDS: int = 300
 
     # ─── LLM (optional at boot) ────────────────────────────────────────────
+    # LLM_PROVIDER picks which chat backend the agent graph uses. "groq" is for
+    # local / testing (OpenAI-credit-free); embeddings always stay on OpenAI.
+    LLM_PROVIDER: Literal["openai", "groq"] = "openai"
+
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str | None = None
     OPENAI_CHAT_MODEL: str = "gpt-4o-2024-08-06"
     OPENAI_TITLE_MODEL: str = "gpt-4o-mini"  # cheap model for conversation titles
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    GROQ_API_KEY: str | None = None
+    GROQ_CHAT_MODEL: str = "openai/gpt-oss-120b"
+    # cheap/fast Groq model: enhancer, greeting, titles, validator
+    GROQ_UTILITY_MODEL: str = "openai/gpt-oss-20b"
 
     # ─── LangSmith ─────────────────────────────────────────────────────────
     # Accept both the current LANGSMITH_* names and the legacy LANGCHAIN_* ones.
@@ -137,7 +146,20 @@ class Settings(BaseSettings):
 
     @property
     def llm_configured(self) -> bool:
+        """True once the active provider (LLM_PROVIDER) has an API key."""
+        if self.LLM_PROVIDER == "groq":
+            return bool(self.GROQ_API_KEY)
         return bool(self.OPENAI_API_KEY)
+
+    @property
+    def chat_model_name(self) -> str:
+        return self.GROQ_CHAT_MODEL if self.LLM_PROVIDER == "groq" else self.OPENAI_CHAT_MODEL
+
+    @property
+    def utility_model_name(self) -> str:
+        return (
+            self.GROQ_UTILITY_MODEL if self.LLM_PROVIDER == "groq" else self.OPENAI_TITLE_MODEL
+        )
 
     @property
     def tavily_configured(self) -> bool:

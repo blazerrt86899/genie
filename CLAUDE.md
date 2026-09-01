@@ -64,13 +64,13 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | ASGI Server | Uvicorn + Gunicorn | Multi-worker in prod |
 | Orchestration | LangGraph | Supervisor pattern, `astream_events v2` |
 | Tool servers | **FastMCP** (`fastmcp>=3`) | Centralized MCP layer — `app/mcp/*` (§22) |
-| LLM Routing | OpenAI `gpt-4o-2024-08-06` | Pin the version in prod |
-| Embeddings | OpenAI `text-embedding-3-small` | 1536 dims |
+| LLM Provider | `settings.LLM_PROVIDER` — `openai` \| `groq` | `openai` (`gpt-4o-2024-08-06`, pin in prod) is default; `groq` (`openai/gpt-oss-120b` chat + `openai/gpt-oss-20b` utility) is the OpenAI-credit-free testing path. `agents/models.py` branches; both SDKs raise the same exception names so the retry/token helpers are provider-agnostic. |
+| Embeddings | OpenAI `text-embedding-3-small` | 1536 dims — **always OpenAI**, regardless of `LLM_PROVIDER` |
 | Task Queue | AWS SQS | Standard queue, idempotent consumers |
 | Background Worker | Python SQS consumer | Separate ECS service |
 | Auth | **Clerk** | Hosted auth, webhook sync to DB, JWKS-verified JWT in FastAPI |
 | Observability | LangSmith + AWS X-Ray | Trace every graph run |
-| Circuit Breaker | `tenacity` | Exponential backoff, 3 retries |
+| Circuit Breaker | `tenacity` | Exponential backoff, 4 attempts (`wait_exponential(2..30s)` — rides out a Groq free-tier 429) |
 | Validation | Pydantic v2 | All request/response models |
 
 ### Database
@@ -192,7 +192,7 @@ genie/
 │       │
 │       ├── agents/
 │       │   ├── base.py                ← AgentResult dataclass
-│       │   ├── models.py              ← get_chat_model / get_utility_model / ainvoke (retry) / tokens_of
+│       │   ├── models.py              ← provider switch (openai|groq) · get_chat_model / get_utility_model / ainvoke (retry) / tokens_of
 │       │   ├── registry.py            ← AGENT_REGISTRY, AgentSpec, agent_menu()
 │       │   ├── supervisor/
 │       │   │   ├── graph.py           ← build_graph(): prompt_enhancer→supervisor→executor→synthesiser→validator
@@ -389,11 +389,18 @@ JWKS_CACHE_TTL_SECONDS=3600          # How long to cache Clerk JWKS (1 hour)
 CLERK_USER_CACHE_TTL_SECONDS=300     # clerk_id → internal user_id mapping cache
 
 # ─── LLM ─────────────────────────────────────────────────────────────────────
+LLM_PROVIDER=openai          # openai | groq  — groq = OpenAI-credit-free testing
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=           # For Claude-specific agent nodes
 OPENAI_CHAT_MODEL=gpt-4o-2024-08-06   # ALWAYS pin the model version — never use "gpt-4o"
 OPENAI_TITLE_MODEL=gpt-4o-mini        # cheap model for auto conversation titles
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # embeddings ALWAYS stay on OpenAI
+
+# Only used when LLM_PROVIDER=groq. Free tier ≈ 8k TPM — a busy multi-agent turn
+# can brush it; models.ainvoke() retries the 429 (tenacity, up to ~30s).
+GROQ_API_KEY=
+GROQ_CHAT_MODEL=openai/gpt-oss-120b       # supervisor / synthesiser / agents
+GROQ_UTILITY_MODEL=openai/gpt-oss-20b     # enhancer / greeting / titles / validator
 
 # ─── LangSmith (observability) ───────────────────────────────────────────────
 # `app/core/observability.py:configure_tracing()` copies these into os.environ at
@@ -1063,8 +1070,8 @@ graph.add_conditional_edges("validator", route_after_validator,
 ```
 Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
 `interrupt_before` yet (calendar agent not built). Every non-streaming LLM call
-goes through `agents/models.py:ainvoke()` (tenacity — 3 attempts, exponential
-backoff on transient OpenAI errors); `prompt_enhancer` / `supervisor` /
+goes through `agents/models.py:ainvoke()` (tenacity — 4 attempts, exponential
+backoff on transient OpenAI **or** Groq errors); `prompt_enhancer` / `supervisor` /
 `synthesiser` / `validator` accumulate `token_usage` so the supervisor's
 `MAX_TOKENS_PER_RUN` guard bites on a re-plan.
 
@@ -1597,7 +1604,9 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (rewrites the message self-contained + `intent`, resolves pronouns), an LLM circuit breaker (`models.ainvoke` — tenacity 3× backoff on all non-streaming calls), Redis `rate_limit` enforced in `POST /chat` (429), a real validator grounding check when agents ran, `token_usage` write-back so the budget guard bites, the post-sign-up `/welcome` gate polling `GET /users/me`, and the `PlanStrip` rendering the `plan` SSE event._
+_Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (rewrites the message self-contained + `intent`, resolves pronouns), an LLM circuit breaker (`models.ainvoke` — tenacity backoff on all non-streaming calls), Redis `rate_limit` enforced in `POST /chat` (429), a real validator grounding check when agents ran, `token_usage` write-back so the budget guard bites, the post-sign-up `/welcome` gate polling `GET /users/me`, and the `PlanStrip` rendering the `plan` SSE event._
+
+_Also 2026-09-01 — **LLM provider switch** (`settings.LLM_PROVIDER` = `openai` | `groq`): `agents/models.py` builds `ChatGroq` or `ChatOpenAI`; `config.chat_model_name` / `utility_model_name` / `llm_configured` resolve by provider; `_transient_errors()` collects both SDKs' retryable exceptions; `title_service` + `task_service._summarise` now route through the shared factories. Verified live end-to-end through the real graph with `LLM_PROVIDER=groq` (`openai/gpt-oss-120b` + `openai/gpt-oss-20b`) — structured output (`include_raw`), `usage_metadata` token write-back, and streamed synthesiser tokens all work; `ainvoke` retry bumped to 4 attempts / ~30s to ride out the Groq free-tier 8k-TPM 429. Embeddings stay on OpenAI._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
@@ -1626,13 +1635,13 @@ _Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (re
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
 - ✅ **prompt_enhancer node** — runs first (`START → prompt_enhancer → supervisor`): `get_utility_model().with_structured_output(EnhancedPrompt, include_raw=True)` rewrites the latest message self-contained (resolves "it"/"the second one") → `state.enhanced_query` (fed to the supervisor prompt) + `state.intent`; passthrough on any error; emits `agent_start`/`agent_end` for the "Understanding your request…" pill.
-- ✅ **LLM hardening** (`agents/models.py`) — `ainvoke(runnable, messages)` = tenacity `AsyncRetrying` (3 attempts, `wait_exponential(1..8s)`) on `openai` transient errors (`RateLimitError`/`APITimeoutError`/`APIConnectionError`/`InternalServerError`); used by every non-streaming call. Streaming synthesiser calls keep langchain's own `max_retries=2` (a retried partial stream would double-send). `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node so the supervisor budget guard bites.
+- ✅ **LLM provider + hardening** (`agents/models.py`) — `_build()` returns `ChatGroq` or `ChatOpenAI` per `settings.LLM_PROVIDER` (`openai` default, `groq` for credit-free testing); model names + `llm_configured` resolve by provider in `config.py`; embeddings always OpenAI. `ainvoke(runnable, messages)` = tenacity `AsyncRetrying` (4 attempts, `wait_exponential(2..30s)`) on `openai` **or** `groq` transient errors (`RateLimitError`/`APITimeoutError`/`APIConnectionError`/`InternalServerError` — collected dynamically by `_transient_errors()`); used by every non-streaming call. Streaming synthesiser calls keep langchain's own `max_retries=2` (a retried partial stream would double-send). `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node so the supervisor budget guard bites.
 - ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
 - ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
-- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
+- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ `rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), SQS workers, per-user token quotas
 
@@ -1692,6 +1701,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
+| Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — `agents/models.py:_build()` + `config.py` resolve model/key by provider (embeddings stay OpenAI) |
 | Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |
 
 ---
@@ -1763,8 +1773,8 @@ able to reconstruct a request from the logs alone.
   `agent_registry_loaded`, `redis_connected`, `database_connected`,
   `checkpointer_ready`, `startup_complete`; `configure_tracing()` logs LangSmith
   on/off.
-- Third-party noise (`httpx`, `httpcore`, `openai`, `sqlalchemy.engine`, …) is
-  pinned to WARNING in `core/logging.py:_NOISY_LOGGERS`.
+- Third-party noise (`httpx`, `httpcore`, `openai`, `groq`, `sqlalchemy.engine`, …)
+  is pinned to WARNING in `core/logging.py:_NOISY_LOGGERS`.
 
 ### 21.3 Still to wire
 

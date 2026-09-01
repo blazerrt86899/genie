@@ -59,7 +59,9 @@ async def lifespan(app: FastAPI):
         "startup_begin",
         env=settings.APP_ENV,
         clerk_configured=settings.clerk_configured,
+        llm_provider=settings.LLM_PROVIDER,
         llm_configured=settings.llm_configured,
+        chat_model=settings.chat_model_name,
         tavily_configured=settings.tavily_configured,
         langsmith_enabled=settings.langsmith_enabled,
     )

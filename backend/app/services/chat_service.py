@@ -144,8 +144,10 @@ async def _generate(
         return
 
     if not settings.llm_configured:
-        logger.error("chat_llm_not_configured")
-        yield sse_error("OPENAI_API_KEY is not set", "llm_not_configured"), None
+        logger.error("chat_llm_not_configured", provider=settings.LLM_PROVIDER)
+        yield sse_error(
+            f"no API key for LLM_PROVIDER={settings.LLM_PROVIDER}", "llm_not_configured"
+        ), None
         return
 
     project_instructions: str | None = None

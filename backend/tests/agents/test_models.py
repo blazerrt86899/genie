@@ -50,7 +50,7 @@ async def test_ainvoke_retries_transient_then_succeeds():
     assert calls["n"] == 3
 
 
-async def test_ainvoke_gives_up_after_3_attempts():
+async def test_ainvoke_gives_up_after_max_attempts():
     calls = {"n": 0}
 
     class Dead:
@@ -60,7 +60,7 @@ async def test_ainvoke_gives_up_after_3_attempts():
 
     with pytest.raises(_Transient):
         await ainvoke(Dead(), [])
-    assert calls["n"] == 3
+    assert calls["n"] == models._RETRY_ATTEMPTS
 
 
 async def test_ainvoke_does_not_retry_non_transient():

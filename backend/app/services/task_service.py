@@ -146,23 +146,19 @@ async def summarize_task(
 async def _summarise(title: str, transcript: str) -> str:
     """3-4 line summary of a task's chat. Isolated so tests can stub the LLM."""
     if not settings.llm_configured:
-        raise TaskValidationError("summarisation needs OPENAI_API_KEY")
+        raise TaskValidationError("summarisation needs an LLM API key")
 
     from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
 
-    model = ChatOpenAI(
-        model=settings.OPENAI_CHAT_MODEL,
-        temperature=0.3,
-        streaming=False,
-        max_tokens=200,
-        api_key=settings.OPENAI_API_KEY,
-    )
-    resp = await model.ainvoke(
+    from app.agents.models import ainvoke, get_utility_model
+
+    model = get_utility_model(temperature=0.3, max_tokens=250)
+    resp = await ainvoke(
+        model,
         [
             SystemMessage(content=_SUMMARY_SYSTEM),
             HumanMessage(content=f"Task: {title}\n\nTranscript:\n{transcript}"),
-        ]
+        ],
     )
     return str(resp.content).strip()
 

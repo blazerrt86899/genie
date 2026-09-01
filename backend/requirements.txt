@@ -27,6 +27,7 @@ langgraph-checkpoint-postgres>=2.0.6
 psycopg[binary,pool]>=3.2          # checkpointer driver (session-mode, not asyncpg)
 langchain-core>=0.3.20
 langchain-openai>=0.2.10
+langchain-groq>=0.2            # LLM_PROVIDER=groq (credit-free testing)
 langchain-community>=0.3.10
 
 # ─── Auth ───────────────────────────────────────────────────────────────────

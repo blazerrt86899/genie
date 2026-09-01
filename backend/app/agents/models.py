@@ -1,9 +1,13 @@
 """Shared LLM factories + a retrying ``ainvoke`` (CLAUDE.md §3, §4).
 
-Every LLM call in the agent graph goes through ``ainvoke()`` so it gets the same
-3-attempt exponential backoff on transient OpenAI errors (rate limit, timeout,
-connection, 5xx). ``tokens_of()`` pulls the token count off a response so nodes
-can accumulate ``GenieState['token_usage']`` (the supervisor's budget guard).
+The chat backend is picked by ``settings.LLM_PROVIDER`` — ``openai`` (default) or
+``groq`` (OpenAI-credit-free, for testing). Both SDKs raise the same exception
+names, so the retry / token helpers don't care which is active. Embeddings always
+stay on OpenAI.
+
+Every non-streaming LLM call goes through ``ainvoke()`` → 4-attempt exponential
+backoff on transient errors. ``tokens_of()`` pulls the token count off a response
+so nodes can accumulate ``GenieState['token_usage']`` (the budget guard).
 """
 
 from __future__ import annotations
@@ -11,8 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from langchain_openai import ChatOpenAI
-from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
+from langchain_core.language_models.chat_models import BaseChatModel
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -24,46 +27,86 @@ from app.config import settings
 
 logger = structlog.get_logger(__name__)
 
-_TRANSIENT = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError)
-_RETRY_ATTEMPTS = 3
-_retry_wait = wait_exponential(multiplier=1, min=1, max=8)  # patchable in tests
+
+def _transient_errors() -> tuple[type[Exception], ...]:
+    """Retryable errors from whichever LLM SDK is in play."""
+    errs: list[type[Exception]] = []
+    for mod in ("openai", "groq"):
+        try:
+            m = __import__(mod)
+            errs += [
+                m.RateLimitError,
+                m.APITimeoutError,
+                m.APIConnectionError,
+                m.InternalServerError,
+            ]
+        except (ImportError, AttributeError):
+            continue
+    return tuple(errs)
 
 
-def get_chat_model(*, streaming: bool = True, temperature: float = 0.7) -> ChatOpenAI:
+_TRANSIENT = _transient_errors()
+# Groq's free tier is 8k TPM — a 429 asks for a ~10-15s wait, so give the backoff
+# enough headroom to actually ride one out rather than give up after ~3s.
+_RETRY_ATTEMPTS = 4
+_retry_wait = wait_exponential(multiplier=2, min=2, max=30)  # patchable in tests
+
+
+def _build(
+    model: str, *, streaming: bool, temperature: float, max_tokens: int | None
+) -> BaseChatModel:
+    max_retries = 2 if streaming else 0  # streaming keeps langchain's own retry
+    if settings.LLM_PROVIDER == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(
+            model=model,
+            temperature=temperature,
+            streaming=streaming,
+            max_tokens=max_tokens,
+            max_retries=max_retries,
+            api_key=settings.GROQ_API_KEY,
+        )
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=model,
+        temperature=temperature,
+        streaming=streaming,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+        api_key=settings.OPENAI_API_KEY,
+    )
+
+
+def get_chat_model(*, streaming: bool = True, temperature: float = 0.7) -> BaseChatModel:
     """The main chat model — used by the synthesiser and the agents.
 
     Non-streaming calls go through ``ainvoke()`` (tenacity retry). Streaming
     calls keep langchain's built-in retry (retrying a partly-streamed response
-    from ``ainvoke()`` would double-send tokens to the client).
+    would double-send tokens to the client).
     """
+    model = settings.chat_model_name
     logger.debug(
         "llm_model_build",
-        model=settings.OPENAI_CHAT_MODEL,
+        provider=settings.LLM_PROVIDER,
+        model=model,
         streaming=streaming,
         temperature=temperature,
     )
-    return ChatOpenAI(
-        model=settings.OPENAI_CHAT_MODEL,
-        temperature=temperature,
-        streaming=streaming,
-        max_retries=2 if streaming else 0,
-        api_key=settings.OPENAI_API_KEY,
-    )
+    return _build(model, streaming=streaming, temperature=temperature, max_tokens=None)
 
 
-def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> ChatOpenAI:
+def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> BaseChatModel:
     """A cheap model for small, non-streamed jobs (routing, greetings, titles)."""
+    model = settings.utility_model_name
     logger.debug(
-        "llm_utility_model_build", model=settings.OPENAI_TITLE_MODEL, max_tokens=max_tokens
-    )
-    return ChatOpenAI(
-        model=settings.OPENAI_TITLE_MODEL,
-        temperature=temperature,
-        streaming=False,
+        "llm_utility_model_build",
+        provider=settings.LLM_PROVIDER,
+        model=model,
         max_tokens=max_tokens,
-        max_retries=0,
-        api_key=settings.OPENAI_API_KEY,
     )
+    return _build(model, streaming=False, temperature=temperature, max_tokens=max_tokens)
 
 
 def _log_retry(retry_state) -> None:
@@ -75,8 +118,8 @@ def _log_retry(retry_state) -> None:
 
 
 async def ainvoke(runnable: Any, messages: Any, **kwargs: Any) -> Any:
-    """``runnable.ainvoke`` with 3-attempt exponential-backoff retry on transient
-    OpenAI errors (rate limit / timeout / connection / 5xx)."""
+    """``runnable.ainvoke`` with 4-attempt exponential-backoff retry on transient
+    provider errors (rate limit / timeout / connection / 5xx)."""
     result: Any = None
     async for attempt in AsyncRetrying(
         stop=stop_after_attempt(_RETRY_ATTEMPTS),

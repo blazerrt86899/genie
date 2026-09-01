@@ -106,6 +106,7 @@ _NOISY_LOGGERS: dict[str, int] = {
     "httpx": logging.WARNING,
     "httpcore": logging.WARNING,
     "openai": logging.WARNING,
+    "groq": logging.WARNING,
     "urllib3": logging.WARNING,
     "asyncio": logging.WARNING,
     "hpack": logging.WARNING,
