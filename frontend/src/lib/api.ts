@@ -49,6 +49,18 @@ export function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
 }
 
+export interface Me {
+  id: string;
+  email: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  token_budget: number;
+}
+
+export function getMe(token?: string | null): Promise<Me> {
+  return apiFetch<Me>("/api/v1/users/me", { token });
+}
+
 // ─── Chat ──────────────────────────────────────────────────────────────────
 
 export interface ChatAccepted {

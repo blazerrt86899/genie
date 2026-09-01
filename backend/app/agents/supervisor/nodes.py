@@ -1,15 +1,16 @@
 """Graph nodes (CLAUDE.md §9).
 
-    START → supervisor → executor → synthesiser → validator → {supervisor | END}
+    START → prompt_enhancer → supervisor → executor → synthesiser → validator → {supervisor | END}
 
+- prompt_enhancer: rewrites the latest message self-contained + an intent label.
 - supervisor:  LLM planning via ``with_structured_output(SupervisorPlan)`` → a
                task ledger. Never hardcoded routing (CLAUDE.md §4.1).
 - executor:    walks the ledger, runs each agent through the registry in
                dependency order, flips ``status`` and records results.
 - synthesiser: composes the single user-facing reply (the only node whose tokens
                stream to the client).
-- validator:   minimal for now — approves any non-empty answer; a real content
-               check comes later.
+- validator:   non-empty check + an LLM grounding check when agents ran; a reject
+               feeds back to the supervisor for a capped re-plan.
 """
 
 from __future__ import annotations
@@ -17,23 +18,25 @@ from __future__ import annotations
 import time
 
 import structlog
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END
 
 from app.agents.events import emit as _emit
-from app.agents.models import get_chat_model
+from app.agents.models import ainvoke, bump_tokens, get_chat_model, get_utility_model, tokens_of
 from app.agents.registry import AGENT_REGISTRY, KNOWN_AGENTS, agent_menu
 from app.agents.supervisor.prompts import (
     CHAT_SYSTEM_PROMPT,
     LEDGER_PREFACE,
     SUPERVISOR_SYSTEM_PROMPT,
     SYNTHESISER_SYSTEM_PROMPT,
+    VALIDATOR_SYSTEM_PROMPT,
 )
 from app.agents.supervisor.state import (
     GenieState,
     PlanStep,
     SupervisorPlan,
     TaskRecord,
+    Validation,
 )
 from app.config import settings
 from app.core.logging import preview
@@ -148,12 +151,18 @@ async def supervisor_node(state: GenieState) -> dict:
     )
     if state.get("project_instructions"):
         system += f"\n\nProject instructions to respect:\n{state['project_instructions']}"
-
-    model = get_chat_model(streaming=False, temperature=0).with_structured_output(SupervisorPlan)
-    try:
-        plan_out: SupervisorPlan = await model.ainvoke(
-            [SystemMessage(content=system), *state["messages"]]
+    if state.get("enhanced_query"):
+        system += (
+            f"\n\nResolved request (from the prompt enhancer — use this as the "
+            f"user's intent): {state['enhanced_query']}"
         )
+
+    model = get_chat_model(streaming=False, temperature=0).with_structured_output(
+        SupervisorPlan, include_raw=True
+    )
+    try:
+        result = await ainvoke(model, [SystemMessage(content=system), *state["messages"]])
+        plan_out: SupervisorPlan = result["parsed"]
     except Exception:  # noqa: BLE001
         logger.warning("supervisor_plan_failed", exc_info=True)
         return {
@@ -170,7 +179,11 @@ async def supervisor_node(state: GenieState) -> dict:
         steps=[{"id": t["id"], "agent": t["agent"], "depends_on": t["depends_on"]} for t in ledger],
         direct_answer=not ledger,
     )
-    return {"plan": ledger, "supervisor_turns": turns + 1, "intent": plan_out.rationale}
+    return {
+        "plan": ledger,
+        "supervisor_turns": turns + 1,
+        "token_usage": bump_tokens(usage, tokens_of(result), "supervisor"),
+    }
 
 
 async def executor_node(state: GenieState) -> dict:
@@ -304,11 +317,17 @@ async def synthesiser_node(state: GenieState) -> dict:
         # No agents ran → answer the user directly, in the current message.
         logger.info("synthesiser_direct_answer")
         await _emit("message_agents", {"agents": []})
-        model = get_chat_model(streaming=True)
+        model = get_chat_model(streaming=True)  # streaming → langchain's own retry
         resp = await model.ainvoke(
             [SystemMessage(content=_with_project(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
         )
-        return {"messages": [resp], "final_response": str(resp.content)}
+        return {
+            "messages": [resp],
+            "final_response": str(resp.content),
+            "token_usage": bump_tokens(
+                state.get("token_usage"), tokens_of(resp), "synthesiser"
+            ),
+        }
 
     # This composed answer is its own message. If a segment (greeting) was already
     # sent, break onto a new one; otherwise it fills the current (first) message.
@@ -336,22 +355,68 @@ async def synthesiser_node(state: GenieState) -> dict:
         )
 
     convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
-    model = get_chat_model(streaming=True)
+    model = get_chat_model(streaming=True)  # streaming → langchain's own retry
     resp = await model.ainvoke([SystemMessage(content=system), *convo])
     logger.info("synthesiser_done", answer_chars=len(str(resp.content)))
-    return {"messages": [resp], "final_response": str(resp.content)}
+    return {
+        "messages": [resp],
+        "final_response": str(resp.content),
+        "token_usage": bump_tokens(state.get("token_usage"), tokens_of(resp), "synthesiser"),
+    }
 
 
 async def validator_node(state: GenieState) -> dict:
-    """Minimal gate — approve any non-empty answer. A real content check (LLM
-    ``with_structured_output(Validation)``) lands here next."""
+    """Non-empty check, then — only when agents produced findings — an LLM
+    grounding / sanity check. A reject routes back to the supervisor (capped)."""
     messages = state.get("messages") or []
     answer = str(messages[-1].content).strip() if messages else ""
-    approved = bool(answer)
+    if not answer:
+        logger.info("validator_verdict", approved=False, reason="empty")
+        return {"validation": {"approved": False, "issues": ["empty response"]}}
+
+    results = state.get("intermediate_results") or {}
+    plan = state.get("plan") or []
+    composable = {
+        k: r for k, r in results.items() if not r.get("streamed")
+    }
+    # Pure model answers (no agents) have nothing external to ground-check.
+    if not composable or not settings.llm_configured:
+        logger.info("validator_verdict", approved=True, checked="non_empty_only")
+        return {"validation": {"approved": True, "issues": []}}
+
+    findings = _format_findings(plan, results)
+    try:
+        model = get_utility_model(temperature=0).with_structured_output(
+            Validation, include_raw=True
+        )
+        result = await ainvoke(
+            model,
+            [
+                SystemMessage(content=VALIDATOR_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=(
+                        f"Draft reply:\n{answer}\n\nAgent findings:\n{findings}\n\n"
+                        "Approve unless the reply is off-topic, a refusal/error, or "
+                        "contradicts the findings."
+                    )
+                ),
+            ],
+        )
+        verdict: Validation = result["parsed"]
+    except Exception:  # noqa: BLE001 — don't block a good answer on a validator error
+        logger.warning("validator_check_failed", exc_info=True)
+        return {"validation": {"approved": True, "issues": []}}
+
     logger.info(
-        "validator_verdict", approved=approved, answer_chars=len(answer)
+        "validator_verdict",
+        approved=verdict.approved,
+        issues=verdict.issues,
+        checked="grounding",
     )
-    return {"validation": {"approved": approved, "issues": [] if approved else ["empty response"]}}
+    return {
+        "validation": {"approved": verdict.approved, "issues": verdict.issues},
+        "token_usage": bump_tokens(state.get("token_usage"), tokens_of(result), "validator"),
+    }
 
 
 def route_after_validator(state: GenieState) -> str:

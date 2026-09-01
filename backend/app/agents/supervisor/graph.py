@@ -1,6 +1,6 @@
 """LangGraph graph assembly (CLAUDE.md §9).
 
-    START → supervisor → executor → synthesiser → validator → {supervisor | END}
+    START → prompt_enhancer → supervisor → executor → synthesiser → validator → {supervisor | END}
 
 The compiled graph + ``AsyncPostgresSaver`` checkpointer (session-mode URL) are
 built once in the FastAPI lifespan and held via ``set_runtime_graph()``.
@@ -13,6 +13,7 @@ from typing import Any
 import structlog
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.prompt_enhancer.agent import prompt_enhancer_node
 from app.agents.supervisor.nodes import (
     executor_node,
     route_after_validator,
@@ -26,18 +27,21 @@ logger = structlog.get_logger(__name__)
 
 
 def build_graph() -> StateGraph:
+    nodes = ["prompt_enhancer", "supervisor", "executor", "synthesiser", "validator"]
     logger.info(
         "graph_build",
-        nodes=["supervisor", "executor", "synthesiser", "validator"],
-        flow="START→supervisor→executor→synthesiser→validator→{supervisor|END}",
+        nodes=nodes,
+        flow="START→prompt_enhancer→supervisor→executor→synthesiser→validator→{supervisor|END}",
     )
     graph = StateGraph(GenieState)
+    graph.add_node("prompt_enhancer", prompt_enhancer_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("executor", executor_node)
     graph.add_node("synthesiser", synthesiser_node)
     graph.add_node("validator", validator_node)
 
-    graph.add_edge(START, "supervisor")
+    graph.add_edge(START, "prompt_enhancer")
+    graph.add_edge("prompt_enhancer", "supervisor")
     graph.add_edge("supervisor", "executor")
     graph.add_edge("executor", "synthesiser")
     graph.add_edge("synthesiser", "validator")

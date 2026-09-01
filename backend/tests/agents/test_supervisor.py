@@ -15,7 +15,7 @@ from app.agents.supervisor.nodes import (
     synthesiser_node,
     validator_node,
 )
-from app.agents.supervisor.state import PlanStep, SupervisorPlan
+from app.agents.supervisor.state import PlanStep, SupervisorPlan, Validation
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END
 
@@ -54,38 +54,39 @@ def test_plan_is_capped() -> None:
 # ─── supervisor node ─────────────────────────────────────────────────────────
 
 
+def _fake_model(returns=None, raises=None):
+    """A stand-in for get_chat_model(...).with_structured_output(X, include_raw=True)."""
+
+    class _Inner:
+        async def ainvoke(self, _messages, **_kw):
+            if raises:
+                raise raises
+            return {"parsed": returns, "raw": SimpleNamespace(usage_metadata={"total_tokens": 11})}
+
+    return SimpleNamespace(with_structured_output=lambda _m, **_kw: _Inner())
+
+
 async def test_supervisor_node_builds_ledger(monkeypatch) -> None:
     plan = SupervisorPlan(
         steps=[PlanStep(description="find news", agent="web_search")],
         rationale="needs current info",
     )
-
-    class FakeStructured:
-        async def ainvoke(self, _messages):
-            return plan
-
-    monkeypatch.setattr(
-        nodes,
-        "get_chat_model",
-        lambda **_: SimpleNamespace(with_structured_output=lambda _m: FakeStructured()),
-    )
+    monkeypatch.setattr(nodes, "get_chat_model", lambda **_: _fake_model(returns=plan))
     out = await supervisor_node(
-        {"messages": [HumanMessage(content="what's new in AI?")], "supervisor_turns": 0}
+        {
+            "messages": [HumanMessage(content="what's new in AI?")],
+            "supervisor_turns": 0,
+            "token_usage": {"total": 0, "by_agent": {}},
+        }
     )
     assert [t["agent"] for t in out["plan"]] == ["web_search"]
     assert out["supervisor_turns"] == 1
-    assert out["intent"] == "needs current info"
+    assert out["token_usage"]["total"] == 11  # tokens tracked for the budget guard
 
 
 async def test_supervisor_node_survives_llm_error(monkeypatch) -> None:
-    class Boom:
-        async def ainvoke(self, _messages):
-            raise RuntimeError("no key")
-
     monkeypatch.setattr(
-        nodes,
-        "get_chat_model",
-        lambda **_: SimpleNamespace(with_structured_output=lambda _m: Boom()),
+        nodes, "get_chat_model", lambda **_: _fake_model(raises=RuntimeError("no key"))
     )
     out = await supervisor_node({"messages": [HumanMessage(content="hi")], "supervisor_turns": 0})
     assert out["plan"] == []
@@ -251,12 +252,40 @@ async def test_synthesiser_composes_only_the_request_not_the_greeting(monkeypatc
 
 
 async def test_validator_approves_non_empty_rejects_empty() -> None:
+    # no agent findings → non-empty check only, no LLM call
     ok = await validator_node({"messages": [AIMessage(content="here you go")]})
     assert ok["validation"]["approved"] is True
 
     bad = await validator_node({"messages": [AIMessage(content="   ")]})
     assert bad["validation"]["approved"] is False
     assert bad["validation"]["issues"]
+
+
+async def test_validator_runs_grounding_check_when_agents_ran(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "settings", SimpleNamespace(llm_configured=True, SUPERVISOR_MAX_TURNS=2)
+    )
+    monkeypatch.setattr(
+        nodes,
+        "get_utility_model",
+        lambda **_: _fake_model(
+            returns=Validation(approved=False, issues=["contradicts sources"])
+        ),
+    )
+    state = {
+        "messages": [AIMessage(content="The Eiffel Tower is in Berlin.")],
+        "plan": [
+            {"id": "t1", "agent": "web_search", "description": "loc", "status": "done",
+             "depends_on": [], "result": "Paris", "error": None},
+        ],
+        "intermediate_results": {
+            "t1": {"agent": "web_search", "summary": "The Eiffel Tower is in Paris.",
+                   "streamed": False, "sources": [], "detail": None},
+        },
+    }
+    out = await validator_node(state)
+    assert out["validation"]["approved"] is False
+    assert "contradicts sources" in out["validation"]["issues"]
 
 
 def test_route_after_validator() -> None:

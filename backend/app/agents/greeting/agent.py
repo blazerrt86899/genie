@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.base import AgentResult
 from app.agents.greeting.prompts import GREETING_SYSTEM_PROMPT, TEMPLATE_GREETINGS
-from app.agents.models import get_utility_model
+from app.agents.models import ainvoke, get_utility_model
 from app.agents.supervisor.state import GenieState, TaskRecord
 from app.config import settings
 
@@ -61,8 +61,9 @@ async def run_greeting(state: GenieState, task: TaskRecord) -> AgentResult:  # n
     try:
         model = get_utility_model(temperature=0.7, max_tokens=80)
         system = GREETING_SYSTEM_PROMPT.format(part_of_day=bucket, hour=hour)
-        resp = await model.ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=_last_user_text(state) or "Hello")]
+        user_text = _last_user_text(state) or "Hello"
+        resp = await ainvoke(
+            model, [SystemMessage(content=system), HumanMessage(content=user_text)]
         )
         text = str(resp.content).strip()
         logger.info("greeting_generated", chars=len(text), fell_back=not text)

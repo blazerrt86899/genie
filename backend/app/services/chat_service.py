@@ -168,6 +168,7 @@ async def _generate(
         "project_instructions": project_instructions,
         "client_hour": client_hour,
         "intent": None,
+        "enhanced_query": None,
         "plan": [],
         "supervisor_turns": 0,
         "active_agents": [],

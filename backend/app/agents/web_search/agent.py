@@ -11,7 +11,7 @@ import structlog
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agents.base import AgentResult
-from app.agents.models import get_chat_model
+from app.agents.models import ainvoke, get_chat_model
 from app.agents.supervisor.state import GenieState, TaskRecord
 from app.agents.web_search.prompts import WEB_SEARCH_SUMMARY_PROMPT
 from app.agents.web_search.tools import extract_sources, format_results, tavily_search
@@ -60,7 +60,7 @@ async def run_web_search(state: GenieState, task: TaskRecord) -> AgentResult:
 
     model = get_chat_model(streaming=False, temperature=0.2)
     prompt = WEB_SEARCH_SUMMARY_PROMPT.format(query=query, results=context)
-    resp = await model.ainvoke([SystemMessage(content=prompt), HumanMessage(content=query)])
+    resp = await ainvoke(model, [SystemMessage(content=prompt), HumanMessage(content=query)])
     summary = str(resp.content).strip()
     logger.info("web_search_summarised", query=query, summary_chars=len(summary))
     return AgentResult(summary=summary, detail=context, sources=sources)

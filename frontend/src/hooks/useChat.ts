@@ -69,6 +69,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       let currentId = crypto.randomUUID();
       s.addMessage({ id: currentId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
+      s.setPlan([]);
 
       const token = await getToken();
       const existingCid = useChatStore.getState().conversationId;
@@ -109,6 +110,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
             });
           } else if (event.type === "message_agents") {
             s.setMessageAgents(currentId, event.agents);
+          } else if (event.type === "plan") {
+            s.setPlan(event.steps);
           } else if (event.type === "agent_start") {
             s.agentStarted(event.agent);
           } else if (event.type === "agent_end") {

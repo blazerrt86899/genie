@@ -33,7 +33,8 @@ class GenieState(TypedDict):
     conversation_id: str
     project_instructions: str | None  # prepended to the system prompt when set
     client_hour: int | None  # the user's local hour (0-23), for time-aware agents
-    intent: str | None  # the supervisor's rationale for the current plan
+    intent: str | None  # short label from the prompt_enhancer
+    enhanced_query: str | None  # the latest message rewritten self-contained (prompt_enhancer)
     plan: list[TaskRecord]  # the task ledger — supervisor writes, executor updates
     supervisor_turns: int  # how many times the supervisor has planned this run
     active_agents: list[str]  # currently running (surfaced to the UI)
@@ -72,7 +73,18 @@ class SupervisorPlan(BaseModel):
 
 
 class Validation(BaseModel):
-    """Validator verdict. Minimal for now — a real content check comes later."""
+    """Validator verdict — the synthesised reply passed a grounding / sanity check."""
 
     approved: bool
     issues: list[str] = Field(default_factory=list)
+
+
+class EnhancedPrompt(BaseModel):
+    """Prompt-enhancer output: a self-contained rewrite of the user's latest
+    message plus a short intent label. Never answers the request."""
+
+    intent: str = Field(description="A 2-4 word label for what the user wants")
+    enhanced_query: str = Field(
+        description="The latest message rewritten as a precise, self-contained request "
+        "(resolve pronouns / references using the conversation). Do NOT answer it."
+    )

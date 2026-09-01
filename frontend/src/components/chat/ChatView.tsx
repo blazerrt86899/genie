@@ -11,6 +11,7 @@ import { useProjects } from "@/hooks/useProjects";
 import { useChatStore } from "@/store/chatStore";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
+import { PlanStrip } from "./PlanStrip";
 import { GreetingHeadline } from "./GreetingHeadline";
 
 const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
@@ -133,6 +134,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
           </Link>
         </div>
       )}
+
+      <PlanStrip />
+
 
       {isEmpty ? (
         /* Centered welcome — greeting + composer, like a fresh chat window */

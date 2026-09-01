@@ -9,10 +9,12 @@ from pydantic import BaseModel
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.clerk import get_current_user
 from app.core.redis import get_redis
 from app.db.models.user import User
 from app.db.session import get_db
+from app.memory import short_term
 from app.services import chat_service
 
 logger = structlog.get_logger(__name__)
@@ -43,6 +45,15 @@ async def create_chat_run(
     if not message:
         logger.info("chat_post_empty_message", user_id=str(user.id))
         raise HTTPException(status_code=422, detail="message must not be empty")
+
+    if not await short_term.check_rate_limit(
+        redis, str(user.id), settings.RATE_LIMIT_REQUESTS_PER_MINUTE
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail=f"rate limit: {settings.RATE_LIMIT_REQUESTS_PER_MINUTE} messages/minute",
+        )
+
     try:
         run_id, conversation_id = await chat_service.create_turn(
             db, redis, user, message, body.conversation_id, body.project_id, body.client_hour

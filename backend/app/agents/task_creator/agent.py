@@ -14,7 +14,7 @@ from langchain_core.messages import SystemMessage
 
 from app.agents.base import AgentResult
 from app.agents.events import emit
-from app.agents.models import get_chat_model
+from app.agents.models import ainvoke, get_chat_model
 from app.agents.supervisor.state import GenieState, TaskRecord
 from app.agents.task_creator.prompts import TASK_CREATOR_PROMPT
 from app.agents.task_creator.schemas import TaskOps
@@ -30,8 +30,8 @@ async def run_task_creator(state: GenieState, task: TaskRecord) -> AgentResult: 
     conversation_id = state.get("conversation_id")
 
     model = get_chat_model(streaming=False, temperature=0).with_structured_output(TaskOps)
-    parsed: TaskOps = await model.ainvoke(
-        [SystemMessage(content=TASK_CREATOR_PROMPT), *state["messages"]]
+    parsed: TaskOps = await ainvoke(
+        model, [SystemMessage(content=TASK_CREATOR_PROMPT), *state["messages"]]
     )
     logger.info(
         "task_creator_parsed",

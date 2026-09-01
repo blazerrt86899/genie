@@ -192,11 +192,11 @@ genie/
 │       │
 │       ├── agents/
 │       │   ├── base.py                ← AgentResult dataclass
-│       │   ├── models.py              ← get_chat_model() / get_utility_model()
+│       │   ├── models.py              ← get_chat_model / get_utility_model / ainvoke (retry) / tokens_of
 │       │   ├── registry.py            ← AGENT_REGISTRY, AgentSpec, agent_menu()
 │       │   ├── supervisor/
-│       │   │   ├── graph.py           ← build_graph(): supervisor→executor→synthesiser→validator
-│       │   │   ├── state.py           ← GenieState + TaskRecord + SupervisorPlan
+│       │   │   ├── graph.py           ← build_graph(): prompt_enhancer→supervisor→executor→synthesiser→validator
+│       │   │   ├── state.py           ← GenieState + TaskRecord + SupervisorPlan + EnhancedPrompt + Validation
 │       │   │   ├── nodes.py           ← supervisor / executor / synthesiser / validator nodes
 │       │   │   └── prompts.py         ← supervisor (registry-driven) / synthesiser / validator prompts
 │       │   │
@@ -204,8 +204,8 @@ genie/
 │       │   │   ├── agent.py           ← run_greeting(state, task) → AgentResult
 │       │   │   └── prompts.py
 │       │   │
-│       │   ├── prompt_enhancer/       ← stub (unregistered)
-│       │   │   ├── agent.py
+│       │   ├── prompt_enhancer/       ← graph node (always first, not a registry agent)
+│       │   │   ├── agent.py           ← prompt_enhancer_node → {intent, enhanced_query}
 │       │   │   └── prompts.py
 │       │   │
 │       │   ├── web_search/            ← registered agent: Tavily
@@ -284,7 +284,8 @@ genie/
 │       │   ├── globals.css            ← Tailwind + light/dark CSS-var tokens + marquee keyframes
 │       │   ├── page.tsx               ← Marketing landing (SiteHeader/Hero/…/Footer)
 │       │   ├── sign-in/[[...sign-in]]/page.tsx   ← Clerk hosted <SignIn />
-│       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp />
+│       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp forceRedirectUrl="/welcome">
+│       │   ├── welcome/page.tsx         ← post-sign-up: poll GET /users/me → /chat (§7.8)
 │       │   └── (app)/
 │       │       ├── layout.tsx         ← auth() gate (redirect to /sign-in) + Sidebar
 │       │       ├── chat/page.tsx      ← new chat  ·  chat/[id]/page.tsx ← a conversation
@@ -300,8 +301,9 @@ genie/
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
 │       │   │   ├── ChatView.tsx       ← Message list + composer (prop: conversationId)
-│       │   │   ├── Message.tsx        ← user/assistant bubble + sender label
-│       │   │   ├── AgentActivity.tsx  ← Live agent pills from agent_start/agent_end SSE
+│       │   │   ├── Message.tsx        ← user/assistant bubble + per-message AgentTrail
+│       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
+│       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← 3 cols + HTML5 drag + "Archive done" + "Archived (N)"
@@ -732,7 +734,8 @@ import { SignUp } from '@clerk/nextjs'
 export default function SignUpPage() {
   return (
     <div className="flex min-h-screen items-center justify-center">
-      <SignUp />
+      {/* → /welcome polls GET /users/me until the webhook has created the row (§7.8) */}
+      <SignUp forceRedirectUrl="/welcome" />
     </div>
   )
 }
@@ -982,12 +985,12 @@ ALTER TABLE user_memory      ENABLE ROW LEVEL SECURITY;
 
 ## 9. LangGraph: GenieState & Graph Wiring
 
-> **Current reality (see §19):** the real supervisor graph runs —
-> `START → supervisor → executor → synthesiser → validator → {supervisor | END}`.
-> Two agents are registered (`greeting`, `web_search`); the other agent dirs are
-> still stubs and are NOT in the registry. The compiled graph + `AsyncPostgresSaver`
-> checkpointer are created once in the FastAPI lifespan and held via
-> `set_runtime_graph()` / `get_runtime_graph()`.
+> **Current reality (see §19):** the real graph runs —
+> `START → prompt_enhancer → supervisor → executor → synthesiser → validator → {supervisor | END}`.
+> Three agents are registered (`greeting`, `web_search`, `task_creator`);
+> `prompt_enhancer` is a node not a registry agent; `rag`/`calendar` dirs are
+> still stubs. The compiled graph + `AsyncPostgresSaver` checkpointer are created
+> once in the FastAPI lifespan and held via `set_runtime_graph()` / `get_runtime_graph()`.
 
 ### GenieState (`app/agents/supervisor/state.py`)
 ```python
@@ -1006,7 +1009,8 @@ class GenieState(TypedDict):
     conversation_id:      str
     project_instructions: str | None                     # prepended to the system prompt (Projects)
     client_hour:          int | None                     # user's local hour 0-23 (time-aware agents)
-    intent:               str | None                     # supervisor's rationale for the current plan
+    intent:               str | None                     # short label from the prompt_enhancer
+    enhanced_query:       str | None                     # latest message rewritten self-contained (prompt_enhancer)
     plan:                 list[TaskRecord]               # the task ledger — supervisor writes, executor updates
     supervisor_turns:     int                            # (re)plan count — capped by SUPERVISOR_MAX_TURNS
     active_agents:        list[str]
@@ -1043,12 +1047,14 @@ Add an agent = add an `AgentSpec` here (+ its module) — no graph node needed, 
 ### Graph wiring (`app/agents/supervisor/graph.py`)
 ```python
 graph = StateGraph(GenieState)
+graph.add_node("prompt_enhancer", prompt_enhancer_node)  # rewrite the message self-contained + intent
 graph.add_node("supervisor",  supervisor_node)   # LLM plan → task ledger
 graph.add_node("executor",    executor_node)     # walk ledger, run agents in dep order, update statuses
 graph.add_node("synthesiser", synthesiser_node)  # compose the one user-facing reply (streams)
-graph.add_node("validator",   validator_node)    # minimal gate now — approves non-empty
+graph.add_node("validator",   validator_node)    # non-empty + LLM grounding check when agents ran
 
-graph.add_edge(START, "supervisor")
+graph.add_edge(START, "prompt_enhancer")
+graph.add_edge("prompt_enhancer", "supervisor")
 graph.add_edge("supervisor", "executor")
 graph.add_edge("executor", "synthesiser")
 graph.add_edge("synthesiser", "validator")
@@ -1056,7 +1062,11 @@ graph.add_conditional_edges("validator", route_after_validator,
                             {"supervisor": "supervisor", END: END})  # capped re-plan loop
 ```
 Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
-`interrupt_before` yet (calendar agent not built).
+`interrupt_before` yet (calendar agent not built). Every non-streaming LLM call
+goes through `agents/models.py:ainvoke()` (tenacity — 3 attempts, exponential
+backoff on transient OpenAI errors); `prompt_enhancer` / `supervisor` /
+`synthesiser` / `validator` accumulate `token_usage` so the supervisor's
+`MAX_TOKENS_PER_RUN` guard bites on a re-plan.
 
 **Executor** runs agents **sequentially** in dependency order — a later agent
 sees earlier `intermediate_results` (keyed by **task id**, not agent name, so an
@@ -1170,15 +1180,16 @@ publish SQS memory consolidation job
 
 ## 12. Agent Catalogue
 
-Agents are dispatched by the `executor` through `AGENT_REGISTRY` (not graph
-nodes). `runner(state, task) -> AgentResult(summary, detail, sources)`.
+Registry agents are dispatched by the `executor` through `AGENT_REGISTRY`.
+`runner(state, task) -> AgentResult(summary, detail, sources, stream)`.
+`prompt_enhancer` is a **graph node**, not a registry agent.
 
-| Agent | File | Registered? | Runs When | Output |
-|-------|------|-------------|-----------|--------|
-| Greeting | `agents/greeting/` | ✅ | Message is a greeting / small talk | `AgentResult.summary` (time-of-day greeting; uses `state.client_hour`) — synthesiser relays it verbatim |
-| Web Search | `agents/web_search/` | ✅ | Current events, external facts | `intermediate_results["web_search"]` — Tavily results summarised + `sources` |
-| Task Creator | `agents/task_creator/` | ✅ | "add X to my todo", "start/finish the … task", **"summarise the … task"**, "archive done", "what's on my list" | `AgentResult.summary` (`stream=True`, its own chat message). Parses the message → `TaskOps` → runs each op via the **`genie-tasks` MCP** (`app/mcp/client.call_tasks_tool`); emits `task_created` / `task_updated` / `tasks_archived`. `summarize` also emits `agent_start`/`agent_end` for the synthetic agent `"task_summary"` so a "Summarising the task…" pill shows |
-| Prompt Enhancer | `agents/prompt_enhancer/` | ⬜ stub | — | — |
+| Agent | File | Kind | Runs When | Output |
+|-------|------|------|-----------|--------|
+| Prompt Enhancer | `agents/prompt_enhancer/` | ✅ node (always, first) | every turn | `state.enhanced_query` (message rewritten self-contained) + `state.intent` label |
+| Greeting | `agents/greeting/` | ✅ registered | Message is a greeting / small talk | `AgentResult.summary` (time-of-day; `state.client_hour`), `stream=True` |
+| Web Search | `agents/web_search/` | ✅ registered | Current events, external facts | `intermediate_results` — Tavily results summarised + `sources` |
+| Task Creator | `agents/task_creator/` | ✅ registered | "add X to my todo", "start/finish the … task", **"summarise the … task"**, "archive done", "what's on my list" | `AgentResult.summary` (`stream=True`). Parses → `TaskOps` → runs each op via the **`genie-tasks` MCP**; emits `task_created` / `task_updated` / `tasks_archived`. `summarize` emits `agent_start`/`agent_end` for a synthetic `task_summary` agent (the "Summarising the task…" pill) |
 | RAG | `agents/rag/` | ⬜ stub | — | — |
 | Calendar | `agents/calendar/` | ⬜ stub | — | — |
 
@@ -1203,8 +1214,8 @@ from the registry.
 
 ### L1 — Redis (TTL varies, ephemeral)
 ```
-recent_messages:{user_id}     → list of last 10 messages (LPUSH/LTRIM, TTL 2h)
-rate_limit:{user_id}:{min}    → request count (INCR/EXPIRE, TTL 1 min)
+rate_limit:{user_id}:{min}    → request count (INCR/EXPIRE ~65s) — LIVE, enforced in POST /chat
+recent_messages:{user_id}     → last 10 messages (LPUSH/LTRIM, TTL 2h) — Phase 6
 clerk:jwks                    → Clerk JWKS JSON (TTL 1h — see Section 7.7)
 user_by_clerk:{clerk_id}      → internal user UUID (TTL 5 min — see Section 7.7)
 ```
@@ -1302,34 +1313,36 @@ DELETE /api/v1/documents/{id}          → 204
 - [x] Agent registry (`agents/registry.py`) + `executor` node (sequential, dep-ordered, `agent_start`/`agent_end`/`plan` events)
 - [x] Web Search agent (Tavily) — grounded summary + sources
 - [x] Greeting agent — time-of-day greeting from `client_hour`
-- [ ] Prompt Enhancer agent
+- [x] Prompt Enhancer node — first node; rewrites the latest message self-contained (resolves pronouns) + an `intent` label → `state.enhanced_query`
 - [x] Synthesiser node — composes the one streamed reply (greeting fast-path skips the LLM)
-- [x] Validator node — minimal (approves non-empty); real content check TODO
-- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (supervisor→executor→synthesiser→validator)
+- [x] Validator node — non-empty check + an LLM grounding check when agents ran; a reject re-plans (capped)
+- [x] `AsyncPostgresSaver` checkpointer wired (session-mode URL) — compiled with `build_graph()` (prompt_enhancer→supervisor→executor→synthesiser→validator)
 - [x] `POST /chat` (+ `client_hour`) + `GET /chat/{id}/stream` SSE endpoints
-- [x] SSE event protocol: `agent_start`, `agent_end`, `plan`, `token`, `title`, `error`, `done` emitted
-- [ ] Redis L1: `recent_messages`, `rate_limit` — _`memory/short_term.py` signatures only; `run:{id}` key is used by chat. **Moved to Phase 6** (§15)._
+- [x] SSE event protocol: `agent_start`, `agent_end`, `plan`, `token`, `message_break`, `message_agents`, `task_*`, `title`, `error`, `done` emitted
+- [x] Redis L1: `rate_limit` — `memory/short_term.check_rate_limit` (INCR/EXPIRE), enforced in `POST /chat` (429). _`recent_messages` → Phase 6._
 - [x] LangSmith tracing — `configure_tracing()` in the lifespan pushes `LANGSMITH_*` into `os.environ`; each chat turn's root run id is stored on the assistant message's `metadata.langsmith_run_id` and echoed in the SSE `done` event. Verified: traces land in the LangSmith project.
-- [ ] Basic circuit breaker on LLM calls (`tenacity`, 3 retries, exponential backoff)
+- [x] Circuit breaker on LLM calls — `agents/models.ainvoke()` (tenacity, 3 attempts, exponential backoff on transient OpenAI errors); used by every non-streaming call. Streaming calls keep langchain's own retry.
+- [x] Token-usage write-back — `prompt_enhancer` / `supervisor` / `synthesiser` / `validator` accumulate `GenieState['token_usage']` (via `models.tokens_of` / `bump_tokens`), so the supervisor's `MAX_TOKENS_PER_RUN` guard bites on re-plan.
 
 **Frontend tasks**:
 - [x] Next.js **15** App Router scaffold + Tailwind v3 + shadcn/ui conventions (`components.json`, `ui/button`)
 - [x] Install `@clerk/nextjs` (v7), `NEXT_PUBLIC_CLERK_*` via Clerk CLI, `<ClerkProvider>` in `<body>`
 - [x] Route protection — _resource-based `await auth()` in `(app)/layout.tsx` (v7 style), not middleware matcher; `middleware.ts` runs bare `clerkMiddleware()`_
 - [x] Sign-in page (`/sign-in/[[...sign-in]]`) and sign-up page using Clerk `<SignIn />` / `<SignUp />`
-- [ ] After sign-up: call `GET /users/me` and wait for 200 before redirecting to `/chat` (webhook race condition guard)
+- [x] After sign-up: `<SignUp forceRedirectUrl="/welcome">` → `app/welcome/page.tsx` polls `GET /users/me` until 200, then → `/chat` (webhook race guard, §7.8)
 - [x] Chat page: `ChatWindow`, `Message`, `StreamingDot` — _streams live tokens; input disabled mid-turn_
 - [x] `useChat` hook: POST /chat → SSE connection → append tokens; rehydrates from `GET /conversations/{id}` on reload
 - [x] `AgentActivity` component — renders `chatStore.activeAgents` from live `agent_start`/`agent_end` SSE events
 - [x] Zustand `chatStore`: messages, activeAgents, runId, conversationId
 - [x] Conversation sidebar — `useConversations` list (recency-ordered), "New chat", `/chat/[id]` per conversation, auto-title (cheap-LLM, SSE `title` event), delete
+- [x] Plan strip (`components/chat/PlanStrip.tsx`) — renders the `plan` SSE event: numbered steps + per-step status icon; cleared on the next send
 
 **Database tasks**:
 - [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
 - [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at), `84a8e112e61f` (projects + conversations.project_id)
 - [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
-**Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload.
+**Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload. — **✅ met** (2026-09-01). Remaining polish (circuit-breaker tuning, per-user token quotas) tracked in later phases.
 
 ---
 
@@ -1485,26 +1498,26 @@ brand-new chat; `/memory` lets the user see and remove what Genie knows.
 
 ### Unit Tests (per agent, per service)
 ```
-tests/
+tests/  (≈90 tests, all green)
 ├── agents/
-│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing
+│   ├── test_supervisor.py      ← plan validation, executor dep-order, validator (grounding), routing
 │   ├── test_registry.py        ← registry integrity
+│   ├── test_models.py          ← ainvoke retry (transient / non-transient / give-up), bump_tokens
+│   ├── test_prompt_enhancer.py ← rewrite + token track + passthrough/error
 │   ├── test_greeting.py        ← time buckets + LLM/template fallback
 │   ├── test_web_search.py      ← Tavily mocked, summary + sources
-│   ├── test_rag.py             ← Mock Supabase RPC, verify hybrid_search called
-│   ├── test_task_creator.py    ← Verify ExtractedTask parsing
-│   └── test_calendar.py        ← Verify interrupt_before triggers
+│   ├── test_task_creator.py    ← create / move / summarise (task_summary pill) / archive
+│   ├── test_rag.py / test_calendar.py  ← Phase 2/3
+├── mcp/
+│   └── test_tasks_server.py    ← in-memory Client, task_service faked
 ├── services/
-│   ├── test_chat_service.py
-│   └── test_document_service.py  ← chunk + embed pipeline
+│   ├── test_chat_service.py    ← SSE framing, message splitting
+│   └── test_task_service.py    ← create / move / archive_done / summarise
 ├── memory/
-│   ├── test_short_term.py
-│   └── test_long_term.py       ← Mock Supabase RPC responses
+│   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py        ← Clerk webhook: valid/invalid Svix signature, all event types
-    ├── test_users_me.py        ← get_current_user() with valid/expired/missing token
-    ├── test_chat.py            ← POST /chat + SSE stream
-    └── test_documents.py
+    ├── test_webhooks.py · test_users_me.py · test_conversations.py
+    ├── test_projects.py · test_tasks.py · test_health.py
 ```
 
 ### Key Test Assertions
@@ -1584,12 +1597,12 @@ Branch: feat/phase-2-rag | fix/calendar-interrupt | chore/ci-ecr
 > implemented. Update the ledger + phase table with every meaningful change, in
 > the same commit as the code. Legend: ✅ working · 🟡 partial · ⬜ stub / not started.
 
-_Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a FastMCP `genie-tasks` server (8 tools incl. **`summarize_task`**) called in-process; `task_creator` agent routes "add to todo" / "start/finish the … task" / "summarise the … task" / "archive done"; `tasks` table + `/tasks` REST; drag-and-drop board + "Archive done" + collapsible "Archived" + task detail modal. SSE `task_created` / `task_updated` / `tasks_archived`. Also: **cross-conversation memory (STM + LTM) carved out into a new deferred Phase 6** (§15) — the conversation checkpointer already covers per-chat memory; the `app/memory/*` layer is still all stubs._
+_Last updated: 2026-09-01 — **Phase 1 closed out**: `prompt_enhancer` node (rewrites the message self-contained + `intent`, resolves pronouns), an LLM circuit breaker (`models.ainvoke` — tenacity 3× backoff on all non-streaming calls), Redis `rate_limit` enforced in `POST /chat` (429), a real validator grounding check when agents ran, `token_usage` write-back so the budget guard bites, the post-sign-up `/welcome` gate polling `GET /users/me`, and the `PlanStrip` rendering the `plan` SSE event._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
-| Phase 1 — Foundation | 🟡 In Progress | ~70% |
+| Phase 1 — Foundation | 🟢 Complete | 100% |
 | Phase 2 — Tasks + RAG / Documents | 🟡 In Progress | ~40% (tasks ✅, docs/RAG ⬜) |
 | Phase 3 — Calendar + Async | 🔴 Not Started | 0% |
 | Phase 4 — Infrastructure | 🔴 Not Started | 0% |
@@ -1612,12 +1625,16 @@ _Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a Fas
 - ✅ Remaining §14 endpoints still return **501** (`/tasks`, `/documents`, `/chat/{id}/confirm`, `DELETE /conversations/{id}`)
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
-- ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), and `task_creator` (`stream=True`) — parses the message into `TaskOps` and runs each op through the **`genie-tasks` MCP** (`app/mcp/`), emitting `task_created`/`task_updated`/`tasks_archived`. All registered. `prompt_enhancer`/`rag`/`calendar` remain unregistered stubs. `app/agents/events.py:emit()` is the shared custom-event helper.
+- ✅ **prompt_enhancer node** — runs first (`START → prompt_enhancer → supervisor`): `get_utility_model().with_structured_output(EnhancedPrompt, include_raw=True)` rewrites the latest message self-contained (resolves "it"/"the second one") → `state.enhanced_query` (fed to the supervisor prompt) + `state.intent`; passthrough on any error; emits `agent_start`/`agent_end` for the "Understanding your request…" pill.
+- ✅ **LLM hardening** (`agents/models.py`) — `ainvoke(runnable, messages)` = tenacity `AsyncRetrying` (3 attempts, `wait_exponential(1..8s)`) on `openai` transient errors (`RateLimitError`/`APITimeoutError`/`APIConnectionError`/`InternalServerError`); used by every non-streaming call. Streaming synthesiser calls keep langchain's own `max_retries=2` (a retried partial stream would double-send). `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node so the supervisor budget guard bites.
+- ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
+- ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).
+- ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
 - ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py`, `OPENAI_TITLE_MODEL=gpt-4o-mini`) → persisted + SSE `title` event.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
-- ⬜ Real validator (content check), `prompt_enhancer`/`rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), workers, rate limiting, token-usage write-back to `GenieState` mid-run
+- ⬜ `rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), SQS workers, per-user token quotas
 
 **Frontend** (Next.js 15 · React 19 · Tailwind v3 · `@clerk/nextjs` v7 · npm)
 - ✅ **Landing page** at `/` (`components/landing/*`) — voice-AI-concierge positioning, sticky blur nav w/ placeholder links, Framer-Motion hero "live call" animation (`CallOrb`: waveform → spoken request → agent chips → completed actions, loops; static under `prefers-reduced-motion`), logo marquee, how-it-works, features grid, "voice coming soon" band, CTA, 4-col footer. **`/` no longer redirects to `/chat`.**
@@ -1625,7 +1642,9 @@ _Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a Fas
 - ✅ `(app)/` group — `Sidebar`: nav block (**New chat** · **Projects** · **Tasks**, same style) then the **Chats** list (always below every nav item, recency-ordered `useConversations`, active-highlight, hover-to-delete), then `BackendStatus` + Clerk `UserButton` pinned at the bottom.
 - ✅ Chat — `/chat` (new) and `/chat/[id]` (a conversation); `ChatView` + `useChat(conversationId?)` is **route-driven** (loads `GET /conversations/{id}` on nav; on the first message of a new chat it POSTs, learns the id, `router.replace('/chat/<id>')`, invalidates the sidebar list; the SSE `title` event refreshes the sidebar). Streams tokens live, input locked mid-turn. Each `Message` has a sender label — "GENIE" brand-gradient + sparkle, or the user's Clerk first name. **Empty state** = a vertically-centred greeting (`GreetingHeadline`: "What can Genie _<two words>_?" — the two words swap every 3.2s with a fade, `prefers-reduced-motion`-safe) above a centred composer; project chats show "New chat in _<name>_" instead.
 - ✅ `/tasks` — `TaskBoard`: 3 columns from `useTasks`, **HTML5 drag** a card between columns (`usePatchTask`), **"Archive done"** button (`useArchiveDone`), collapsible **"Archived (N)"**, card → **`TaskModal`** (status, linked chat `/chat/<id>`, editable description, **"Summarise from chat"** = `useSummarizeTask`, delete). `useChat` invalidates `["tasks"]` on `task_created`/`task_updated`/`tasks_archived`. `AgentActivity`/`Message` label `task_summary` → "Summarising the task".
-- ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" while the agent is in flight → "🔍 Searched the web" once done). `AgentActivity` now only renders the *unclaimed* active agents (an agent running before its message exists) as a pill at the **tail of the message list**. `plan` events typed but not rendered.
+- ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" in flight → "🔍 Searched the web" done). `AgentActivity` renders the *unclaimed* active agents as a tail pill (incl. `prompt_enhancer` → "Understanding your request", `task_summary` → "Summarising the task").
+- ✅ **Plan strip** (`components/chat/PlanStrip.tsx`) — `useChat` puts the `plan` SSE event into `chatStore.plan`; renders below the project chip bar as numbered steps + a per-step status icon (pending / in_progress / done / failed); cleared on the next send.
+- ✅ **Post-sign-up gate** — `app/welcome/page.tsx` (client, top-level): after `<SignUp forceRedirectUrl="/welcome">`, polls `getMe()` (`/api/v1/users/me`) every 800 ms (12 s cap) then `router.replace('/chat')` — dodges the Clerk-webhook / `users`-row race (§7.8).
 - ✅ **Multi-message turns** — `useChat` tracks a `currentId`; `message_break` finalises the current assistant bubble and starts a new one, `message_agents` tags it. A greeting + answer render as two captioned bubbles, matching the two persisted `messages` rows (with `metadata.agents`) on reload.
 - ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
@@ -1642,18 +1661,17 @@ _Last updated: 2026-08-31 — Task board + Genie's first MCP layer (§22): a Fas
 - ✅ `scripts/setup_supabase.sql` — `CREATE SCHEMA genie` + hybrid-search RPCs (in `genie`, `SET search_path`); indexes/FTS triggers/RLS self-skip until Phase 2 tables exist.
 - ⬜ `infrastructure/terraform` (Phase 4), SQS/S3 wiring, CI/CD.
 
-### 19.2 Next up (Phase 1)
+### 19.2 Next up
 
-- **Validator agent** — real content check (`with_structured_output(Validation)`):
-  grounding vs. agent findings, refusal/contradiction detection; on reject, feed
-  `issues` back to the supervisor for a re-plan turn. The loop + `Validation`
-  model are already wired.
-- **Prompt Enhancer agent** — register it; clarify/enrich the query, set `state.intent`.
-- `rate_limit` in Redis + token-usage write-back into `GenieState` mid-run so the
-  budget guard bites. _(Cross-conversation memory / `load_context()` → Phase 6.)_
-- A visible **plan / task-ledger panel** in the chat (the `plan` SSE event is
-  already emitted).
-- Frontend `GET /users/me` gate after sign-up (webhook race guard, §7.8).
+Phase 1 is complete. Next: **Phase 2 — RAG / Documents** (§15) — the `documents`
+/ `document_chunks` migration, the ingestion pipeline + `POST /documents`, and a
+registered `rag` agent (`hybrid_search_documents` RPC). Then Phase 3 (Calendar +
+async workers) and Phase 6 (memory).
+
+Loose ends worth picking up any time: per-user token quotas enforced in the
+supervisor (Phase 5), the real `interrupt_before` confirm flow for calendar
+(Phase 3), a `rag`/`calendar`/`prompt_enhancer` skip heuristic for trivially
+short turns (the enhancer runs an LLM call on every "hi").
 
 ---
 

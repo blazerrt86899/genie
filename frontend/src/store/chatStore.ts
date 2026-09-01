@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { PlanStepView } from "@/lib/sse";
 
 export interface ChatMessage {
   id: string;
@@ -16,9 +17,11 @@ export interface ProjectRef {
 interface ChatState {
   messages: ChatMessage[];
   activeAgents: string[];
+  plan: PlanStepView[];
   runId: string | null;
   conversationId: string | null;
   project: ProjectRef | null;
+  setPlan: (plan: PlanStepView[]) => void;
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
   appendToken: (id: string, token: string) => void;
@@ -36,9 +39,11 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set) => ({
   messages: [],
   activeAgents: [],
+  plan: [],
   runId: null,
   conversationId: null,
   project: null,
+  setPlan: (plan) => set({ plan }),
   addMessage: (message) =>
     set((s) => ({ messages: [...s.messages, message] })),
   setMessages: (messages) => set({ messages }),
@@ -72,6 +77,7 @@ export const useChatStore = create<ChatState>((set) => ({
     set({
       messages: [],
       activeAgents: [],
+      plan: [],
       runId: null,
       conversationId: null,
       project: null,
