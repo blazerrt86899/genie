@@ -136,7 +136,7 @@ export function RagSettingsForm({ project }: { project: ProjectDetail }) {
         <Slider
           label="Similarity Threshold"
           value={s.similarity_threshold}
-          min={0.1}
+          min={0}
           max={0.9}
           step={0.05}
           onChange={(v) => set("similarity_threshold", v)}

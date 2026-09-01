@@ -30,7 +30,10 @@ class RagSettings(BaseModel):
     search_strategy: SearchStrategy = SearchStrategy.hybrid
     chunks_per_search: int = Field(default=10, ge=5, le=30)
     final_context_size: int = Field(default=5, ge=3, le=10)
-    similarity_threshold: float = Field(default=0.3, ge=0.1, le=0.9)
+    # `text-embedding-3-small` cosine scores run low — a relevant hit is often
+    # ~0.25-0.5. Keep this a gentle floor, not a hard gate (retrieval always
+    # keeps its best hit). 0 = no filter.
+    similarity_threshold: float = Field(default=0.15, ge=0.0, le=0.9)
     num_queries: int = Field(default=5, ge=2, le=10)
     chunk_size: int = Field(default=1200, ge=400, le=4000)  # characters
     chunk_overlap: int = Field(default=150, ge=0, le=600)

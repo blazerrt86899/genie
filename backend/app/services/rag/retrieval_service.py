@@ -22,6 +22,20 @@ from app.schemas.rag import RagSettings, SearchStrategy
 logger = structlog.get_logger(__name__)
 
 
+_MIN_KEEP = 3  # text-embedding-3-small scores run low; don't let the floor starve retrieval
+
+
+def _soft_threshold(rows: list[dict], threshold: float) -> list[dict]:
+    """Trim the tail below ``threshold``, but always keep the strongest few — a
+    good chunk for this model often scores ~0.25-0.4, and retrieval degrading to
+    nothing is worse than a weak hit. The synthesiser is told to say so if the
+    passages don't actually answer the question (rows are already rank-ordered)."""
+    if not rows:
+        return []
+    kept = [r for r in rows if (r.get("similarity") or 0.0) >= threshold]
+    return kept if len(kept) >= _MIN_KEEP else rows[: max(_MIN_KEEP, len(kept))]
+
+
 async def _fetch_filenames(db: AsyncSession, project_id: uuid.UUID) -> dict[str, str]:
     rows = (
         await db.execute(
@@ -50,11 +64,9 @@ async def _vector(
             {"q": str(qvec), "p": str(project_id), "u": str(user_id), "k": s.chunks_per_search},
         )
     ).mappings().all()
-    return [
-        dict(r) | {"score": r["similarity"]}
-        for r in rows
-        if r["similarity"] >= s.similarity_threshold
-    ]
+    return _soft_threshold(
+        [dict(r) | {"score": r["similarity"]} for r in rows], s.similarity_threshold
+    )
 
 
 async def _hybrid(
@@ -78,11 +90,11 @@ async def _hybrid(
                 "p": str(project_id),
                 "u": str(user_id),
                 "k": s.chunks_per_search,
-                "thr": s.similarity_threshold,
+                "thr": 0.0,  # soft-threshold in Python instead — see _soft_threshold
             },
         )
     ).mappings().all()
-    return [dict(r) for r in rows]
+    return _soft_threshold([dict(r) for r in rows], s.similarity_threshold)
 
 
 def _rrf_fuse(result_lists: list[list[dict]], k: int = 50) -> list[dict]:

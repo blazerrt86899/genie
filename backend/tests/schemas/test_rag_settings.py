@@ -23,7 +23,7 @@ def test_partial_override_merges():
     s = resolve({"search_strategy": "vector", "chunks_per_search": 20})
     assert s.search_strategy is SearchStrategy.vector
     assert s.chunks_per_search == 20
-    assert s.similarity_threshold == 0.3  # untouched default
+    assert s.similarity_threshold == RagSettings().similarity_threshold  # untouched default
 
 
 def test_out_of_bounds_rejected():

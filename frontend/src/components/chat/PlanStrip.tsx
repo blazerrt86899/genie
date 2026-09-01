@@ -7,6 +7,7 @@ import type { PlanStepView } from "@/lib/sse";
 const AGENT_LABEL: Record<string, string> = {
   greeting: "Greeting",
   web_search: "Web search",
+  knowledge_base: "Knowledge base",
   task_creator: "Tasks",
   rag: "Your documents",
 };

@@ -206,7 +206,7 @@ DO $$
 DECLARE
   stmt TEXT;
   stmts TEXT[] := ARRAY[
-    'CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)',
+    'CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)',
     'CREATE INDEX IF NOT EXISTS ix_document_chunks_fts ON document_chunks USING gin(fts_content)',
     'CREATE INDEX IF NOT EXISTS ix_document_chunks_doc_user ON document_chunks (document_id, user_id)',
     'DROP TRIGGER IF EXISTS update_document_chunks_fts ON document_chunks',

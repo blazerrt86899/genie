@@ -83,7 +83,7 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | ORM | SQLAlchemy 2.0 (async) | For complex queries + LangGraph checkpointer |
 | Supabase Client | `supabase-py` | For auth helpers, storage, realtime |
 | Migrations | Alembic | Only for app tables — NOT checkpointer tables |
-| Vector Search | pgvector (`vector(1536)`) | IVFFlat index, cosine ops |
+| Vector Search | pgvector (`vector(1536)`) | HNSW index (small tables → ivfflat has near-zero recall), cosine ops |
 | Full-Text Search | PostgreSQL tsvector | GIN index, `plainto_tsquery('english', ...)` |
 | RAG Search | **Hybrid Search (RRF)** | Vector + FTS fused via Reciprocal Rank Fusion |
 | Session Cache | ElastiCache Redis | TTL 2h, recent messages + rate limits |
@@ -968,7 +968,7 @@ $$;
 ### 8.5 Required Indexes
 ```sql
 -- pgvector indexes (run after table creation)
-CREATE INDEX ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+CREATE INDEX ON document_chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 CREATE INDEX ON user_memory     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 50);
 
 -- Full-text search indexes
@@ -1188,11 +1188,18 @@ per query → RRF-fuse → top `final_context_size`).
 Wired as a **`retriever` graph node** (`nodes.retriever_node`) between
 `prompt_enhancer` and `supervisor`. Runs only when `state.has_kb` (the project has
 a ready document) **and** `state.needs_documents` (the enhancer's gate — false for
-greetings / small talk). Emits `agent_start`/`agent_end` for `kb_search` (the
-"Searching your knowledge base" pill). Injection mirrors attachments (§9):
-`nodes._kb_note` (source filenames) → supervisor prompt (skip a web search);
-`nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`.
-`chat_service._generate` loads `rag_settings` + `has_kb` into the initial state.
+greetings / small talk). Emits `agent_start`/`agent_end` for `kb_search` and
+**seeds a completed `knowledge_base` ledger step** so the plan strip shows it.
+`supervisor_node` merges that step and `_kb_note` tells the supervisor: KB was
+already searched → return an **empty** plan (no `web_search` for anything a
+document could hold) unless the request also needs live external facts.
+`nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`;
+the answer is captioned `kb_search`. `chat_service._generate` loads `rag_settings`
++ `has_kb`. **Index: HNSW** — ivfflat's recall collapses on a small per-project
+table (a few chunks in 100 lists → a query probes ~1 → finds nothing).
+`similarity_threshold` is a **soft** floor (`_soft_threshold` keeps the top few
+even if all score below it — `text-embedding-3-small` cosine runs ~0.25-0.5;
+default 0.15).
 
 ---
 
@@ -1303,7 +1310,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
 - `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
 - `documents` — a project Knowledge-Base source (`kind`, `s3_key`, `status`, `phase`, `stats`, `processed_at`). Migration `883a87726339`.
-- `document_chunks` — one row per chunk: `content`, `embedding vector(1536)`, trigger-filled `fts_content`, `chunk_metadata`; `project_id` denormalized. ivfflat + gin indexes (in the migration). Migration `883a87726339`.
+- `document_chunks` — one row per chunk: `content`, `embedding vector(1536)`, trigger-filled `fts_content`, `chunk_metadata`; `project_id` denormalized. HNSW + gin indexes (in the migration). Migration `883a87726339`.
 - `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
@@ -1711,6 +1718,8 @@ _Also 2026-09-01 — **Composer "+" menu: file attachments + Add to project**: `
 _Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: `documents` + `document_chunks` (pgvector `vector(1536)`, ivfflat + gin + fts trigger) + `projects.rag_settings` (migration `883a87726339`). `core/aws.py` (boto3 s3/sqs, LocalStack auto-provisions bucket + queue on boot). `POST /api/v1/documents` (multipart, pdf/md/txt ≤ 25 MB) → `document_service` uploads to S3 + enqueues SQS. `workers/ingestion_worker.py` (dev: in-process from the lifespan; prod: `python -m`) polls SQS → `ingest_document` runs `partition_service` (pdfminer for PDF, `unstructured` for md/txt → typed Elements + "Elements Discovered" stats) → `chunk_service` (`chunk_by_title`, size/overlap from `RagSettings`) → `embedder.embed_batch` (**OpenAI `text-embedding-3-small`**) → `document_chunk_repo.bulk_insert`; idempotent (skips `ready`/`processed_at`); per-phase status on the row + `redis PUBLISH doc_pipeline:{id}`. `GET /documents/{id}/stream` (SSE) relays it; `/{id}/chunks` browses them. Frontend: `KnowledgeBasePanel` in `ProjectView` (Documents + Settings tabs) — `DocumentUpload`, `DocumentList`, `PipelineModal` (live), `ChunkViewer`, `RagSettingsForm`. Verified end-to-end against LocalStack + Postgres (embeddings faked — the OpenAI account is at $0; the vectorize phase needs a top-up)._
 
 _Also 2026-09-01 — **Project Knowledge Base, commit 2 (retrieval)**: `services/rag/retrieval_service.retrieve()` — `vector` (pgvector cosine + threshold) / `hybrid` (`hybrid_search_project_chunks` RPC, RRF) / `multi_query_*` (utility-model paraphrases → per-query search → RRF-fuse → top `final_context_size`). New **`retriever` graph node** (`prompt_enhancer → retriever → supervisor`), a pipeline node (not a registry agent), runs only when `state.has_kb and state.needs_documents`; `EnhancedPrompt` gained `needs_documents` (the enhancer's gate — false for greetings/small talk). `nodes._kb_note` (filenames) → supervisor; `nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`. `GenieState` += `rag_settings` / `has_kb` / `needs_documents` / `retrieved_chunks`; `chat_service._generate` loads them from the project. Frontend labels `kb_search`. Verified live through the graph: "how does retrieval work?" in a KB project → enhancer flags it → 5 chunks retrieved → grounded answer; "hi there" → gate off, skipped._
+
+_Also 2026-09-01 — **KB retrieval hardening** (bug: a real CV upload answered from a web search instead of the doc). Root causes: (1) **ivfflat index has ~0 recall on a small per-project table** → migration `344f477b87da` swaps it for **HNSW**; (2) `similarity_threshold=0.3` filtered out every real hit (`text-embedding-3-small` cosine runs ~0.25-0.5) → default → 0.15 and `_soft_threshold` keeps the top few regardless; (3) the retriever didn't appear in the plan and the supervisor still planned `web_search` → the retriever now seeds a completed `knowledge_base` ledger step, `supervisor_node` merges it, and `_kb_note` instructs "return an EMPTY plan — no web_search for anything a document could hold". Verified against the real "Resume KB" project: "tech stacks manjeet is expertised in" → plan `[knowledge_base]`, grounded answer; "hi hello" → `[greeting]`, KB untouched._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|

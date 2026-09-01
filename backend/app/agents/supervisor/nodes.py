@@ -93,15 +93,26 @@ _KB_CHAR_BUDGET = 12_000  # retrieved chunks are already trimmed to final_contex
 
 
 def _kb_note(state: GenieState) -> str:
-    """Short — for the supervisor: the KB has relevant material, skip a web search."""
-    chunks = state.get("retrieved_chunks") or []
-    if not chunks:
+    """For the supervisor: the KB was already searched this turn (the retriever
+    node). Tell it whether that produced material and how to plan around it."""
+    if not state.get("has_kb") or not state.get("needs_documents"):
         return ""
-    srcs = ", ".join(dict.fromkeys(c["filename"] for c in chunks))
+    chunks = state.get("retrieved_chunks") or []
+    if chunks:
+        srcs = ", ".join(dict.fromkeys(c["filename"] for c in chunks))
+        return (
+            f"\n\nThe project knowledge base was ALREADY searched for this request "
+            f"and returned {len(chunks)} relevant passage(s) (from: {srcs}); they are "
+            "given to the writer. The writer will answer from them. Return an EMPTY "
+            "`steps` list — do NOT add a `web_search` step for anything a document "
+            "could contain. Only add `web_search` if the request ALSO needs "
+            "live/current external facts a document cannot have (today's news, "
+            "prices, weather, real-time data)."
+        )
     return (
-        f"\n\nThe project's knowledge base has {len(chunks)} passage(s) relevant to "
-        f"this request (from: {srcs}) — they're provided to the writer, so a web "
-        "search is usually unnecessary."
+        "\n\nThe project knowledge base was searched for this request but nothing "
+        "relevant was found — plan a `web_search` step if external info is needed, "
+        "otherwise answer directly."
     )
 
 
@@ -204,6 +215,7 @@ async def retriever_node(state: GenieState) -> dict:
         return {}
 
     await _emit("agent_start", {"agent": "kb_search", "task": "Searching your knowledge base"})
+    chunks: list[dict] = []
     try:
         rag = _resolve_rag(state.get("rag_settings"))
         async with get_sessionmaker()() as db:
@@ -211,12 +223,28 @@ async def retriever_node(state: GenieState) -> dict:
                 db, _uuid.UUID(project_id), _uuid.UUID(state["user_id"]), query, rag
             )
         logger.info("retriever_done", chunks=len(chunks), strategy=str(rag.search_strategy))
-        return {"retrieved_chunks": chunks}
     except Exception:  # noqa: BLE001 — never block the turn on retrieval
         logger.warning("retriever_failed", exc_info=True)
-        return {}
     finally:
         await _emit("agent_end", {"agent": "kb_search", "status": "done"})
+
+    # A completed ledger step so the plan strip shows "Knowledge Base" and the
+    # supervisor sees the KB was already consulted (merged in supervisor_node).
+    kb_step: TaskRecord = {
+        "id": "kb",
+        "description": "Search the project knowledge base",
+        "agent": "knowledge_base",
+        "status": "done",
+        "depends_on": [],
+        "result": (
+            f"{len(chunks)} relevant passage(s) retrieved"
+            if chunks
+            else "no relevant passages found in the knowledge base"
+        ),
+        "error": None,
+    }
+    await _emit("plan", {"steps": [kb_step]})
+    return {"retrieved_chunks": chunks, "plan": [kb_step]}
 
 
 def _format_findings(plan: list[TaskRecord], results: dict) -> str:
@@ -290,12 +318,16 @@ async def supervisor_node(state: GenieState) -> dict:
         }
 
     ledger = _plan_to_ledger(plan_out.steps)
+    # Keep the retriever's completed KB step in the ledger (the plan strip + the
+    # synthesiser's findings both walk `plan`).
+    kb_steps = [dict(t) for t in (state.get("plan") or []) if t.get("agent") == "knowledge_base"]
+    ledger = kb_steps + ledger  # type: ignore[operator]
     logger.info(
         "supervisor_planned",
         turn=turns + 1,
         rationale=preview(plan_out.rationale, 200),
         steps=[{"id": t["id"], "agent": t["agent"], "depends_on": t["depends_on"]} for t in ledger],
-        direct_answer=not ledger,
+        direct_answer=not [t for t in ledger if t["agent"] != "knowledge_base"],
     )
     return {
         "plan": ledger,
@@ -435,8 +467,10 @@ async def synthesiser_node(state: GenieState) -> dict:
             text = "\n\n".join(segments)
             return {"messages": [AIMessage(content=text)], "final_response": text}
         # No agents ran → answer the user directly, in the current message.
-        logger.info("synthesiser_direct_answer")
-        await _emit("message_agents", {"agents": []})
+        # (KB chunks, if any, are folded into the system prompt by _augment_system.)
+        kb_agents = ["kb_search"] if state.get("retrieved_chunks") else []
+        logger.info("synthesiser_direct_answer", kb=bool(kb_agents))
+        await _emit("message_agents", {"agents": kb_agents})
         model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
         resp = await model.ainvoke(
             [SystemMessage(content=_augment_system(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
@@ -456,6 +490,8 @@ async def synthesiser_node(state: GenieState) -> dict:
             r["agent"] for t in plan if (r := results.get(t["id"])) and not r.get("streamed")
         )
     )
+    if state.get("retrieved_chunks"):
+        composed_agents = ["kb_search", *composed_agents]
     logger.info(
         "synthesiser_compose",
         from_agents=composed_agents,

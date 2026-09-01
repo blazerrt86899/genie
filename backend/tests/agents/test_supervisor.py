@@ -335,10 +335,20 @@ async def test_retriever_node_gated(monkeypatch) -> None:
 def test_kb_helpers() -> None:
     assert nodes._kb_note({}) == ""
     assert nodes._format_kb({}) == ""
-    st = {"retrieved_chunks": [{"content": "body text", "filename": "spec.md", "heading": "Intro"}]}
-    assert "spec.md" in nodes._kb_note(st)
+
+    gate = {"has_kb": True, "needs_documents": True}
+    st = {
+        **gate,
+        "retrieved_chunks": [{"content": "body text", "filename": "spec.md", "heading": "Intro"}],
+    }
+    note = nodes._kb_note(st)
+    assert "spec.md" in note and "EMPTY" in note  # tells the supervisor not to web_search
     full = nodes._format_kb(st)
     assert "spec.md — Intro" in full and "body text" in full
+
+    # KB engaged but found nothing → different note, still not empty
+    miss = nodes._kb_note({**gate, "retrieved_chunks": []})
+    assert "nothing relevant" in miss
 
 
 def test_attachment_helpers() -> None:
