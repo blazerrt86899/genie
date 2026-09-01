@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+from app.services.rag import chunk_service
 from app.services.rag.chunk_service import chunk
 from app.services.rag.partition_service import Element
 
@@ -30,3 +33,25 @@ def test_larger_size_makes_fewer_chunks():
 def test_tiny_fragments_dropped():
     chunks = chunk([Element(type="Title", text="Hi")], size=1000, overlap=0)
     assert chunks == []
+
+
+def test_chunk_page_handles_int_list_and_missing():
+    # unstructured PDF chunks carry page_number as a bare int → must not iterate it
+    assert chunk_service._chunk_page(SimpleNamespace(metadata=SimpleNamespace(page_number=3))) == 3
+    assert (
+        chunk_service._chunk_page(SimpleNamespace(metadata=SimpleNamespace(page_number=[5, 2])))
+        == 2
+    )
+    none_md = SimpleNamespace(metadata=SimpleNamespace(page_number=None))
+    assert chunk_service._chunk_page(none_md) is None
+
+
+def test_pdf_pages_survive_chunking():
+    els = [
+        Element(type="Title", text="Manjeet SRE CV", page=1),
+        Element(type="NarrativeText", text="Senior SRE. " + ("kubernetes " * 40), page=1),
+        Element(type="NarrativeText", text="Experience. " + ("terraform " * 40), page=2),
+    ]
+    chunks = chunk(els, size=1000, overlap=50)  # must not raise "'int' object is not iterable"
+    assert chunks
+    assert all(isinstance(c.metadata["page"], int) for c in chunks)

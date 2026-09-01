@@ -54,15 +54,13 @@ def chunk(elements: list[Element], *, size: int, overlap: int) -> list[Chunk]:
         text = str(ch).strip()
         if len(text) < 12:  # a lone heading / stray fragment — not worth a vector
             continue
-        md = getattr(ch, "metadata", None)
-        pages = sorted({p for p in getattr(md, "page_number", None) or []}) if md else []
         out.append(
             Chunk(
                 index=len(out),
                 text=text,
                 token_count=_token_count(text),
                 metadata={
-                    "page": (pages[0] if pages else _first_page(elements)),
+                    "page": _chunk_page(ch) or _first_page(elements),
                     "element_types": _types_in(ch),
                     "heading": _heading(ch),
                 },
@@ -80,6 +78,22 @@ def _meta(el: Element):
 
 def _first_page(elements: list[Element]) -> int | None:
     return next((el.page for el in elements if el.page), None)
+
+
+def _chunk_page(ch) -> int | None:
+    """`metadata.page_number` may be an int, a list, or missing — normalise it."""
+    pn = getattr(getattr(ch, "metadata", None), "page_number", None)
+    if isinstance(pn, int):
+        return pn
+    if isinstance(pn, (list, tuple, set)) and pn:
+        return sorted(pn)[0]
+    # fall back to the first page across the chunk's source elements
+    origs = getattr(getattr(ch, "metadata", None), "orig_elements", None) or []
+    for e in origs:
+        p = getattr(getattr(e, "metadata", None), "page_number", None)
+        if isinstance(p, int):
+            return p
+    return None
 
 
 def _types_in(ch) -> list[str]:
