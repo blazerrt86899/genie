@@ -73,6 +73,7 @@ export function postChat(
   conversationId: string | null,
   token?: string | null,
   projectId?: string | null,
+  model?: string | null,
 ): Promise<ChatAccepted> {
   return apiFetch<ChatAccepted>("/api/v1/chat", {
     method: "POST",
@@ -81,10 +82,29 @@ export function postChat(
       message,
       conversation_id: conversationId,
       project_id: projectId ?? null,
+      model: model ?? null,
       // the user's local hour — lets time-aware agents (greeting) get it right
       client_hour: new Date().getHours(),
     }),
   });
+}
+
+// ─── Models (the composer's model picker) ──────────────────────────────────
+
+export interface ModelOption {
+  id: string;
+  label: string;
+  provider: string;
+  hint: string;
+}
+
+export interface ModelsResponse {
+  models: ModelOption[];
+  default: string | null;
+}
+
+export function listModels(token?: string | null): Promise<ModelsResponse> {
+  return apiFetch<ModelsResponse>("/api/v1/models", { token });
 }
 
 export interface ConversationMessage {
@@ -101,6 +121,7 @@ export interface ConversationSummary {
   created_at: string;
   last_message_at: string | null;
   project_id: string | null;
+  model: string | null;
 }
 
 export interface ConversationDetail extends ConversationSummary {

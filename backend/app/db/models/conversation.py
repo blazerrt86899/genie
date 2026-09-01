@@ -34,6 +34,8 @@ class Conversation(Base, TimestampMixin):
     title: Mapped[str | None] = mapped_column(String(255))
     # Bumped on every message — the chat sidebar sorts by this (recency).
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Picked chat-model id (MODEL_CATALOG). NULL → the server default.
+    model: Mapped[str | None] = mapped_column(String(40))
 
     user: Mapped[User] = relationship(back_populates="conversations")
     project: Mapped[Project | None] = relationship(back_populates="conversations")

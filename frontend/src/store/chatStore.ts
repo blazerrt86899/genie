@@ -21,6 +21,8 @@ interface ChatState {
   runId: string | null;
   conversationId: string | null;
   project: ProjectRef | null;
+  model: string | null; // picked chat-model id; null → server default
+  setModel: (model: string | null) => void;
   setPlan: (plan: PlanStepView[]) => void;
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
@@ -43,6 +45,8 @@ export const useChatStore = create<ChatState>((set) => ({
   runId: null,
   conversationId: null,
   project: null,
+  model: null,
+  setModel: (model) => set({ model }),
   setPlan: (plan) => set({ plan }),
   addMessage: (message) =>
     set((s) => ({ messages: [...s.messages, message] })),
@@ -81,5 +85,6 @@ export const useChatStore = create<ChatState>((set) => ({
       runId: null,
       conversationId: null,
       project: null,
+      // `model` is intentionally kept — the pick carries across new chats.
     }),
 }));

@@ -28,6 +28,15 @@ export function useChat(conversationId?: string, projectId?: string | null) {
 
     if (!conversationId) {
       if (s.conversationId !== null || s.messages.length > 0) s.reset();
+      // Fresh chat → start from the last-picked model (browser-remembered).
+      if (s.model == null) {
+        try {
+          const saved = localStorage.getItem("genie.chat_model");
+          if (saved) s.setModel(saved);
+        } catch {
+          /* private mode / storage disabled */
+        }
+      }
       return;
     }
     if (s.conversationId === conversationId) return; // already loaded (or just created)
@@ -40,6 +49,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         if (cancelled) return;
         s.setConversationId(conv.id);
         s.setProject(conv.project);
+        s.setModel(conv.model);
         s.setMessages(
           conv.messages.map((m) => ({
             id: m.id,
@@ -73,6 +83,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
 
       const token = await getToken();
       const existingCid = useChatStore.getState().conversationId;
+      const model = useChatStore.getState().model;
 
       try {
         const { run_id, conversation_id } = await postChat(
@@ -80,6 +91,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
           existingCid,
           token,
           existingCid ? null : projectId,
+          model,
         );
         s.setRunId(run_id);
         s.setConversationId(conversation_id);

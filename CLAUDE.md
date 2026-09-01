@@ -64,12 +64,14 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | ASGI Server | Uvicorn + Gunicorn | Multi-worker in prod |
 | Orchestration | LangGraph | Supervisor pattern, `astream_events v2` |
 | Tool servers | **FastMCP** (`fastmcp>=3`) | Centralized MCP layer — `app/mcp/*` (§22) |
-| LLM Provider | `settings.LLM_PROVIDER` — `openai` \| `groq` | `openai` (`gpt-4o-2024-08-06`, pin in prod) is default; `groq` (`openai/gpt-oss-120b` chat + `qwen/qwen3.8-27b` utility) is the OpenAI-credit-free testing path. `agents/models.py` branches; both SDKs raise the same exception names so the retry/token helpers are provider-agnostic. |
+| Chat model | **Per-conversation, user-picked** — `MODEL_CATALOG` in `agents/models.py` (OpenAI · Anthropic · Groq) | The composer's model picker sets `conversations.model` (a catalog id, e.g. `claude-sonnet`); `resolve_model_spec(None)` falls back to `settings.LLM_PROVIDER` + `settings.chat_model_name`. One unified `_build(provider, model, …)` — `ChatOpenAI` / `ChatAnthropic` / `ChatGroq` — used by the supervisor plan, the streamed answer, and the `web_search` / `task_creator` agents. All SDKs share exception names so retry/token helpers stay provider-agnostic. |
+| Utility model | `settings.LLM_PROVIDER` + `settings.utility_model_name` (never user-picked) | The cheap internal calls: `prompt_enhancer` / `greeting` / title / `validator`. `groq` default = `qwen/qwen3.8-27b`. |
 | Embeddings | OpenAI `text-embedding-3-small` | 1536 dims — **always OpenAI**, regardless of `LLM_PROVIDER` |
 | Task Queue | AWS SQS | Standard queue, idempotent consumers |
 | Background Worker | Python SQS consumer | Separate ECS service |
 | Auth | **Clerk** | Hosted auth, webhook sync to DB, JWKS-verified JWT in FastAPI |
 | Observability | LangSmith + AWS X-Ray | Trace every graph run |
+| LLM SDKs | `langchain-openai` · `langchain-anthropic` · `langchain-groq` | All via `agents/models.py` — no direct imports elsewhere |
 | Circuit Breaker | `tenacity` | Exponential backoff, 4 attempts (`wait_exponential(2..30s)` — rides out a Groq free-tier 429) |
 | Validation | Pydantic v2 | All request/response models |
 
@@ -187,12 +189,13 @@ genie/
 │       │       ├── users.py           ← GET /users/me (resolve Clerk token → internal user)
 │       │       ├── chat.py            ← /chat (POST), /chat/{id}/stream (GET SSE)
 │       │       ├── conversations.py   ← /conversations CRUD
+│       │       ├── models.py          ← GET /models (the composer's model-picker catalog)
 │       │       ├── tasks.py           ← /tasks CRUD
 │       │       └── documents.py       ← /documents upload + list
 │       │
 │       ├── agents/
 │       │   ├── base.py                ← AgentResult dataclass
-│       │   ├── models.py              ← provider switch (openai|groq) · get_chat_model / get_utility_model / ainvoke (retry) / tokens_of
+│       │   ├── models.py              ← MODEL_CATALOG + resolve_model_spec · _build(openai|anthropic|groq) · get_chat_model(model_id) / get_utility_model / ainvoke (retry) / tokens_of
 │       │   ├── registry.py            ← AGENT_REGISTRY, AgentSpec, agent_menu()
 │       │   ├── supervisor/
 │       │   │   ├── graph.py           ← build_graph(): prompt_enhancer→supervisor→executor→synthesiser→validator
@@ -304,6 +307,7 @@ genie/
 │       │   │   ├── Message.tsx        ← user/assistant bubble + per-message AgentTrail
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
+│       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← 3 cols + HTML5 drag + "Archive done" + "Archived (N)"
@@ -314,6 +318,7 @@ genie/
 │       ├── hooks/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
 │       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
+│       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
 │       │   └── useTasks.ts            ← tasks list + patch/archive-done/delete (TanStack Query)
 │       │
@@ -389,9 +394,13 @@ JWKS_CACHE_TTL_SECONDS=3600          # How long to cache Clerk JWKS (1 hour)
 CLERK_USER_CACHE_TTL_SECONDS=300     # clerk_id → internal user_id mapping cache
 
 # ─── LLM ─────────────────────────────────────────────────────────────────────
+# LLM_PROVIDER = the *fallback* chat model + the (fixed) utility model. The chat
+# model is otherwise picked per conversation from MODEL_CATALOG — any provider
+# below whose key is set shows up in the composer's picker.
 LLM_PROVIDER=openai          # openai | groq  — groq = OpenAI-credit-free testing
 OPENAI_API_KEY=
-ANTHROPIC_API_KEY=           # For Claude-specific agent nodes
+ANTHROPIC_API_KEY=           # powers the Claude models in the picker
+ANTHROPIC_WORKSPACE_ID=      # only for identity-linked keys ("anthropic-workspace-id is required")
 OPENAI_CHAT_MODEL=gpt-4o-2024-08-06   # ALWAYS pin the model version — never use "gpt-4o"
 OPENAI_TITLE_MODEL=gpt-4o-mini        # cheap model for auto conversation titles
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small   # embeddings ALWAYS stay on OpenAI
@@ -1016,6 +1025,7 @@ class GenieState(TypedDict):
     conversation_id:      str
     project_instructions: str | None                     # prepended to the system prompt (Projects)
     client_hour:          int | None                     # user's local hour 0-23 (time-aware agents)
+    model:                str | None                     # picked chat-model id (MODEL_CATALOG); None → server default
     intent:               str | None                     # short label from the prompt_enhancer
     enhanced_query:       str | None                     # latest message rewritten self-contained (prompt_enhancer)
     plan:                 list[TaskRecord]               # the task ledger — supervisor writes, executor updates
@@ -1071,9 +1081,16 @@ graph.add_conditional_edges("validator", route_after_validator,
 Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
 `interrupt_before` yet (calendar agent not built). Every non-streaming LLM call
 goes through `agents/models.py:ainvoke()` (tenacity — 4 attempts, exponential
-backoff on transient OpenAI **or** Groq errors); `prompt_enhancer` / `supervisor` /
+backoff on transient OpenAI / Anthropic / Groq errors); `prompt_enhancer` / `supervisor` /
 `synthesiser` / `validator` accumulate `token_usage` so the supervisor's
 `MAX_TOKENS_PER_RUN` guard bites on a re-plan.
+
+**Chat model per turn** — `chat_service._generate` seeds `GenieState['model']`
+from `conversations.model` (the picker). The four chat-model call sites —
+`supervisor_node`, `synthesiser_node` (×2), `run_web_search`, `run_task_creator` —
+pass `model_id=state.get("model")` into `get_chat_model()`, which resolves it
+against `MODEL_CATALOG` (unknown / keyless id → the server default, logged). The
+`get_utility_model()` call sites are unaffected.
 
 **Executor** runs agents **sequentially** in dependency order — a later agent
 sees earlier `intermediate_results` (keyed by **task id**, not agent name, so an
@@ -1231,6 +1248,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
+- `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default). Migration `f6703a0bb868`.
 - `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
@@ -1265,13 +1283,16 @@ GET    /api/v1/users/me                → {id, email, full_name, avatar_url, to
                                          Use this to confirm user is synced after sign-up
 
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
-POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?)
+POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?, model?, client_hour?)
 GET    /api/v1/chat/{conv_id}/stream   → SSE stream  (query param: run_id)
 POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
 
+# ── Models (Clerk JWT required) ──────────────────────────────────────────────
+GET    /api/v1/models                  → {models:[{id,label,provider,hint}], default}  — the composer picker; only providers with a key
+
 # ── Conversations ─────────────────────────────────────────────────────────────
-GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents`) + project{id,name}
+GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model}], newest-activity first
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents`) + project{id,name} + model
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Projects ─────────────────────────────────────────────────────────────────
@@ -1346,7 +1367,7 @@ DELETE /api/v1/documents/{id}          → 204
 
 **Database tasks**:
 - [x] Run `setup_supabase.sql` (extensions, hybrid-search RPCs; indexes/RLS deferred to Phase 2)
-- [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at), `84a8e112e61f` (projects + conversations.project_id)
+- [x] Alembic migrations: `1c61bba11678` (users/conversations/messages, genie schema), `34e9ccc89880` (conversations.last_message_at), `84a8e112e61f` (projects + conversations.project_id), `f6703a0bb868` (conversations.model)
 - [x] Verify LangGraph checkpointer tables created by `checkpointer.setup()`
 
 **Phase 1 done when**: User can sign up via Clerk (Google or email), is auto-synced to the `users` table, send a message, see "web_search is thinking…" animate, receive a streamed response using live web data, and the conversation persists across page reload. — **✅ met** (2026-09-01). Remaining polish (circuit-breaker tuning, per-user token quotas) tracked in later phases.
@@ -1429,6 +1450,7 @@ agent ran via the LangSmith trace).
 ### PHASE 5 — Intelligence + Expansion (Weeks 11+)
 **Goal**: Make Genie smarter. Expand the agent catalogue.
 
+- [x] Per-conversation model selection — `MODEL_CATALOG` (OpenAI/Anthropic/Groq), `GET /models`, composer picker, `conversations.model` (2026-09-01)
 - [ ] Per-user token quotas: `token_budget` column in `users`, enforced in supervisor
 - [ ] LangSmith evaluation datasets: build golden Q&A sets for each agent
 - [ ] LangSmith CI evaluations: run on each deploy, gate on regression threshold
@@ -1509,7 +1531,7 @@ tests/  (≈90 tests, all green)
 ├── agents/
 │   ├── test_supervisor.py      ← plan validation, executor dep-order, validator (grounding), routing
 │   ├── test_registry.py        ← registry integrity
-│   ├── test_models.py          ← ainvoke retry (transient / non-transient / give-up), bump_tokens
+│   ├── test_models.py          ← ainvoke retry, bump_tokens, MODEL_CATALOG resolve/filter
 │   ├── test_prompt_enhancer.py ← rewrite + token track + passthrough/error
 │   ├── test_greeting.py        ← time buckets + LLM/template fallback
 │   ├── test_web_search.py      ← Tavily mocked, summary + sources
@@ -1524,7 +1546,7 @@ tests/  (≈90 tests, all green)
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
     ├── test_webhooks.py · test_users_me.py · test_conversations.py
-    ├── test_projects.py · test_tasks.py · test_health.py
+    ├── test_projects.py · test_tasks.py · test_health.py · test_models_endpoint.py
 ```
 
 ### Key Test Assertions
@@ -1610,6 +1632,8 @@ _Also 2026-09-01 — **LLM provider switch** (`settings.LLM_PROVIDER` = `openai`
 
 _Also 2026-09-01 — **Groq reasoning-model fix + utility model → `qwen/qwen3.8-27b`**: Groq's `openai/gpt-oss-*` and `qwen/qwen3*` burn completion tokens on a hidden reasoning pass before emitting content, so a tight `max_tokens` returns an empty string (`finish_reason="length"`) — this silently broke auto conversation titles. `models._build(light=True)` (always set by `get_utility_model()`) now sends the smallest valid `reasoning_effort` per model family (`_groq_light_reasoning()`: `"low"` for gpt-oss — it rejects `"none"` — `"none"` for qwen3); `title_service` `max_tokens` 24 → 64. `GROQ_UTILITY_MODEL` is now `qwen/qwen3.8-27b` (follows a terse system prompt better than gpt-oss-20b; verified titles + structured output + the full graph). Any new tight-budget utility call must still leave a little headroom for the pass._
 
+_Also 2026-09-01 — **Model picker + unified multi-provider LLM layer**: `MODEL_CATALOG` in `agents/models.py` (8 models across OpenAI · Anthropic · Groq); `_build(provider, model, …)` covers all three (`langchain-anthropic` added — the Anthropic branch omits `temperature` since Claude 5 models 400 on it, defaults `max_tokens` 8192, sends `anthropic-workspace-id` from `ANTHROPIC_WORKSPACE_ID` when set). `get_chat_model(model_id=…)` → `resolve_model_spec` (unknown / keyless id → server default, logged). `GenieState['model']`, `conversations.model` (migration `f6703a0bb868`), `POST /chat` `model?`, new `GET /api/v1/models`. Composer `ModelPicker` (`useModels`, `chatStore.model`, per-conversation + `localStorage` default for new chats). Only the **chat** model is picked — the utility model is unchanged. Verified: catalog resolution, the graph threading a per-call model, and the picker via the frontend build. NB: the current `ANTHROPIC_API_KEY` is identity-linked and needs `ANTHROPIC_WORKSPACE_ID` set for the Claude options to actually call._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
@@ -1637,7 +1661,7 @@ _Also 2026-09-01 — **Groq reasoning-model fix + utility model → `qwen/qwen3.
 - ✅ SQLAlchemy models `users` / `conversations` / `messages` + first Alembic migration (`1c61bba11678`, applied). Phase 2+ models are inert placeholder files.
 - ✅ **Supervisor orchestration** (`agents/supervisor/{state,nodes,graph,prompts}.py` + `agents/{base,models,registry}.py`) — `SupervisorPlan` structured output → validated task **ledger** (`TaskRecord[]` in `GenieState`: id / agent / status / depends_on / result). The prompt tells it to split every intent into its own step (a greeting **and** a request → two steps; several research needs → several `web_search` steps). `executor` runs the steps **sequentially** in dependency order through `AGENT_REGISTRY`, keying `intermediate_results` by task id; a later agent sees earlier results. `AgentResult(stream=True)` outputs (greeting; `AgentSpec.stream`) are emitted as a `segment` event and become their **own** captioned assistant message; the graph emits `message_break`/`message_agents` around each message, the `synthesiser` composes only the request answer into the last one (told the greeting was already sent). One turn → several `messages` rows with `metadata.agents` (`add_message(created_at=)` keeps them ordered). `validator` minimal (approves non-empty); `route_after_validator` re-plans up to `SUPERVISOR_MAX_TURNS` (default 2).
 - ✅ **prompt_enhancer node** — runs first (`START → prompt_enhancer → supervisor`): `get_utility_model().with_structured_output(EnhancedPrompt, include_raw=True)` rewrites the latest message self-contained (resolves "it"/"the second one") → `state.enhanced_query` (fed to the supervisor prompt) + `state.intent`; passthrough on any error; emits `agent_start`/`agent_end` for the "Understanding your request…" pill.
-- ✅ **LLM provider + hardening** (`agents/models.py`) — `_build()` returns `ChatGroq` or `ChatOpenAI` per `settings.LLM_PROVIDER` (`openai` default, `groq` for credit-free testing); model names + `llm_configured` resolve by provider in `config.py`; embeddings always OpenAI. `ainvoke(runnable, messages)` = tenacity `AsyncRetrying` (4 attempts, `wait_exponential(2..30s)`) on `openai` **or** `groq` transient errors (`RateLimitError`/`APITimeoutError`/`APIConnectionError`/`InternalServerError` — collected dynamically by `_transient_errors()`); used by every non-streaming call. Streaming synthesiser calls keep langchain's own `max_retries=2` (a retried partial stream would double-send). `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node so the supervisor budget guard bites.
+- ✅ **Unified LLM layer + model picker** (`agents/models.py`) — `MODEL_CATALOG` (8 models · OpenAI/Anthropic/Groq); `_build(provider, model, …)` → `ChatOpenAI` / `ChatAnthropic` / `ChatGroq`; `get_chat_model(model_id=…)` → `resolve_model_spec` (unknown/keyless → `_default_spec()` = `LLM_PROVIDER` + `chat_model_name`, logged `model_id_unresolved`). The 4 chat-model call sites (`supervisor` / `synthesiser` ×2 / `web_search` / `task_creator`) pass `model_id=state.get("model")`; `get_utility_model()` untouched. `conversations.model` persists the pick (`chat_service.create_turn` sets/updates it; `_generate` → `GenieState['model']`). `GET /api/v1/models` lists the catalog filtered to configured providers. `ainvoke()` = tenacity `AsyncRetrying` (4 attempts, `wait_exponential(2..30s)`) on `openai` / `anthropic` / `groq` transient errors (dynamic `_transient_errors()`); streaming keeps langchain's `max_retries=2`. `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node.
 - ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
 - ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
@@ -1655,12 +1679,13 @@ _Also 2026-09-01 — **Groq reasoning-model fix + utility model → `qwen/qwen3.
 - ✅ `/tasks` — `TaskBoard`: 3 columns from `useTasks`, **HTML5 drag** a card between columns (`usePatchTask`), **"Archive done"** button (`useArchiveDone`), collapsible **"Archived (N)"**, card → **`TaskModal`** (status, linked chat `/chat/<id>`, editable description, **"Summarise from chat"** = `useSummarizeTask`, delete). `useChat` invalidates `["tasks"]` on `task_created`/`task_updated`/`tasks_archived`. `AgentActivity`/`Message` label `task_summary` → "Summarising the task".
 - ✅ **Agent activity** — captions, not a bottom strip. `useChat` handles `agent_start`/`agent_end` → `chatStore.agentStarted/agentEnded` and `message_agents` → `chatStore.setMessageAgents`. `Message` renders an `AgentTrail` **above** the bubble ("🔍 Searching the web" in flight → "🔍 Searched the web" done). `AgentActivity` renders the *unclaimed* active agents as a tail pill (incl. `prompt_enhancer` → "Understanding your request", `task_summary` → "Summarising the task").
 - ✅ **Plan strip** (`components/chat/PlanStrip.tsx`) — `useChat` puts the `plan` SSE event into `chatStore.plan`; renders below the project chip bar as numbered steps + a per-step status icon (pending / in_progress / done / failed); cleared on the next send.
+- ✅ **Model picker** (`components/chat/ModelPicker.tsx`) — dropdown in the composer footer; `useModels()` (`GET /models`, `staleTime ∞`) + `chatStore.model`. `useChat` seeds it from `conv.model` on load / `localStorage["genie.chat_model"]` for a new chat, and sends it with `postChat`. `chatStore.reset()` keeps `model` so the pick carries across new chats. Hidden when < 2 models. Controls the chat model only.
 - ✅ **Post-sign-up gate** — `app/welcome/page.tsx` (client, top-level): after `<SignUp forceRedirectUrl="/welcome">`, polls `getMe()` (`/api/v1/users/me`) every 800 ms (12 s cap) then `router.replace('/chat')` — dodges the Clerk-webhook / `users`-row race (§7.8).
 - ✅ **Multi-message turns** — `useChat` tracks a `currentId`; `message_break` finalises the current assistant bubble and starts a new one, `message_agents` tags it. A greeting + answer render as two captioned bubbles, matching the two persisted `messages` rows (with `metadata.agents`) on reload.
-- ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
+- ✅ Zustand `chatStore` (current conversation's messages, `conversationId`, `runId`, `activeAgents`, `model`) / `taskStore`; `lib/api.ts` (`postChat` sends `client_hour` + `model`, `getConversation`, `listConversations`, `deleteConversation`, `chatStreamUrl`, `getHealth`, `listModels`, projects CRUD), `lib/sse.ts` parser matching `core/streaming.py`
 - ✅ Clerk: `ClerkProvider` in `<body>` themed via `lib/clerk-appearance.ts` (token-bound, dark-safe); `middleware.ts` = bare `clerkMiddleware()` + `/__clerk/:path*` matcher; `(app)/layout.tsx` gate via `await auth()`; sign-in/up `fallbackRedirectUrl="/chat"`; `clerk doctor` passes
 - ✅ **Projects UI** — sidebar "Projects" link; `/projects` grid (`ProjectsIndex` + `NewProjectDialog`); `/projects/[id]` (`ProjectView`: editable name/description, instructions textarea + Save, its chat list, "New chat in this project" → `/chat?project=<id>`, delete). `ChatView` reads `?project`, shows a project chip; project chats get a folder glyph in the sidebar (which still lists **all** chats).
-- ⬜ conversation rename/search, per-project model settings, project knowledge docs, live optimistic task board (SSE currently just invalidates the query)
+- ⬜ conversation rename/search, per-project default model, project knowledge docs, live optimistic task board (SSE currently just invalidates the query)
 
 **Auth end-to-end**
 - ✅ Frontend: real Clerk (dev instance `ins_3Ia08…`, app `app_3Ia08IpcDiBIMwI1FykjqEgLCMm`), keys in `frontend/.env.local`; `useChat` / `lib/api.ts` attach `Authorization: Bearer <getToken()>` on `POST /chat`, the stream fetch, and `GET /conversations/{id}`.
@@ -1703,7 +1728,8 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
-| Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — `agents/models.py:_build()` + `config.py` resolve model/key by provider (embeddings stay OpenAI) |
+| Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
+| Add a model to the picker | `MODEL_CATALOG` in `agents/models.py` (one `ModelSpec` row) — no other change; `GET /models` filters by which provider keys are set |
 | Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |
 
 ---

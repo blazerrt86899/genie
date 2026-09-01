@@ -74,3 +74,45 @@ async def test_ainvoke_does_not_retry_non_transient():
     with pytest.raises(ValueError):
         await ainvoke(Bad(), [])
     assert calls["n"] == 1
+
+
+# ─── Model catalog / resolver ────────────────────────────────────────────────
+
+
+@pytest.fixture
+def _all_providers(monkeypatch):
+    """Pretend every provider has a key."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-x")
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", "sk-ant-x")
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "gsk-x")
+
+
+def test_available_models_filters_by_key(monkeypatch, _all_providers):
+    from app.config import settings
+
+    ids = {m.id for m in models.available_models()}
+    assert {"gpt-4o", "claude-sonnet", "groq-oss-120b"} <= ids
+
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", None)
+    ids = {m.id for m in models.available_models()}
+    assert not any(i.startswith("claude") for i in ids)
+    assert "gpt-4o" in ids
+
+
+def test_resolve_model_spec_known_unknown_and_keyless(monkeypatch, _all_providers):
+    from app.config import settings
+
+    assert models.resolve_model_spec("claude-sonnet").model == "claude-sonnet-5"
+
+    # unknown id → the server default
+    assert models.resolve_model_spec("nope").id == "_default"
+
+    # known id but its provider lost its key → the server default
+    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", None)
+    assert models.resolve_model_spec("claude-sonnet").id == "_default"
+
+
+def test_resolve_model_spec_none_is_default():
+    assert models.resolve_model_spec(None).id == "_default"

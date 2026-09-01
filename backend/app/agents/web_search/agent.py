@@ -58,7 +58,7 @@ async def run_web_search(state: GenieState, task: TaskRecord) -> AgentResult:
             sources=sources,
         )
 
-    model = get_chat_model(streaming=False, temperature=0.2)
+    model = get_chat_model(model_id=state.get("model"), streaming=False, temperature=0.2)
     prompt = WEB_SEARCH_SUMMARY_PROMPT.format(query=query, results=context)
     resp = await ainvoke(model, [SystemMessage(content=prompt), HumanMessage(content=query)])
     summary = str(resp.content).strip()

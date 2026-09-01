@@ -28,19 +28,24 @@ class FakeRedis:
         self.store.pop(key, None)
 
 
-def _conv(*, title=None, project_id=None, **kw):
-    return SimpleNamespace(id=uuid.uuid4(), title=title, project_id=project_id, **kw)
+def _conv(*, title=None, project_id=None, model=None, **kw):
+    return SimpleNamespace(
+        id=uuid.uuid4(), title=title, project_id=project_id, model=model, **kw
+    )
 
 
 class FakeConvRepo:
     conv = _conv()
     touched: int = 0
     titled: str | None = None
+    model_set: str | None = None
 
     def __init__(self, _db) -> None: ...
 
-    async def create(self, user_id, title=None, project_id=None):
-        FakeConvRepo.conv = _conv(user_id=user_id, title=title, project_id=project_id)
+    async def create(self, user_id, title=None, project_id=None, model=None):
+        FakeConvRepo.conv = _conv(
+            user_id=user_id, title=title, project_id=project_id, model=model
+        )
         return FakeConvRepo.conv
 
     async def get_for_user(self, conversation_id, user_id):
@@ -52,6 +57,10 @@ class FakeConvRepo:
     async def set_title(self, conversation_id, user_id, title):
         FakeConvRepo.titled = title
         FakeConvRepo.conv.title = title
+
+    async def set_model(self, conversation_id, user_id, model):
+        FakeConvRepo.model_set = model
+        FakeConvRepo.conv.model = model
 
 
 class FakeMsgRepo:
@@ -85,6 +94,7 @@ def _patch(monkeypatch):
     FakeMsgRepo.added_full = []
     FakeConvRepo.touched = 0
     FakeConvRepo.titled = None
+    FakeConvRepo.model_set = None
     FakeConvRepo.conv = _conv()
     FakeProjectRepo.instructions = None
     monkeypatch.setattr(chat_service, "ConversationRepository", FakeConvRepo)

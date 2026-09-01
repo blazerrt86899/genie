@@ -33,6 +33,7 @@ class GenieState(TypedDict):
     conversation_id: str
     project_instructions: str | None  # prepended to the system prompt when set
     client_hour: int | None  # the user's local hour (0-23), for time-aware agents
+    model: str | None  # picked chat-model id (MODEL_CATALOG); None → server default
     intent: str | None  # short label from the prompt_enhancer
     enhanced_query: str | None  # the latest message rewritten self-contained (prompt_enhancer)
     plan: list[TaskRecord]  # the task ledger — supervisor writes, executor updates

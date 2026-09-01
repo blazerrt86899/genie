@@ -1,18 +1,25 @@
 """Shared LLM factories + a retrying ``ainvoke`` (CLAUDE.md §3, §4).
 
-The chat backend is picked by ``settings.LLM_PROVIDER`` — ``openai`` (default) or
-``groq`` (OpenAI-credit-free, for testing). Both SDKs raise the same exception
-names, so the retry / token helpers don't care which is active. Embeddings always
-stay on OpenAI.
+**Chat model** — the supervisor's plan, the final streamed answer, and the
+``web_search`` / ``task_creator`` agents. Chosen per conversation from
+``MODEL_CATALOG`` (the picker in the composer); ``resolve_model_spec(None)`` falls
+back to ``settings.LLM_PROVIDER`` + ``settings.chat_model_name``. One unified
+``_build()`` covers OpenAI, Groq and Anthropic.
 
-Every non-streaming LLM call goes through ``ainvoke()`` → 4-attempt exponential
-backoff on transient errors. ``tokens_of()`` pulls the token count off a response
-so nodes can accumulate ``GenieState['token_usage']`` (the budget guard).
+**Utility model** — the cheap internal calls (``prompt_enhancer`` / ``greeting`` /
+title / ``validator``). Always ``settings.LLM_PROVIDER`` + ``settings.utility_model_name``;
+never user-selectable.
+
+Embeddings always stay on OpenAI. Every non-streaming LLM call goes through
+``ainvoke()`` → 4-attempt exponential backoff on transient errors. ``tokens_of()``
+pulls the token count off a response so nodes can accumulate
+``GenieState['token_usage']`` (the budget guard).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import structlog
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -27,11 +34,95 @@ from app.config import settings
 
 logger = structlog.get_logger(__name__)
 
+Provider = Literal["openai", "anthropic", "groq"]
+
+
+# ─── Model catalog (the picker) ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    """One selectable chat model.
+
+    ``id`` is the stable key the UI/API and ``conversations.model`` store;
+    ``model`` is the provider's real model string.
+    """
+
+    id: str
+    label: str
+    provider: Provider
+    model: str
+    hint: str
+
+
+MODEL_CATALOG: tuple[ModelSpec, ...] = tuple(
+    ModelSpec(*row)
+    for row in (
+        ("gpt-4o", "GPT-4o", "openai", "gpt-4o-2024-08-06", "Balanced"),
+        ("gpt-4o-mini", "GPT-4o mini", "openai", "gpt-4o-mini", "Fast & cheap"),
+        ("claude-opus", "Claude Opus 5", "anthropic", "claude-opus-5", "Most capable"),
+        ("claude-sonnet", "Claude Sonnet 5", "anthropic", "claude-sonnet-5", "Balanced"),
+        ("claude-haiku", "Claude Haiku 4.5", "anthropic", "claude-haiku-4-5", "Fast"),
+        ("groq-oss-120b", "GPT-OSS 120B", "groq", "openai/gpt-oss-120b", "Very fast"),
+        ("groq-oss-20b", "GPT-OSS 20B", "groq", "openai/gpt-oss-20b", "Fastest"),
+        ("groq-qwen3-27b", "Qwen3 27B", "groq", "qwen/qwen3.8-27b", "Fast"),
+    )
+)
+
+_PROVIDER_KEY: dict[Provider, Any] = {
+    "openai": lambda: settings.OPENAI_API_KEY,
+    "anthropic": lambda: settings.ANTHROPIC_API_KEY,
+    "groq": lambda: settings.GROQ_API_KEY,
+}
+
+
+def _provider_ready(provider: Provider) -> bool:
+    return bool(_PROVIDER_KEY[provider]())
+
+
+def available_models() -> list[ModelSpec]:
+    """Catalog entries whose provider has an API key configured."""
+    return [m for m in MODEL_CATALOG if _provider_ready(m.provider)]
+
+
+def _default_spec() -> ModelSpec:
+    """The model used when nobody picked one — the pre-picker behaviour."""
+    provider: Provider = settings.LLM_PROVIDER  # type: ignore[assignment]
+    return ModelSpec("_default", "Default", provider, settings.chat_model_name, "")
+
+
+def default_model_id() -> str | None:
+    """Catalog id of the server default, if it maps to one (for the UI)."""
+    d = _default_spec()
+    match = next(
+        (m.id for m in MODEL_CATALOG if m.model == d.model and m.provider == d.provider),
+        None,
+    )
+    if match:
+        return match
+    avail = available_models()
+    return avail[0].id if avail else None
+
+
+def resolve_model_spec(model_id: str | None) -> ModelSpec:
+    """A catalog ``ModelSpec`` for ``model_id``; the server default on miss.
+
+    A miss (unknown id, or a model whose provider lost its key) is logged and
+    degrades to the default rather than erroring — ``conversations.model`` can go
+    stale.
+    """
+    if model_id:
+        for m in MODEL_CATALOG:
+            if m.id == model_id and _provider_ready(m.provider):
+                return m
+        logger.warning("model_id_unresolved", model_id=model_id)
+    return _default_spec()
+
 
 def _transient_errors() -> tuple[type[Exception], ...]:
-    """Retryable errors from whichever LLM SDK is in play."""
+    """Retryable errors from every LLM SDK that might be in play."""
     errs: list[type[Exception]] = []
-    for mod in ("openai", "groq"):
+    for mod in ("openai", "groq", "anthropic"):
         try:
             m = __import__(mod)
             errs += [
@@ -69,6 +160,7 @@ def _groq_light_reasoning(model: str) -> str | None:
 
 
 def _build(
+    provider: Provider,
     model: str,
     *,
     streaming: bool,
@@ -77,7 +169,8 @@ def _build(
     light: bool = False,
 ) -> BaseChatModel:
     max_retries = 2 if streaming else 0  # streaming keeps langchain's own retry
-    if settings.LLM_PROVIDER == "groq":
+
+    if provider == "groq":
         from langchain_groq import ChatGroq
 
         kwargs: dict[str, Any] = {}
@@ -85,7 +178,6 @@ def _build(
             effort = _groq_light_reasoning(model)
             if effort:
                 kwargs["reasoning_effort"] = effort
-
         return ChatGroq(
             model=model,
             temperature=temperature,
@@ -95,6 +187,24 @@ def _build(
             api_key=settings.GROQ_API_KEY,
             **kwargs,
         )
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        headers: dict[str, str] = {}
+        if settings.ANTHROPIC_WORKSPACE_ID:  # identity-linked keys need this
+            headers["anthropic-workspace-id"] = settings.ANTHROPIC_WORKSPACE_ID
+        # NB: no ``temperature`` — claude-opus-5 / claude-sonnet-5 reject it (400).
+        # Anthropic requires a max_tokens; give streamed answers real room.
+        return ChatAnthropic(
+            model=model,
+            streaming=streaming,
+            max_tokens=max_tokens or 8192,
+            max_retries=max_retries,
+            api_key=settings.ANTHROPIC_API_KEY,
+            default_headers=headers or None,
+        )
+
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
@@ -107,22 +217,28 @@ def _build(
     )
 
 
-def get_chat_model(*, streaming: bool = True, temperature: float = 0.7) -> BaseChatModel:
-    """The main chat model — used by the synthesiser and the agents.
+def get_chat_model(
+    *, model_id: str | None = None, streaming: bool = True, temperature: float = 0.7
+) -> BaseChatModel:
+    """The main chat model — the synthesiser and the agents.
 
-    Non-streaming calls go through ``ainvoke()`` (tenacity retry). Streaming
-    calls keep langchain's built-in retry (retrying a partly-streamed response
-    would double-send tokens to the client).
+    ``model_id`` is a ``MODEL_CATALOG`` id (from ``conversations.model`` /
+    ``GenieState['model']``); ``None`` → the server default. Non-streaming calls
+    go through ``ainvoke()`` (tenacity retry); streaming calls keep langchain's
+    own retry (retrying a partly-streamed response would double-send tokens).
     """
-    model = settings.chat_model_name
+    spec = resolve_model_spec(model_id)
     logger.debug(
         "llm_model_build",
-        provider=settings.LLM_PROVIDER,
-        model=model,
+        model_id=model_id,
+        provider=spec.provider,
+        model=spec.model,
         streaming=streaming,
         temperature=temperature,
     )
-    return _build(model, streaming=streaming, temperature=temperature, max_tokens=None)
+    return _build(
+        spec.provider, spec.model, streaming=streaming, temperature=temperature, max_tokens=None
+    )
 
 
 def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> BaseChatModel:
@@ -132,14 +248,16 @@ def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None
     trims the reasoning pass to its minimum, but callers passing a tight
     ``max_tokens`` must still leave a little headroom for it (see ``_build``).
     """
+    provider: Provider = settings.LLM_PROVIDER  # type: ignore[assignment]
     model = settings.utility_model_name
     logger.debug(
         "llm_utility_model_build",
-        provider=settings.LLM_PROVIDER,
+        provider=provider,
         model=model,
         max_tokens=max_tokens,
     )
     return _build(
+        provider,
         model,
         streaming=False,
         temperature=temperature,

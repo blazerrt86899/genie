@@ -29,7 +29,9 @@ async def run_task_creator(state: GenieState, task: TaskRecord) -> AgentResult: 
     user_id = state["user_id"]
     conversation_id = state.get("conversation_id")
 
-    model = get_chat_model(streaming=False, temperature=0).with_structured_output(TaskOps)
+    model = get_chat_model(
+        model_id=state.get("model"), streaming=False, temperature=0
+    ).with_structured_output(TaskOps)
     parsed: TaskOps = await ainvoke(
         model, [SystemMessage(content=TASK_CREATOR_PROMPT), *state["messages"]]
     )

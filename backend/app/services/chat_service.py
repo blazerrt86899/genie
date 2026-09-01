@@ -45,6 +45,7 @@ async def create_turn(
     conversation_id: str | None,
     project_id: str | None = None,
     client_hour: int | None = None,
+    model: str | None = None,
 ) -> tuple[str, str]:
     """Persist the user message, return ``(run_id, conversation_id)``."""
     logger.info(
@@ -53,6 +54,7 @@ async def create_turn(
         conversation_id=conversation_id,
         project_id=project_id,
         client_hour=client_hour,
+        model=model,
         message_chars=len(message),
         message_preview=preview(message),
     )
@@ -69,6 +71,9 @@ async def create_turn(
             )
             raise ValueError("conversation not found")
         logger.debug("chat_using_existing_conversation", conversation_id=conversation_id)
+        if model and model != conversation.model:
+            # Switching model mid-conversation sticks for the next turn onward.
+            await conv_repo.set_model(conversation.id, user.id, model)
     else:
         pid: uuid.UUID | None = None
         if project_id:
@@ -81,7 +86,9 @@ async def create_turn(
                 )
                 raise ValueError("project not found")
             pid = project.id
-        conversation = await conv_repo.create(user.id, title=None, project_id=pid)
+        conversation = await conv_repo.create(
+            user.id, title=None, project_id=pid, model=model
+        )
 
     await msg_repo.add_message(conversation.id, user.id, "user", message)
     await conv_repo.touch(conversation.id)
@@ -169,6 +176,7 @@ async def _generate(
         "conversation_id": conversation_id,
         "project_instructions": project_instructions,
         "client_hour": client_hour,
+        "model": conversation.model,
         "intent": None,
         "enhanced_query": None,
         "plan": [],
@@ -190,6 +198,7 @@ async def _generate(
         thread_id=conversation_id,
         has_project_instructions=project_instructions is not None,
         client_hour=client_hour,
+        model=conversation.model,
     )
 
     total_tokens = 0

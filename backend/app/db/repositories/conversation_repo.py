@@ -21,15 +21,17 @@ class ConversationRepository(BaseRepository[Conversation]):
         user_id: uuid.UUID,
         title: str | None = None,
         project_id: uuid.UUID | None = None,
+        model: str | None = None,
     ) -> Conversation:
         conv = await self.add(
-            Conversation(user_id=user_id, title=title, project_id=project_id)
+            Conversation(user_id=user_id, title=title, project_id=project_id, model=model)
         )
         logger.info(
             "conversation_created",
             conversation_id=str(conv.id),
             user_id=str(user_id),
             project_id=str(project_id) if project_id else None,
+            model=model,
         )
         return conv
 
@@ -94,6 +96,19 @@ class ConversationRepository(BaseRepository[Conversation]):
         await self.db.commit()
         logger.info(
             "conversation_titled", conversation_id=str(conversation_id), title=title
+        )
+
+    async def set_model(
+        self, conversation_id: uuid.UUID, user_id: uuid.UUID, model: str | None
+    ) -> None:
+        await self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+            .values(model=model)
+        )
+        await self.db.commit()
+        logger.info(
+            "conversation_model_set", conversation_id=str(conversation_id), model=model
         )
 
     async def delete_for_user(

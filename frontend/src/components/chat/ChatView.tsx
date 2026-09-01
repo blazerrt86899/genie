@@ -13,6 +13,7 @@ import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
 import { PlanStrip } from "./PlanStrip";
 import { GreetingHeadline } from "./GreetingHeadline";
+import { ModelPicker } from "./ModelPicker";
 
 const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
 
@@ -59,11 +60,14 @@ function Composer({
         className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
       />
       <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1.5">
-        <span className="select-none pl-1 text-xs text-muted-foreground/70">
-          <kbd className="font-sans">Enter</kbd> to send ·{" "}
-          <kbd className="font-sans">Shift</kbd>+<kbd className="font-sans">Enter</kbd>{" "}
-          for a new line
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <ModelPicker disabled={isStreaming} />
+          <span className="hidden select-none text-xs text-muted-foreground/70 sm:inline">
+            <kbd className="font-sans">Enter</kbd> to send ·{" "}
+            <kbd className="font-sans">Shift</kbd>+
+            <kbd className="font-sans">Enter</kbd> for a new line
+          </span>
+        </div>
         <Button
           variant="brand"
           size="icon"

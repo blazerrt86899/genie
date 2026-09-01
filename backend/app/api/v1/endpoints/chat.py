@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
     project_id: str | None = None  # start a new chat inside this project
     client_hour: int | None = None  # the user's local hour (0-23), for time-aware agents
+    model: str | None = None  # picked chat-model id (MODEL_CATALOG); None → server default
 
 
 class ChatAccepted(BaseModel):
@@ -56,7 +57,14 @@ async def create_chat_run(
 
     try:
         run_id, conversation_id = await chat_service.create_turn(
-            db, redis, user, message, body.conversation_id, body.project_id, body.client_hour
+            db,
+            redis,
+            user,
+            message,
+            body.conversation_id,
+            body.project_id,
+            body.client_hour,
+            body.model,
         )
     except ValueError as exc:
         logger.warning("chat_post_rejected", user_id=str(user.id), error=str(exc))

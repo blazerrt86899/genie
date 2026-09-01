@@ -34,6 +34,7 @@ class ConversationSummary(BaseModel):
     created_at: datetime
     last_message_at: datetime | None
     project_id: str | None
+    model: str | None  # picked chat-model id (MODEL_CATALOG); None → server default
 
 
 class MessageOut(BaseModel):
@@ -56,6 +57,7 @@ def conversation_summary(c) -> ConversationSummary:
         created_at=c.created_at,
         last_message_at=c.last_message_at,
         project_id=str(c.project_id) if c.project_id else None,
+        model=c.model,
     )
 
 

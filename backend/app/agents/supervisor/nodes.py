@@ -157,9 +157,9 @@ async def supervisor_node(state: GenieState) -> dict:
             f"user's intent): {state['enhanced_query']}"
         )
 
-    model = get_chat_model(streaming=False, temperature=0).with_structured_output(
-        SupervisorPlan, include_raw=True
-    )
+    model = get_chat_model(
+        model_id=state.get("model"), streaming=False, temperature=0
+    ).with_structured_output(SupervisorPlan, include_raw=True)
     try:
         result = await ainvoke(model, [SystemMessage(content=system), *state["messages"]])
         plan_out: SupervisorPlan = result["parsed"]
@@ -317,7 +317,7 @@ async def synthesiser_node(state: GenieState) -> dict:
         # No agents ran → answer the user directly, in the current message.
         logger.info("synthesiser_direct_answer")
         await _emit("message_agents", {"agents": []})
-        model = get_chat_model(streaming=True)  # streaming → langchain's own retry
+        model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
         resp = await model.ainvoke(
             [SystemMessage(content=_with_project(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
         )
@@ -355,7 +355,7 @@ async def synthesiser_node(state: GenieState) -> dict:
         )
 
     convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
-    model = get_chat_model(streaming=True)  # streaming → langchain's own retry
+    model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
     resp = await model.ainvoke([SystemMessage(content=system), *convo])
     logger.info("synthesiser_done", answer_chars=len(str(resp.content)))
     return {
