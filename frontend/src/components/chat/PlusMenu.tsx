@@ -102,7 +102,7 @@ export function PlusMenu({
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 z-20 mb-1.5 w-56 rounded-lg border border-border bg-card p-1 shadow-lg">
+        <div className="absolute left-0 top-full z-20 mt-1.5 w-56 rounded-lg border border-border bg-card p-1 shadow-lg">
           <button
             type="button"
             onClick={() => fileRef.current?.click()}
