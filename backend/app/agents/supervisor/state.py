@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing_extensions import TypedDict
 
 TaskStatus = Literal["pending", "in_progress", "done", "failed"]
@@ -75,7 +75,15 @@ class SupervisorPlan(BaseModel):
         description="Ordered plan. Empty when no specialist agent is needed — "
         "the answer will then be written directly.",
     )
-    rationale: str = Field(description="Why this plan (or why no agents are needed)")
+    rationale: str = Field(
+        default="", description="Why this plan (or why no agents are needed)"
+    )
+
+    @field_validator("steps", mode="before")
+    @classmethod
+    def _coerce_steps(cls, v: object) -> object:
+        # some models emit `steps: null` when they mean "no steps"
+        return v or []
 
 
 class Validation(BaseModel):

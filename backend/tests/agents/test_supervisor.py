@@ -342,13 +342,13 @@ def test_kb_helpers() -> None:
         "retrieved_chunks": [{"content": "body text", "filename": "spec.md", "heading": "Intro"}],
     }
     note = nodes._kb_note(st)
-    assert "spec.md" in note and "EMPTY" in note  # tells the supervisor not to web_search
+    assert "spec.md" in note and "web_search" in note  # tells the supervisor not to web_search
     full = nodes._format_kb(st)
     assert "spec.md — Intro" in full and "body text" in full
 
     # KB engaged but found nothing → different note, still not empty
     miss = nodes._kb_note({**gate, "retrieved_chunks": []})
-    assert "nothing relevant" in miss
+    assert "nothing relevant was found" in miss
 
 
 def test_attachment_helpers() -> None:

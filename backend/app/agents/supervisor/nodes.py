@@ -103,16 +103,16 @@ def _kb_note(state: GenieState) -> str:
         return (
             f"\n\nThe project knowledge base was ALREADY searched for this request "
             f"and returned {len(chunks)} relevant passage(s) (from: {srcs}); they are "
-            "given to the writer. The writer will answer from them. Return an EMPTY "
-            "`steps` list — do NOT add a `web_search` step for anything a document "
-            "could contain. Only add `web_search` if the request ALSO needs "
-            "live/current external facts a document cannot have (today's news, "
-            "prices, weather, real-time data)."
+            "given to the writer, who will answer from them. So you usually need NO "
+            "steps here — leave `steps` empty (`[]`). Do NOT add a `web_search` step "
+            "for anything a document could contain. Add `web_search` ONLY if the "
+            "request also needs live/current external facts a document cannot have "
+            "(today's news, prices, weather, real-time data)."
         )
     return (
         "\n\nThe project knowledge base was searched for this request but nothing "
-        "relevant was found — plan a `web_search` step if external info is needed, "
-        "otherwise answer directly."
+        "relevant was found — add a `web_search` step if external info is needed, "
+        "otherwise leave `steps` empty."
     )
 
 
@@ -306,22 +306,26 @@ async def supervisor_node(state: GenieState) -> dict:
     model = get_chat_model(
         model_id=state.get("model"), streaming=False, temperature=0
     ).with_structured_output(SupervisorPlan, include_raw=True)
+    plan_out: SupervisorPlan | None = None
     try:
         result = await ainvoke(model, [SystemMessage(content=system), *state["messages"]])
-        plan_out: SupervisorPlan = result["parsed"]
+        plan_out = result["parsed"]
     except Exception:  # noqa: BLE001
         logger.warning("supervisor_plan_failed", exc_info=True)
-        return {
-            "plan": [],
-            "supervisor_turns": turns + 1,
-            "intent": "planning failed — answering directly",
-        }
 
-    ledger = _plan_to_ledger(plan_out.steps)
     # Keep the retriever's completed KB step in the ledger (the plan strip + the
     # synthesiser's findings both walk `plan`).
     kb_steps = [dict(t) for t in (state.get("plan") or []) if t.get("agent") == "knowledge_base"]
-    ledger = kb_steps + ledger  # type: ignore[operator]
+
+    if plan_out is None:  # LLM error or unparseable structured output → answer directly
+        logger.warning("supervisor_no_plan", reason="null parsed output")
+        return {
+            "plan": kb_steps,
+            "supervisor_turns": turns + 1,
+            "intent": "planning skipped — answering directly",
+        }
+
+    ledger = kb_steps + _plan_to_ledger(plan_out.steps)  # type: ignore[operator]
     logger.info(
         "supervisor_planned",
         turn=turns + 1,
