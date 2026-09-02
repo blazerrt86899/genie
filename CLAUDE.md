@@ -125,7 +125,7 @@ Supabase Studio shows the tables via its schema switcher.
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
 | Icons | Lucide React (v1 — no brand icons; inline SVG for X/GitHub/LinkedIn) | Consistent icon set |
 | Animations | Framer Motion | Agent activity + the landing hero animation |
-| Markdown | `react-markdown` v9 + `remark-gfm` + `rehype-highlight` (`highlight.js` common set) | Renders Genie replies (`components/chat/Markdown.tsx` + `CodeBlock.tsx`). GFM tables, fenced code with language label + copy + syntax highlighting themed from CSS vars (`globals.css` `.hljs-*`). NOT `rehype-raw` — no raw-HTML passthrough (zero XSS surface). User messages stay plain text. |
+| Markdown | `react-markdown` v9 + `remark-gfm` + `rehype-highlight` (`highlight.js` common set) | Renders Genie replies (`components/chat/Markdown.tsx` + `CodeBlock.tsx`). GFM tables, fenced code with language label + copy + syntax highlighting themed from CSS vars (`globals.css` `.hljs-*`). A ```` ```document ```` fence → `DocumentCard.tsx` (business-comms draft: kind header, Subject row, Copy). NOT `rehype-raw` — no raw-HTML passthrough (zero XSS surface). User messages stay plain text. |
 
 ### Infrastructure (AWS)
 | Service | Role |
@@ -327,6 +327,7 @@ genie/
 │       │   │   ├── Message.tsx        ← user = subtle box (plain text) · Genie = borderless, rendered as rich Markdown
 │       │   │   ├── Markdown.tsx       ← react-markdown + remark-gfm + rehype-highlight; token-styled headings/tables/lists/quotes
 │       │   │   ├── CodeBlock.tsx      ← fenced-code chrome: language label + Copy button over the hljs-tokenised <pre>
+│       │   │   ├── DocumentCard.tsx   ← ```document fence → boxed draft (email/letter/application/memo…): kind header · Subject row · Copy
 │       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards (http(s)-only href on the public page)
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
@@ -1166,6 +1167,13 @@ inline code for identifiers, blockquotes for caveats, `[1]` inline citations (no
 "Sources" list). No separate formatting pass — one streamed call. The frontend
 (`components/chat/Markdown.tsx`) renders it richly.
 
+`DOCUMENT_BLOCK_GUIDE` (same file, also on both prompts) tells the drafter: when
+the user asks it to WRITE a business communication (email / letter / cover
+letter / application / memo / proposal / agenda / message / notice), emit the
+finished document inside a ```` ```document ```` fence — `key: value` metadata
+(`kind:` always, `subject:` / `to:` for mail), a `---`, then the body. The
+frontend renders that as a `DocumentCard`.
+
 `chat_service` forwards the graph's `message_break` / `message_agents` / `segment`
 custom events, splitting the turn into one `messages` row per assistant message —
 so "Hi, weather in Mussoorie?" comes back as two messages (greeting, then
@@ -1759,6 +1767,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
+_Also 2026-09-02 — **business-document draft card**: `DOCUMENT_BLOCK_GUIDE` (`agents/supervisor/prompts.py`, appended to both user-facing prompts) tells the drafter to emit a ```` ```document ```` fence — `key: value` metadata (`kind:` from email|letter|application|cover-letter|memo|proposal|message|agenda|note; `subject:` / `to:` for mail), a `---`, then the Markdown body — whenever the user asks it to WRITE a business communication (not for code / "how to write" advice / outlines). Frontend `components/chat/DocumentCard.tsx`: `Markdown.tsx`'s `pre` handler routes a `language-document` block (rehype-highlight `plainText: ["document"]` keeps the class, no tokenising) to a boxed card — kind icon + label header, `Subject:` / `To:` row, **Copy** button (`Subject: …\n\n` + body for mail), body via a nested `<Markdown>`. Streaming-safe (before `---` arrives the whole block is the body). Single draft for now — A/B/C variant tabs + Gmail/mailto send deferred. Verified: SSR smoke test (class kept, no `hljs` spans), 140 backend tests, build/lint clean._
+
 _Also 2026-09-02 — **rich response rendering + synthesiser-as-drafter**: `RESPONSE_FORMAT_GUIDE` (`agents/supervisor/prompts.py`) appended to `SYNTHESISER_SYSTEM_PROMPT` + `CHAT_SYSTEM_PROMPT` — one spec telling the model to choose the lightest structure and use GFM (styled headings only when long, pipe tables, fenced code with an explicit language tag for every code/query/config/command, inline code, blockquote caveats, `[1]` citations, no "Sources" list). No separate formatting pass — still one streamed synthesiser call. Frontend: `components/chat/Markdown.tsx` (`react-markdown` v9 + `remark-gfm` + `rehype-highlight`) + `CodeBlock.tsx` (language label + Copy button over the hljs-tokenised `<pre>`); `Message.tsx` renders Genie replies through it (user messages stay plain text). `globals.css` gains `--code-*` / `--hl-*` vars + `.hljs-*` rules so code themes follow light/dark with no JS. Deliberately **no `rehype-raw`** (no raw-HTML → zero XSS surface); `javascript:` links render inert. `/chat` bundle +~93 KB. KaTeX + Mermaid deferred. Verified: SSR smoke test (table + `hljs language-sql` spans + blockquote), 140 backend tests, ruff + frontend build/lint clean._
 
 _Also 2026-09-02 — **chat share (public view link) + chat-scroll shadow**: `conversations.share_token` (unique) + `shared_at` (migration `c3d9e1f4a7b2`). Owner routes `GET/POST/DELETE /conversations/{id}/share` (`conversation_repo.set_share` / `clear_share` / `get_by_share_token`; token = `secrets.token_urlsafe(16)`, 128-bit; POST idempotent — returns the existing token; `shared_at` frozen at first share, re-enabling mints a new token). New **unauthenticated** `endpoints/public.py` → `GET /api/v1/public/shared/{token}`: IP-rate-limited (reuses `check_rate_limit`), `Cache-Control: public, max-age=60` + `X-Robots-Tag: noindex`, returns only messages with `created_at <= shared_at` and a **whitelist** (`title`, `role`, `content`, `agents`, `sources`, attachment `filename`/`kind`) — never `user_id` / email / project / model. Frontend: `ShareChatModal` (Keep private ↔ Create public link + Copy link) from the new **Share** button in `ChatHeader`; `useShareConversation` (`["share", id]` query + enable/disable). Public page `app/share/[token]/page.tsx` (+ `not-found.tsx`) — server component, outside `(app)`, `robots: noindex`, reuses `<Message>`; `SourceCards` now only renders an `<a>` for `http(s)` URLs. `FRONTEND_BASE_URL` setting builds the absolute share URL. Chat-scroll shadow: `useScrollShadow` → `ChatHeader` gets a bottom shadow when `!atTop`, the composer a top shadow when `!atBottom`. Sidebar-resize scrim: `useSidebarWidth` exposes `isDragging` → a `fixed inset-0` `backdrop-blur` scrim over the app + `shadow-2xl` on the `<aside>` + a lit handle line while dragging. `Modal` backdrop gains `backdrop-blur-sm`. Verified: 139 backend tests, ruff + frontend build/lint clean._
@@ -1863,6 +1873,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
 | Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
 | Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
+| Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |

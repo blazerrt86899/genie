@@ -363,6 +363,9 @@ def test_synthesiser_prompt_carries_format_guide() -> None:
     assert RESPONSE_FORMAT_GUIDE in CHAT_SYSTEM_PROMPT
     for token in ("```sql", "GFM pipe tables", "Fenced code blocks"):
         assert token in RESPONSE_FORMAT_GUIDE
+    # the business-document card spec rides along on both prompts
+    for token in ("```document", "kind:", "cover letter", "memo"):
+        assert token in SYNTHESISER_SYSTEM_PROMPT and token in CHAT_SYSTEM_PROMPT
     # …and survives _augment_system (project instructions / attachments / KB)
     state = {"project_instructions": "be terse"}
     composed = nodes._augment_system(SYNTHESISER_SYSTEM_PROMPT, state)

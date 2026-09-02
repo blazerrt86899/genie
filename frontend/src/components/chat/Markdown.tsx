@@ -1,15 +1,23 @@
 "use client";
 
-import { memo, type ComponentPropsWithoutRef, type ReactNode } from "react";
+import {
+  Children,
+  isValidElement,
+  memo,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import type { PluggableList } from "unified";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { CodeBlock } from "./CodeBlock";
+import { DocumentCard } from "./DocumentCard";
 
 const REMARK_PLUGINS: PluggableList = [remarkGfm];
 const REHYPE_PLUGINS: PluggableList = [
-  [rehypeHighlight, { detect: true, ignoreMissing: true }],
+  // `document` blocks are our own card format — never syntax-highlight them.
+  [rehypeHighlight, { detect: true, ignoreMissing: true, plainText: ["document"] }],
 ];
 
 function nodeText(node: ReactNode): string {
@@ -74,7 +82,19 @@ const COMPONENTS: Components = {
     />
   ),
   td: (p) => <td className="border border-border px-3 py-1.5 align-top" {...strip(p)} />,
-  pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+  pre: ({ children }) => {
+    const code = Children.toArray(children).find(isValidElement) as
+      | React.ReactElement<{ className?: string; children?: ReactNode }>
+      | undefined;
+    const cls = code?.props.className ?? "";
+    const text = nodeText(code?.props.children ?? children);
+    // our own draft-card format — `document` fence, or a mangled class that
+    // still starts with `kind:` metadata
+    if (/language-document/.test(cls) || /^\s*kind:\s*\S/.test(text)) {
+      return <DocumentCard raw={text} />;
+    }
+    return <CodeBlock>{children}</CodeBlock>;
+  },
   code: ({ className, children }: ComponentPropsWithoutRef<"code">) => {
     const block = /language-/.test(className ?? "") || nodeText(children).includes("\n");
     if (block) {

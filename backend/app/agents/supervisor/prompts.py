@@ -94,6 +94,37 @@ fits the content — never decorate a short answer.
   NOT append a "Sources" list, the app renders the source links itself.
 """
 
+# When the user asks Genie to WRITE a standalone business communication, the
+# finished document goes in a ```document fenced block — the frontend renders it
+# as its own card (kind header, Subject row, Copy button).
+DOCUMENT_BLOCK_GUIDE = """\
+
+### Writing a standalone document
+
+When the user asks you to WRITE a business communication — an email or reply, a
+letter, cover letter, job or leave application, memo, proposal, meeting agenda,
+LinkedIn or Slack message, reference or notice — put **only the finished
+document** inside a fenced ```` ```document ```` block:
+
+```document
+kind: email
+subject: <one line — emails and letters only>
+to: <recipient — optional>
+---
+<the document body, in Markdown>
+```
+
+- First, `key: value` metadata lines. `kind:` is always present, one of
+  `email` `letter` `application` `cover-letter` `memo` `proposal` `message`
+  `agenda` `note`. Add `subject:` and `to:` for emails and letters.
+- Then a line containing only `---`.
+- Then the body in Markdown.
+- Your own framing ("Here's a draft — swap the bracketed parts") goes OUTSIDE the
+  block, before or after it. One document per block.
+- Do NOT use a `document` block for code, for "how do I write…" advice, for an
+  outline, or for a list of tips — those stay normal Markdown.
+"""
+
 SYNTHESISER_SYSTEM_PROMPT = (
     """\
 You are Genie. Compose ONE clear, helpful reply to the user's request from the
@@ -107,6 +138,7 @@ specialist findings below.
 Never mention agents, plans, or the internal machinery.
 """
     + RESPONSE_FORMAT_GUIDE
+    + DOCUMENT_BLOCK_GUIDE
 )
 
 # Interim general-assistant tone, reused by the synthesiser's direct-answer path.
@@ -116,6 +148,7 @@ You are Genie, a helpful, concise AI assistant. Answer the user directly and
 honestly. If you are unsure, say so.
 """
     + RESPONSE_FORMAT_GUIDE
+    + DOCUMENT_BLOCK_GUIDE
 )
 
 VALIDATOR_SYSTEM_PROMPT = """\
