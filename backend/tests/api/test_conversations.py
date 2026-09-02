@@ -109,6 +109,9 @@ def patch_client(monkeypatch):
         async def set_project(self, cid, uid, pid):
             conv.project_id = pid
 
+        async def set_title(self, cid, uid, t):
+            conv.title = t
+
     class FakeProjectRepo:
         def __init__(self, _db): ...
 
@@ -164,3 +167,15 @@ async def test_patch_unknown_conversation_404(patch_client):
             f"/api/v1/conversations/{uuid.uuid4()}", json={"project_id": str(proj_id)}
         )
     assert resp.status_code == 404
+
+
+async def test_patch_renames_without_touching_project(patch_client):
+    client, conv, _ = patch_client
+    conv.project_id = uuid.uuid4()  # already in a project
+    async with client as c:
+        resp = await c.patch(
+            f"/api/v1/conversations/{conv.id}", json={"title": "  My renamed chat  "}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "My renamed chat"
+    assert conv.project_id is not None  # project_id absent from body → untouched

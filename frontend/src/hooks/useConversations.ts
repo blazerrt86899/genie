@@ -9,6 +9,7 @@ import {
 import {
   deleteConversation,
   listConversations,
+  patchConversation,
   type ConversationSummary,
 } from "@/lib/api";
 
@@ -29,5 +30,25 @@ export function useDeleteConversation() {
   return useMutation({
     mutationFn: async (id: string) => deleteConversation(id, await getToken()),
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+  });
+}
+
+export function usePatchConversation() {
+  const { getToken } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      body,
+    }: {
+      id: string;
+      body: { title?: string; project_id?: string | null };
+    }) => patchConversation(id, body, await getToken()),
+    onSuccess: (_data, { body }) => {
+      qc.invalidateQueries({ queryKey: KEY });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      if (body.project_id)
+        qc.invalidateQueries({ queryKey: ["project", body.project_id] });
+    },
   });
 }

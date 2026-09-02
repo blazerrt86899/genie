@@ -263,7 +263,11 @@ def _format_findings(plan: list[TaskRecord], results: dict) -> str:
             for s in sources:
                 src_no += 1
                 lines.append(f"[{src_no}] {s.get('title', '')} — {s.get('url', '')}")
-            block += "\n\nSources:\n" + "\n".join(lines)
+            block += (
+                "\n\nReference material (cite inline as [1], [2] where you use a "
+                "fact — do NOT write a 'Sources' list at the end, the app shows "
+                "the links itself):\n" + "\n".join(lines)
+            )
         blocks.append(block)
     return "\n\n".join(blocks)
 

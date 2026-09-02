@@ -20,6 +20,7 @@ export type SseEvent =
   | { type: "plan"; steps: PlanStepView[] }
   | { type: "message_break" } // finalize the current assistant message, start a new one
   | { type: "message_agents"; agents: string[] } // which agents produce the current message
+  | { type: "sources"; items: { title: string; url: string }[] }
   | { type: "task_created"; task: Record<string, unknown> }
   | { type: "task_updated"; task: Record<string, unknown> }
   | { type: "tasks_archived"; count: number }

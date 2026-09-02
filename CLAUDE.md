@@ -309,7 +309,7 @@ genie/
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
-│       │   ├── Sidebar.tsx            ← New chat · Projects link · all-conversations list · account
+│       │   ├── Sidebar.tsx            ← New chat · Projects · Tasks · chat list · account · drag-to-resize (localStorage width)
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
 │       │   │   └── knowledge-base/    ← KnowledgeBasePanel · DocumentUpload · DocumentList · PipelineModal · ChunkViewer · RagSettingsForm
@@ -317,8 +317,10 @@ genie/
 │       │   │                              ThemeToggle, LogoMarquee, HowItWorks, Features,
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
-│       │   │   ├── ChatView.tsx       ← Message list + composer (prop: conversationId)
-│       │   │   ├── Message.tsx        ← user/assistant bubble + per-message AgentTrail
+│       │   │   ├── ChatView.tsx       ← ChatHeader + PlanStrip + message list + composer
+│       │   │   ├── ChatHeader.tsx     ← sticky top bar: title + ▾ menu (Rename · Add to project · Delete)
+│       │   │   ├── Message.tsx        ← user = subtle box · Genie = borderless, blends into the page
+│       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards under a message
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
 │       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
@@ -1208,8 +1210,13 @@ default 0.15).
 ### Event Types (strict — frontend parses by `type` field)
 
 > Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `message_break`,
-> `message_agents`, `task_created`, `task_updated`, `tasks_archived`, `title`,
-> `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `done` carries
+> `message_agents`, `sources`, `task_created`, `task_updated`, `tasks_archived`,
+> `title`, `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `sources`
+> (`{items:[{title,url}]}`) is emitted once before `done` — the dedup'd
+> `intermediate_results[*].sources` (web_search etc.); the frontend renders them
+> as link cards under the message and persists them to `messages.metadata.sources`
+> (the synthesiser is told to cite `[1]` inline but NOT print a Sources list).
+> `done` carries
 > `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `interrupt` arrives
 > with its feature. The stream **always** ends with `done`, even after an
 > `error` (§16). The `task_*` events carry the task dict / count from the
@@ -1358,8 +1365,8 @@ DELETE /api/v1/attachments/{id}        → 204
 
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments`) + project{id,name} + model
-PATCH  /api/v1/conversations/{id}      → {project_id: str|null}  move the chat into a project / detach it
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model
+PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null}  rename and/or move into a project (only fields present are touched)
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Projects ─────────────────────────────────────────────────────────────────
@@ -1720,6 +1727,10 @@ _Also 2026-09-01 — **Project Knowledge Base, commit 1 (ingestion pipeline)**: 
 _Also 2026-09-01 — **Project Knowledge Base, commit 2 (retrieval)**: `services/rag/retrieval_service.retrieve()` — `vector` (pgvector cosine + threshold) / `hybrid` (`hybrid_search_project_chunks` RPC, RRF) / `multi_query_*` (utility-model paraphrases → per-query search → RRF-fuse → top `final_context_size`). New **`retriever` graph node** (`prompt_enhancer → retriever → supervisor`), a pipeline node (not a registry agent), runs only when `state.has_kb and state.needs_documents`; `EnhancedPrompt` gained `needs_documents` (the enhancer's gate — false for greetings/small talk). `nodes._kb_note` (filenames) → supervisor; `nodes._format_kb` (chunks, 12k-char budget) → synthesiser via `_augment_system`. `GenieState` += `rag_settings` / `has_kb` / `needs_documents` / `retrieved_chunks`; `chat_service._generate` loads them from the project. Frontend labels `kb_search`. Verified live through the graph: "how does retrieval work?" in a KB project → enhancer flags it → 5 chunks retrieved → grounded answer; "hi there" → gate off, skipped._
 
 _Also 2026-09-01 — **KB retrieval hardening** (bug: a real CV upload answered from a web search instead of the doc). Root causes: (1) **ivfflat index has ~0 recall on a small per-project table** → migration `344f477b87da` swaps it for **HNSW**; (2) `similarity_threshold=0.3` filtered out every real hit (`text-embedding-3-small` cosine runs ~0.25-0.5) → default → 0.15 and `_soft_threshold` keeps the top few regardless; (3) the retriever didn't appear in the plan and the supervisor still planned `web_search` → the retriever now seeds a completed `knowledge_base` ledger step, `supervisor_node` merges it, and `_kb_note` instructs "return an EMPTY plan — no web_search for anything a document could hold". Verified against the real "Resume KB" project: "tech stacks manjeet is expertised in" → plan `[knowledge_base]`, grounded answer; "hi hello" → `[greeting]`, KB untouched._
+
+_Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_output(SupervisorPlan, include_raw=True)` intermittently returns `parsed=None` (emits `steps: null` / drops `rationale`). `supervisor_node` now guards `plan_out is None` (→ answer directly, keeping the `knowledge_base` step); `SupervisorPlan` has a `@field_validator("steps", mode="before")` coercing `None`→`[]` and a default `rationale`._
+
+_Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
 | Phase | Status | Completion |
 |-------|--------|-----------|

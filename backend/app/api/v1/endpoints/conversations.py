@@ -44,10 +44,12 @@ class MessageOut(BaseModel):
     created_at: datetime
     agents: list[str] = []  # which agents produced this message (assistant only)
     attachments: list[dict] = []  # files sent with this message (user only)
+    sources: list[dict] = []  # [{title, url}] cited by this message (assistant only)
 
 
 class ConversationPatch(BaseModel):
     project_id: str | None = None  # move into a project, or null to detach
+    title: str | None = None  # rename
 
 
 class ConversationDetail(ConversationSummary):
@@ -109,6 +111,7 @@ async def get_conversation(
                 created_at=m.created_at,
                 agents=list((m.message_metadata or {}).get("agents", [])),
                 attachments=list((m.message_metadata or {}).get("attachments", [])),
+                sources=list((m.message_metadata or {}).get("sources", [])),
             )
             for m in messages
         ],
@@ -122,27 +125,35 @@ async def patch_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ConversationSummary:
-    """Move the chat into a project (``project_id``) or detach it (``null``)."""
+    """Rename (``title``), and/or move into a project (``project_id``, null = detach).
+    Only the fields present in the body are touched."""
     try:
         cid = uuid.UUID(conversation_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="conversation not found") from exc
 
+    fields = body.model_dump(exclude_unset=True)
     conv_repo = ConversationRepository(db)
     conv = await conv_repo.get_for_user(cid, user.id)
     if conv is None:
         raise HTTPException(status_code=404, detail="conversation not found")
 
-    pid: uuid.UUID | None = None
-    if body.project_id is not None:
-        try:
-            pid = uuid.UUID(body.project_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail="project not found") from exc
-        if await ProjectRepository(db).get_for_user(pid, user.id) is None:
-            raise HTTPException(status_code=404, detail="project not found")
+    if "title" in fields:
+        title = (fields["title"] or "").strip()
+        if title:
+            await conv_repo.set_title(cid, user.id, title[:255])
 
-    await conv_repo.set_project(cid, user.id, pid)
+    if "project_id" in fields:
+        pid: uuid.UUID | None = None
+        if fields["project_id"] is not None:
+            try:
+                pid = uuid.UUID(fields["project_id"])
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail="project not found") from exc
+            if await ProjectRepository(db).get_for_user(pid, user.id) is None:
+                raise HTTPException(status_code=404, detail="project not found")
+        await conv_repo.set_project(cid, user.id, pid)
+
     updated = await conv_repo.get_for_user(cid, user.id)
     return conversation_summary(updated)
 

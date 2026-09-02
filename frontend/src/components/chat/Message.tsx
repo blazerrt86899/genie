@@ -2,6 +2,7 @@ import { CheckSquare, FileText, Globe, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
+import { SourceCards } from "./SourceCards";
 
 function initials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -74,41 +75,20 @@ export function Message({
   activeAgents?: string[];
 }) {
   const isUser = message.role === "user";
-  const name = isUser ? userName : "Genie";
 
+  // Genie's messages blend into the page (no bubble, Claude-style); the user's
+  // sit in a subtle right-aligned box.
   return (
-    <div className={cn("flex flex-col gap-2", isUser ? "items-end" : "items-start")}>
+    <div className={cn("flex flex-col gap-1.5", isUser ? "items-end" : "items-start")}>
       {!isUser && message.agents && message.agents.length > 0 && (
         <AgentTrail agents={message.agents} activeAgents={activeAgents} />
       )}
 
-      {/* sender label */}
-      <div
-        className={cn(
-          "flex select-none items-center gap-2 px-1",
-          isUser && "flex-row-reverse",
-        )}
-      >
-        {isUser ? (
-          <span className="grid h-5 w-5 place-items-center rounded-full bg-brand text-[10px] font-bold text-brand-foreground">
-            {initials(userName)}
-          </span>
-        ) : (
-          <span className="grid h-5 w-5 place-items-center rounded-md bg-gradient-to-br from-brand to-brand-2 text-brand-foreground shadow-sm shadow-brand/30">
-            <Sparkles className="h-3 w-3" />
-          </span>
-        )}
-        <span
-          className={cn(
-            "text-[11px] font-semibold uppercase tracking-[0.18em]",
-            isUser
-              ? "text-muted-foreground"
-              : "bg-gradient-to-r from-brand to-brand-2 bg-clip-text text-transparent",
-          )}
-        >
-          {name}
+      {isUser && (
+        <span className="select-none px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+          {initials(userName)}
         </span>
-      </div>
+      )}
 
       {isUser && message.attachments && message.attachments.length > 0 && (
         <div className="flex flex-wrap justify-end gap-1.5 px-1">
@@ -124,13 +104,12 @@ export function Message({
         </div>
       )}
 
-      {/* bubble */}
       <div
         className={cn(
-          "max-w-[78%] whitespace-pre-wrap rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed",
+          "whitespace-pre-wrap text-[15px] leading-relaxed",
           isUser
-            ? "rounded-tr-sm bg-brand text-brand-foreground"
-            : "rounded-tl-sm border border-border bg-muted text-foreground",
+            ? "max-w-[80%] rounded-2xl rounded-tr-sm bg-muted px-3.5 py-2.5 text-foreground"
+            : "w-full text-foreground",
         )}
       >
         {message.content}
@@ -140,6 +119,10 @@ export function Message({
           </span>
         )}
       </div>
+
+      {!isUser && message.sources && message.sources.length > 0 && (
+        <SourceCards sources={message.sources} />
+      )}
     </div>
   );
 }

@@ -152,6 +152,11 @@ export interface MessageAttachment {
   char_count: number;
 }
 
+export interface MessageSource {
+  title: string;
+  url: string;
+}
+
 export interface ConversationMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -159,6 +164,7 @@ export interface ConversationMessage {
   created_at: string;
   agents?: string[];
   attachments?: MessageAttachment[];
+  sources?: MessageSource[];
 }
 
 export interface ConversationSummary {
@@ -200,7 +206,7 @@ export function deleteConversation(
 
 export function patchConversation(
   id: string,
-  body: { project_id: string | null },
+  body: { project_id?: string | null; title?: string },
   token?: string | null,
 ): Promise<ConversationSummary> {
   return apiFetch<ConversationSummary>(`/api/v1/conversations/${id}`, {

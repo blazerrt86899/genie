@@ -8,6 +8,7 @@ export interface ChatMessage {
   pending?: boolean;
   agents?: string[]; // agents that produced this assistant message
   attachments?: { filename: string; kind: string }[]; // files sent with a user message
+  sources?: { title: string; url: string }[]; // link cards under an assistant message
 }
 
 export interface ProjectRef {
@@ -28,6 +29,8 @@ interface ChatState {
   plan: PlanStepView[];
   runId: string | null;
   conversationId: string | null;
+  conversationTitle: string | null;
+  setConversationTitle: (title: string | null) => void;
   project: ProjectRef | null;
   model: string | null; // picked chat-model id; null → server default
   setModel: (model: string | null) => void;
@@ -44,6 +47,7 @@ interface ChatState {
   appendToken: (id: string, token: string) => void;
   setMessagePending: (id: string, pending: boolean) => void;
   setMessageAgents: (id: string, agents: string[]) => void;
+  setMessageSources: (id: string, sources: { title: string; url: string }[]) => void;
   setActiveAgents: (agents: string[]) => void;
   agentStarted: (agent: string) => void;
   agentEnded: (agent: string) => void;
@@ -59,6 +63,8 @@ export const useChatStore = create<ChatState>((set) => ({
   plan: [],
   runId: null,
   conversationId: null,
+  conversationTitle: null,
+  setConversationTitle: (conversationTitle) => set({ conversationTitle }),
   project: null,
   model: null,
   setModel: (model) => set({ model }),
@@ -96,6 +102,10 @@ export const useChatStore = create<ChatState>((set) => ({
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, agents } : m)),
     })),
+  setMessageSources: (id, sources) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, sources } : m)),
+    })),
   setActiveAgents: (agents) => set({ activeAgents: agents }),
   agentStarted: (agent) =>
     set((s) => ({
@@ -115,6 +125,7 @@ export const useChatStore = create<ChatState>((set) => ({
       plan: [],
       runId: null,
       conversationId: null,
+      conversationTitle: null,
       project: null,
       pendingAttachments: [],
       pendingProjectId: null,

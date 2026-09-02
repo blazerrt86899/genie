@@ -48,6 +48,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         const conv = await getConversation(conversationId, await getToken());
         if (cancelled) return;
         s.setConversationId(conv.id);
+        s.setConversationTitle(conv.title);
         s.setProject(conv.project);
         s.setModel(conv.model);
         s.setMessages(
@@ -60,6 +61,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
               filename: a.filename,
               kind: a.kind,
             })),
+            sources: m.sources ?? [],
           })),
         );
       } catch {
@@ -137,6 +139,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
             });
           } else if (event.type === "message_agents") {
             s.setMessageAgents(currentId, event.agents);
+          } else if (event.type === "sources") {
+            s.setMessageSources(currentId, event.items);
           } else if (event.type === "plan") {
             s.setPlan(event.steps);
           } else if (event.type === "agent_start") {
@@ -152,6 +156,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
           } else if (event.type === "error") {
             s.appendToken(currentId, `\n\n⚠️ ${event.message}`);
           } else if (event.type === "title") {
+            s.setConversationTitle(event.title);
             qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
           }
         });
@@ -174,6 +179,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
     messages: store.messages,
     isStreaming: store.runId !== null,
     project: store.project,
+    title: store.conversationTitle,
     send,
   };
 }

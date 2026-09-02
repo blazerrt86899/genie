@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
@@ -57,12 +58,60 @@ function ConversationRow({
   );
 }
 
+const MIN_W = 220;
+const MAX_W = 460;
+const DEFAULT_W = 256;
+
+function useSidebarWidth() {
+  const [width, setWidth] = useState(DEFAULT_W);
+  const dragging = useRef(false);
+  const widthRef = useRef(width);
+  widthRef.current = width;
+
+  useEffect(() => {
+    try {
+      const saved = Number(localStorage.getItem("genie.sidebar_w"));
+      if (saved >= MIN_W && saved <= MAX_W) setWidth(saved);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const onMouseDown = useCallback(() => {
+    dragging.current = true;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const onMove = (e: MouseEvent) => {
+      if (!dragging.current) return;
+      const w = Math.min(MAX_W, Math.max(MIN_W, e.clientX));
+      setWidth(w);
+    };
+    const onUp = () => {
+      dragging.current = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      try {
+        localStorage.setItem("genie.sidebar_w", String(Math.round(widthRef.current)));
+      } catch {
+        /* ignore */
+      }
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
+
+  return { width, onMouseDown };
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
   const reset = useChatStore((s) => s.reset);
   const { data: conversations, isLoading } = useConversations();
   const del = useDeleteConversation();
+  const { width, onMouseDown } = useSidebarWidth();
 
   const startNew = () => {
     reset();
@@ -81,7 +130,20 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col overflow-hidden border-r border-border bg-card">
+    <aside
+      style={{ width }}
+      className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-card"
+    >
+      {/* drag handle to resize */}
+      <div
+        onMouseDown={onMouseDown}
+        className="group absolute right-0 top-0 z-30 h-full w-1.5 cursor-col-resize"
+        aria-label="Resize sidebar"
+        role="separator"
+      >
+        <div className="ml-auto h-full w-px bg-transparent transition-colors group-hover:bg-brand/50" />
+      </div>
+
       <div className="space-y-2 p-3">
         <Link href="/" className="flex px-1">
           <Wordmark />

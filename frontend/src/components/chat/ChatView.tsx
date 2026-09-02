@@ -16,6 +16,7 @@ import { GreetingHeadline } from "./GreetingHeadline";
 import { ModelPicker } from "./ModelPicker";
 import { PlusMenu } from "./PlusMenu";
 import { AttachmentChips } from "./AttachmentChips";
+import { ChatHeader } from "./ChatHeader";
 
 const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
 
@@ -101,6 +102,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const activeAgents = useChatStore((s) => s.activeAgents);
   const pendingAttachments = useChatStore((s) => s.pendingAttachments);
   const pendingProjectId = useChatStore((s) => s.pendingProjectId);
+  const storedConversationId = useChatStore((s) => s.conversationId);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
@@ -136,10 +138,14 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   }
 
   const isEmpty = messages.length === 0;
+  const cid = conversationId ?? storedConversationId ?? undefined;
 
   return (
     <div className="flex h-full flex-col">
-      {activeProject && (
+      {!isEmpty && cid && <ChatHeader conversationId={cid} />}
+
+      {/* Fresh chat in a project (no header yet) still shows the project chip */}
+      {isEmpty && activeProject && (
         <div className="border-b border-border px-4 py-2 sm:px-6">
           <Link
             href={`/projects/${activeProject.id}`}
@@ -152,7 +158,6 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
       )}
 
       <PlanStrip />
-
 
       {isEmpty ? (
         /* Centered welcome — greeting + composer, like a fresh chat window */

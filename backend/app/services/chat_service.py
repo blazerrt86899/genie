@@ -366,6 +366,23 @@ async def _generate(
         except Exception:  # noqa: BLE001
             logger.warning("chat_state_fetch_failed", run_id=run_id)
 
+    # Structured sources (web_search etc.) — surfaced as link cards, not baked
+    # into the answer text.
+    sources: list[dict] = []
+    try:
+        snap = await graph.aget_state(config)
+        seen: set[str] = set()
+        for r in (snap.values.get("intermediate_results") or {}).values():
+            for s in r.get("sources") or []:
+                url = (s.get("url") or "").strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    sources.append({"title": s.get("title") or url, "url": url})
+    except Exception:  # noqa: BLE001
+        logger.warning("chat_sources_fetch_failed", run_id=run_id)
+    if sources:
+        yield format_sse_event("sources", items=sources), None
+
     logger.info(
         "chat_graph_done",
         run_id=run_id,
@@ -373,6 +390,7 @@ async def _generate(
         message_agents=[a for _, a in pairs],
         streamed_token_frames=token_frames,
         total_tokens=total_tokens,
+        sources=len(sources),
     )
     answer = "\n\n".join(p for p, _ in pairs)
     title: str | None = None
@@ -383,6 +401,8 @@ async def _generate(
             meta: dict = {}
             if agents:
                 meta["agents"] = agents
+            if sources and i == last:
+                meta["sources"] = sources
             if langsmith_run_id and i == last:
                 meta["langsmith_run_id"] = langsmith_run_id
             await MessageRepository(db).add_message(
