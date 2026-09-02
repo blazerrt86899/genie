@@ -3,6 +3,7 @@ import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
 import { SourceCards } from "./SourceCards";
+import { Markdown } from "./Markdown";
 
 function initials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -104,21 +105,22 @@ export function Message({
         </div>
       )}
 
-      <div
-        className={cn(
-          "whitespace-pre-wrap text-[15px] leading-relaxed",
-          isUser
-            ? "max-w-[80%] rounded-2xl rounded-tr-sm bg-muted px-3.5 py-2.5 text-foreground"
-            : "w-full text-foreground",
-        )}
-      >
-        {message.content}
-        {message.pending && (
-          <span className="ml-1 align-middle">
-            <StreamingDot />
-          </span>
-        )}
-      </div>
+      {isUser ? (
+        <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-muted px-3.5 py-2.5 text-[15px] leading-relaxed text-foreground">
+          {message.content}
+        </div>
+      ) : (
+        <div className="w-full leading-relaxed text-foreground">
+          {message.content ? (
+            <Markdown>{message.content}</Markdown>
+          ) : null}
+          {message.pending && (
+            <span className="align-middle">
+              <StreamingDot />
+            </span>
+          )}
+        </div>
+      )}
 
       {!isUser && message.sources && message.sources.length > 0 && (
         <SourceCards sources={message.sources} />

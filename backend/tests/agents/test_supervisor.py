@@ -351,6 +351,26 @@ def test_kb_helpers() -> None:
     assert "nothing relevant was found" in miss
 
 
+def test_synthesiser_prompt_carries_format_guide() -> None:
+    from app.agents.supervisor.prompts import (
+        CHAT_SYSTEM_PROMPT,
+        RESPONSE_FORMAT_GUIDE,
+        SYNTHESISER_SYSTEM_PROMPT,
+    )
+
+    # the drafter spec is baked into every user-facing prompt
+    assert RESPONSE_FORMAT_GUIDE in SYNTHESISER_SYSTEM_PROMPT
+    assert RESPONSE_FORMAT_GUIDE in CHAT_SYSTEM_PROMPT
+    for token in ("```sql", "GFM pipe tables", "Fenced code blocks"):
+        assert token in RESPONSE_FORMAT_GUIDE
+    # …and survives _augment_system (project instructions / attachments / KB)
+    state = {"project_instructions": "be terse"}
+    composed = nodes._augment_system(SYNTHESISER_SYSTEM_PROMPT, state)
+    assert RESPONSE_FORMAT_GUIDE in composed and "be terse" in composed
+    # the old contradictory "Sources heading" instruction is gone
+    assert "Sources" not in SYNTHESISER_SYSTEM_PROMPT.split(RESPONSE_FORMAT_GUIDE)[0]
+
+
 def test_attachment_helpers() -> None:
     assert nodes._attachment_note({}) == ""
     assert nodes._format_attachments({}) == ""

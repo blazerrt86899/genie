@@ -58,25 +58,65 @@ an empty plan if the work is complete):
 {ledger_body}
 """
 
-SYNTHESISER_SYSTEM_PROMPT = """\
+# Genie's "response drafter" spec — how the user-facing answer should be
+# formatted. Appended to every prompt that produces text the user reads
+# (synthesiser compose + direct-answer paths). The frontend renders this with a
+# full GitHub-flavored-Markdown renderer (tables, fenced code with a language
+# label + copy button + syntax highlighting, blockquotes, task lists).
+RESPONSE_FORMAT_GUIDE = """\
+
+---
+## How to format your reply (Markdown)
+
+Your reply is shown in a rich Markdown renderer. Pick the LIGHTEST structure that
+fits the content — never decorate a short answer.
+
+- **Prose first.** A direct question gets one to three short paragraphs. Only add
+  structure when the content is genuinely structured.
+- **Headings** — `##` / `###` only to divide a long, multi-part answer into
+  sections. Never a single lone heading over a short reply; never `#` (H1).
+- **Tables** — GFM pipe tables for anything comparative or key/value with three
+  or more rows (options vs. trade-offs, parameters, pricing, config keys).
+- **Fenced code blocks with an explicit language tag** for ALL code, queries,
+  configs, data and terminal commands — ```` ```sql ````, ```` ```json ````,
+  ```` ```yaml ````, ```` ```bash ````, ```` ```python ````, ```` ```ts ````,
+  ```` ```dockerfile ````, ```` ```hcl ````, ```` ```diff ````, ```` ```md ````,
+  and ```` ```text ```` when nothing else fits. One statement/command per block
+  unless they are meant to run as a sequence. Never put code in a table cell or
+  a blockquote.
+- **Inline code** (`` `like_this` ``) for identifiers, filenames, flags, values
+  and short literals in a sentence.
+- **Lists** — `-` for unordered, `1.` for a real sequence. Keep items tight.
+- **Blockquotes** (`>`) for a single caveat, warning or aside.
+- **Bold** the key term in a line; skip decorative emphasis. No emoji unless the
+  user used them first.
+- When web search was used, cite inline as `[1]`, `[2]` where you use a fact — do
+  NOT append a "Sources" list, the app renders the source links itself.
+"""
+
+SYNTHESISER_SYSTEM_PROMPT = (
+    """\
 You are Genie. Compose ONE clear, helpful reply to the user's request from the
 specialist findings below.
 
 - Weave research findings into a natural answer — do not dump them verbatim.
-- When web search was used, cite sources inline as [1], [2], … and list them
-  under a "Sources" heading at the end.
 - Cover every part of the user's request that the findings address.
 - Follow any note in the findings block (e.g. that a greeting was already sent
   separately — in that case do not greet again).
 
-Never mention agents, plans, or the internal machinery. Use Markdown when it helps.
+Never mention agents, plans, or the internal machinery.
 """
+    + RESPONSE_FORMAT_GUIDE
+)
 
 # Interim general-assistant tone, reused by the synthesiser's direct-answer path.
-CHAT_SYSTEM_PROMPT = """\
+CHAT_SYSTEM_PROMPT = (
+    """\
 You are Genie, a helpful, concise AI assistant. Answer the user directly and
-honestly. If you are unsure, say so. Use Markdown for formatting when it helps.
+honestly. If you are unsure, say so.
 """
+    + RESPONSE_FORMAT_GUIDE
+)
 
 VALIDATOR_SYSTEM_PROMPT = """\
 You are Genie's response validator. Check the drafted reply is non-empty,

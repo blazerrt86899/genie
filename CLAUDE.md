@@ -125,6 +125,7 @@ Supabase Studio shows the tables via its schema switcher.
 | UI Components | shadcn/ui | Radix primitives, unstyled base |
 | Icons | Lucide React (v1 — no brand icons; inline SVG for X/GitHub/LinkedIn) | Consistent icon set |
 | Animations | Framer Motion | Agent activity + the landing hero animation |
+| Markdown | `react-markdown` v9 + `remark-gfm` + `rehype-highlight` (`highlight.js` common set) | Renders Genie replies (`components/chat/Markdown.tsx` + `CodeBlock.tsx`). GFM tables, fenced code with language label + copy + syntax highlighting themed from CSS vars (`globals.css` `.hljs-*`). NOT `rehype-raw` — no raw-HTML passthrough (zero XSS surface). User messages stay plain text. |
 
 ### Infrastructure (AWS)
 | Service | Role |
@@ -323,7 +324,9 @@ genie/
 │       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu + Share button; scroll-shadow when scrolled
 │       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
 │       │   │   ├── ShareChatModal.tsx ← Keep private ↔ Create public link + copy — POST/DELETE /conversations/{id}/share
-│       │   │   ├── Message.tsx        ← user = subtle box · Genie = borderless, blends into the page
+│       │   │   ├── Message.tsx        ← user = subtle box (plain text) · Genie = borderless, rendered as rich Markdown
+│       │   │   ├── Markdown.tsx       ← react-markdown + remark-gfm + rehype-highlight; token-styled headings/tables/lists/quotes
+│       │   │   ├── CodeBlock.tsx      ← fenced-code chrome: language label + Copy button over the hljs-tokenised <pre>
 │       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards (http(s)-only href on the public page)
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
@@ -1153,6 +1156,16 @@ findings only — it NEVER repeats a streamed segment (told "a greeting was alre
 sent separately — don't greet again"). Lone greeting / all-streamed ⇒ no LLM
 call. Empty plan ⇒ it answers the user directly.
 
+**The synthesiser is also Genie's response drafter.** `RESPONSE_FORMAT_GUIDE`
+(`agents/supervisor/prompts.py`) is appended to both user-facing prompts
+(`SYNTHESISER_SYSTEM_PROMPT`, `CHAT_SYSTEM_PROMPT`) — it tells the model to pick
+the lightest structure that fits and to use GFM: styled headings only for long
+multi-part answers, pipe tables for comparative/key-value data, **fenced code
+blocks with an explicit language tag** for every code / query / config / command,
+inline code for identifiers, blockquotes for caveats, `[1]` inline citations (no
+"Sources" list). No separate formatting pass — one streamed call. The frontend
+(`components/chat/Markdown.tsx`) renders it richly.
+
 `chat_service` forwards the graph's `message_break` / `message_agents` / `segment`
 custom events, splitting the turn into one `messages` row per assistant message —
 so "Hi, weather in Mussoorie?" comes back as two messages (greeting, then
@@ -1540,6 +1553,7 @@ routing agent (`agents/rag/`)._
 **Goal**: Make Genie smarter. Expand the agent catalogue.
 
 - [x] Per-conversation model selection — `MODEL_CATALOG` (OpenAI/Anthropic/Groq), `GET /models`, composer picker, `conversations.model` (2026-09-01)
+- [x] Rich response rendering — synthesiser = response drafter (`RESPONSE_FORMAT_GUIDE`); frontend `Markdown.tsx` (react-markdown + GFM + rehype-highlight) with copyable, syntax-highlighted code blocks (2026-09-02). Backlog: KaTeX math, Mermaid diagrams, streaming re-parse debounce.
 - [ ] Per-user token quotas: `token_budget` column in `users`, enforced in supervisor
 - [ ] LangSmith evaluation datasets: build golden Q&A sets for each agent
 - [ ] LangSmith CI evaluations: run on each deploy, gate on regression threshold
@@ -1745,6 +1759,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
+_Also 2026-09-02 — **rich response rendering + synthesiser-as-drafter**: `RESPONSE_FORMAT_GUIDE` (`agents/supervisor/prompts.py`) appended to `SYNTHESISER_SYSTEM_PROMPT` + `CHAT_SYSTEM_PROMPT` — one spec telling the model to choose the lightest structure and use GFM (styled headings only when long, pipe tables, fenced code with an explicit language tag for every code/query/config/command, inline code, blockquote caveats, `[1]` citations, no "Sources" list). No separate formatting pass — still one streamed synthesiser call. Frontend: `components/chat/Markdown.tsx` (`react-markdown` v9 + `remark-gfm` + `rehype-highlight`) + `CodeBlock.tsx` (language label + Copy button over the hljs-tokenised `<pre>`); `Message.tsx` renders Genie replies through it (user messages stay plain text). `globals.css` gains `--code-*` / `--hl-*` vars + `.hljs-*` rules so code themes follow light/dark with no JS. Deliberately **no `rehype-raw`** (no raw-HTML → zero XSS surface); `javascript:` links render inert. `/chat` bundle +~93 KB. KaTeX + Mermaid deferred. Verified: SSR smoke test (table + `hljs language-sql` spans + blockquote), 140 backend tests, ruff + frontend build/lint clean._
+
 _Also 2026-09-02 — **chat share (public view link) + chat-scroll shadow**: `conversations.share_token` (unique) + `shared_at` (migration `c3d9e1f4a7b2`). Owner routes `GET/POST/DELETE /conversations/{id}/share` (`conversation_repo.set_share` / `clear_share` / `get_by_share_token`; token = `secrets.token_urlsafe(16)`, 128-bit; POST idempotent — returns the existing token; `shared_at` frozen at first share, re-enabling mints a new token). New **unauthenticated** `endpoints/public.py` → `GET /api/v1/public/shared/{token}`: IP-rate-limited (reuses `check_rate_limit`), `Cache-Control: public, max-age=60` + `X-Robots-Tag: noindex`, returns only messages with `created_at <= shared_at` and a **whitelist** (`title`, `role`, `content`, `agents`, `sources`, attachment `filename`/`kind`) — never `user_id` / email / project / model. Frontend: `ShareChatModal` (Keep private ↔ Create public link + Copy link) from the new **Share** button in `ChatHeader`; `useShareConversation` (`["share", id]` query + enable/disable). Public page `app/share/[token]/page.tsx` (+ `not-found.tsx`) — server component, outside `(app)`, `robots: noindex`, reuses `<Message>`; `SourceCards` now only renders an `<a>` for `http(s)` URLs. `FRONTEND_BASE_URL` setting builds the absolute share URL. Chat-scroll shadow: `useScrollShadow` → `ChatHeader` gets a bottom shadow when `!atTop`, the composer a top shadow when `!atBottom`. Sidebar-resize scrim: `useSidebarWidth` exposes `isDragging` → a `fixed inset-0` `backdrop-blur` scrim over the app + `shadow-2xl` on the `<aside>` + a lit handle line while dragging. `Modal` backdrop gains `backdrop-blur-sm`. Verified: 139 backend tests, ruff + frontend build/lint clean._
 
 _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `conversations.unread` Boolean columns (migration `f041f866790f`). `conversation_repo.list_for_user` orders `pinned DESC, last_message_at DESC NULLS LAST`; new `set_flag(**bools)` + `mark_read()`. `GET /conversations/{id}` clears `unread` on open; `PATCH /conversations/{id}` accepts `pinned?` / `unread?`. `ConversationSummary` carries both. Frontend: `ChatHeader` refactored onto the new shared **`ConversationMenu`** (⋯ dropdown — Pin/Unpin · Mark read/unread · Rename · Add-to-project submenu · Delete) with a pin glyph on the title trigger; `Sidebar` splits the list into a **Pinned** section then **Chats**, each row showing a read/unread bullet (filled `bg-brand` = unread) and the same `ConversationMenu` on hover + inline rename. `useChat` marks a chat read locally on open and invalidates the sidebar list._
@@ -1845,6 +1861,8 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Add DB table | New SQLAlchemy model in `db/models/` + Alembic migration + repository |
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
+| Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
+| Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |

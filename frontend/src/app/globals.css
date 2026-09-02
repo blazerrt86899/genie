@@ -35,6 +35,19 @@
     --brand-2: 243 75% 59%;
     --brand-foreground: 0 0% 100%;
     --glow: 262 90% 62%;
+
+    /* code blocks (Markdown renderer + highlight.js tokens) */
+    --code-bg: 240 24% 98%;
+    --code-fg: 222 28% 26%;
+    --hl-keyword: 262 60% 50%;
+    --hl-string: 142 42% 36%;
+    --hl-number: 28 68% 44%;
+    --hl-comment: 220 12% 52%;
+    --hl-title: 214 62% 44%;
+    --hl-attr: 214 52% 40%;
+    --hl-type: 188 52% 36%;
+    --hl-literal: 262 55% 52%;
+    --hl-meta: 220 12% 48%;
   }
 
   .dark {
@@ -59,6 +72,18 @@
     --brand-2: 245 80% 70%;
     --brand-foreground: 250 30% 6%;
     --glow: 265 90% 65%;
+
+    --code-bg: 250 25% 10%;
+    --code-fg: 220 16% 84%;
+    --hl-keyword: 263 70% 76%;
+    --hl-string: 142 46% 66%;
+    --hl-number: 28 82% 70%;
+    --hl-comment: 245 10% 52%;
+    --hl-title: 210 82% 74%;
+    --hl-attr: 200 66% 72%;
+    --hl-type: 180 54% 66%;
+    --hl-literal: 263 66% 76%;
+    --hl-meta: 245 10% 56%;
   }
 
   * {
@@ -67,6 +92,68 @@
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+  }
+
+  /* highlight.js tokens — themed from the CSS vars above, no external stylesheet */
+  .hljs {
+    color: hsl(var(--code-fg));
+    background: transparent;
+  }
+  .hljs-comment,
+  .hljs-quote {
+    color: hsl(var(--hl-comment));
+    font-style: italic;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-section,
+  .hljs-doctag,
+  .hljs-name {
+    color: hsl(var(--hl-keyword));
+  }
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-addition,
+  .hljs-meta .hljs-string {
+    color: hsl(var(--hl-string));
+  }
+  .hljs-number,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-link {
+    color: hsl(var(--hl-number));
+  }
+  .hljs-title,
+  .hljs-title.function_,
+  .hljs-built_in {
+    color: hsl(var(--hl-title));
+  }
+  .hljs-attr,
+  .hljs-attribute,
+  .hljs-selector-attr,
+  .hljs-selector-class,
+  .hljs-selector-id,
+  .hljs-variable,
+  .hljs-template-variable {
+    color: hsl(var(--hl-attr));
+  }
+  .hljs-type,
+  .hljs-class .hljs-title,
+  .hljs-params {
+    color: hsl(var(--hl-type));
+  }
+  .hljs-meta {
+    color: hsl(var(--hl-meta));
+  }
+  .hljs-deletion {
+    color: hsl(0 60% 60%);
+  }
+  .hljs-emphasis {
+    font-style: italic;
+  }
+  .hljs-strong {
+    font-weight: 600;
   }
 }
 
