@@ -391,6 +391,64 @@ def test_attachment_helpers() -> None:
     assert len(full) < 30_000 + 500  # capped near the budget, not the full 30k
 
 
+async def test_cache_lookup_node_gates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "settings", SimpleNamespace(RESPONSE_CACHE_ENABLED=True, llm_configured=True)
+    )
+    base = {
+        "messages": [HumanMessage(content="explain how a bloom filter works internally")],
+        "user_id": "u1",
+        "enhanced_query": "explain how a bloom filter works internally",
+        "has_kb": False,
+        "needs_documents": False,
+        "metadata": {},
+    }
+    # turn 2 → skip
+    assert await nodes.cache_lookup_node({**base, "messages": base["messages"] * 2}) == {}
+    # KB project → skip
+    assert await nodes.cache_lookup_node({**base, "has_kb": True}) == {}
+    # time-sensitive query → skip
+    assert await nodes.cache_lookup_node(
+        {**base, "enhanced_query": "what's the latest news today"}
+    ) == {}
+
+
+async def test_cache_lookup_node_hit(monkeypatch) -> None:
+    monkeypatch.setattr(
+        nodes, "settings", SimpleNamespace(RESPONSE_CACHE_ENABLED=True, llm_configured=True)
+    )
+    import app.services.cache_service as cs
+
+    async def _hit(_db, _uid, _q):
+        return {"response": "a cached explanation", "similarity": 0.95, "age_s": 60.0}
+
+    monkeypatch.setattr(cs, "lookup", _hit)
+
+    class _SM:
+        def __call__(self):
+            class _Ctx:
+                async def __aenter__(self):
+                    return None
+
+                async def __aexit__(self, *_a):
+                    return False
+
+            return _Ctx()
+
+    monkeypatch.setattr("app.db.session.get_sessionmaker", lambda: _SM())
+
+    out = await nodes.cache_lookup_node({
+        "messages": [HumanMessage(content="explain how a bloom filter works internally")],
+        "user_id": "u1",
+        "enhanced_query": "explain how a bloom filter works internally",
+        "has_kb": False, "needs_documents": False, "metadata": {},
+    })
+    assert out["final_response"] == "a cached explanation"
+    assert out["metadata"]["cache_hit"]["similarity"] == 0.95
+    assert nodes.route_after_cache(out) == END
+    assert nodes.route_after_cache({"metadata": {}}) == "retriever"
+
+
 def test_route_after_validator() -> None:
     assert route_after_validator({"validation": {"approved": True}, "supervisor_turns": 1}) == END
     assert (

@@ -53,6 +53,22 @@ async def _seed_dev_user() -> None:
         )
 
 
+async def _cache_sweep_loop() -> None:
+    """Delete expired response-cache rows once an hour."""
+    from app.db.session import get_sessionmaker
+    from app.services import cache_service
+
+    while True:
+        try:
+            await asyncio.sleep(3600)
+            async with get_sessionmaker()() as db:
+                await cache_service.sweep(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a sweep failure must not kill the loop
+            logger.warning("cache_sweep_failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
@@ -118,13 +134,21 @@ async def lifespan(app: FastAPI):
             except Exception as exc:  # noqa: BLE001 — non-fatal in dev
                 logger.warning("ingestion_worker_start_failed", error=str(exc))
 
+        # Response-cache TTL sweep — cheap hourly DELETE.
+        sweep_task: asyncio.Task | None = None
+        if settings.RESPONSE_CACHE_ENABLED:
+            sweep_task = asyncio.create_task(_cache_sweep_loop())
+            logger.info("cache_sweep_started")
+
         logger.info("startup_complete")
         yield
 
+        for task in (ingest_task, sweep_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         if ingest_task is not None:
-            ingest_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await ingest_task
             logger.info("ingestion_worker_stopped")
 
     logger.info("shutdown_begin")

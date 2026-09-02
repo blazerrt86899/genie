@@ -17,6 +17,7 @@ SSEEventType = Literal[
     "message_break",
     "message_agents",
     "sources",
+    "guardrail",
     "task_created",
     "task_updated",
     "tasks_archived",

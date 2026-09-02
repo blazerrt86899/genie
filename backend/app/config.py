@@ -131,6 +131,17 @@ class Settings(BaseSettings):
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
     SUPERVISOR_MAX_TURNS: int = 2  # how many times the supervisor may (re)plan per run
 
+    # ─── Guardrails (input/output PII + secret scanning) ───────────────────
+    GUARDRAILS_ENABLED: bool = True
+    GUARDRAIL_INPUT_ENABLED: bool = True
+    GUARDRAIL_OUTPUT_ENABLED: bool = True
+
+    # ─── Semantic response cache (pgvector) ────────────────────────────────
+    RESPONSE_CACHE_ENABLED: bool = True
+    RESPONSE_CACHE_TTL_HOURS: int = 24
+    RESPONSE_CACHE_SIMILARITY: float = 0.93  # cosine floor for a cache hit
+    RESPONSE_CACHE_MAX_PER_USER: int = 200
+
     @property
     def is_production(self) -> bool:
         return self.APP_ENV == "production"

@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useUser } from "@clerk/nextjs";
-import { FolderKanban, SendHorizontal } from "lucide-react";
+import { FolderKanban, SendHorizontal, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/hooks/useChat";
 import { useProjects } from "@/hooks/useProjects";
@@ -100,6 +100,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const userName =
     user?.firstName || user?.username || user?.fullName || "You";
   const activeAgents = useChatStore((s) => s.activeAgents);
+  const turnGuardrail = useChatStore((s) => s.turnGuardrail);
   const pendingAttachments = useChatStore((s) => s.pendingAttachments);
   const pendingProjectId = useChatStore((s) => s.pendingProjectId);
   const storedConversationId = useChatStore((s) => s.conversationId);
@@ -229,6 +230,12 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 : "border-transparent shadow-[0_-6px_16px_-10px_rgba(0,0,0,0.5)]",
             )}
           >
+            {turnGuardrail && (
+              <div className="mx-3 mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300 sm:mx-6">
+                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{turnGuardrail}</span>
+              </div>
+            )}
             <div className="p-3 sm:px-6">
               <Composer
                 input={input}

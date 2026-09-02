@@ -110,7 +110,16 @@ def _patch(monkeypatch):
     monkeypatch.setattr(chat_service, "MessageRepository", FakeMsgRepo)
     monkeypatch.setattr(chat_service, "ProjectRepository", FakeProjectRepo)
     monkeypatch.setattr(chat_service, "DocumentRepository", FakeDocRepo)
-    monkeypatch.setattr(chat_service, "settings", SimpleNamespace(llm_configured=True))
+    monkeypatch.setattr(
+        chat_service,
+        "settings",
+        SimpleNamespace(
+            llm_configured=True,
+            GUARDRAILS_ENABLED=False,
+            GUARDRAIL_INPUT_ENABLED=False,
+            RESPONSE_CACHE_ENABLED=False,
+        ),
+    )
 
     async def _fake_title(_u, _a):
         return "Learn ML"
@@ -290,3 +299,50 @@ async def test_project_instructions_reach_the_graph(monkeypatch):
 
     _ = [f async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)]
     assert seen["state"]["project_instructions"] == "Always reply in French."
+
+
+async def test_cache_hit_streams_stored_answer(monkeypatch):
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="explain bloom filters", conversation_id=None
+    )
+
+    async def fake_events(_state, config, version):  # noqa: ARG001
+        return
+        yield  # make it an async generator
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(
+            values={
+                "messages": [SimpleNamespace(content="A cached explanation of bloom filters.")],
+                "metadata": {"cache_hit": {"similarity": 0.96, "age_s": 30.0}},
+            }
+        )
+
+    monkeypatch.setattr(
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
+    )
+    stored: list = []
+    monkeypatch.setattr(
+        chat_service, "cache_service",
+        SimpleNamespace(store=lambda *a, **k: stored.append(a)), raising=False,
+    )
+
+    frames = [
+        json.loads(f[6:])
+        async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
+    ]
+    kinds = [f["type"] for f in frames]
+    assert "message_agents" in kinds
+    ma = next(f for f in frames if f["type"] == "message_agents")
+    assert ma["agents"] == ["cache"]
+    assert "".join(f["content"] for f in frames if f["type"] == "token") == (
+        "A cached explanation of bloom filters."
+    )
+    assert frames[-1]["type"] == "done"
+    # a cache hit is never re-stored
+    assert stored == []
+    assert ("assistant", "A cached explanation of bloom filters.") in FakeMsgRepo.added

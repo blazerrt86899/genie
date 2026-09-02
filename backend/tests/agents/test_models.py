@@ -116,3 +116,20 @@ def test_resolve_model_spec_known_unknown_and_keyless(monkeypatch, _all_provider
 
 def test_resolve_model_spec_none_is_default():
     assert models.resolve_model_spec(None).id == "_default"
+
+
+def test_system_message_prompt_cache(monkeypatch, _all_providers):
+    # Anthropic → structured content with a cache_control breakpoint
+    anthropic = models.system_message("BIG STATIC PROMPT", model_id="claude-sonnet")
+    assert isinstance(anthropic.content, list)
+    assert anthropic.content[0]["cache_control"] == {"type": "ephemeral"}
+    assert anthropic.content[0]["text"] == "BIG STATIC PROMPT"
+
+    # OpenAI / Groq → plain string
+    openai = models.system_message("BIG STATIC PROMPT", model_id="gpt-4o")
+    assert openai.content == "BIG STATIC PROMPT"
+
+    # cache=False always plain
+    assert isinstance(
+        models.system_message("x", model_id="claude-sonnet", cache=False).content, str
+    )

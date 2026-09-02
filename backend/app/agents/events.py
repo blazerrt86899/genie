@@ -18,4 +18,4 @@ async def emit(name: str, data: dict) -> None:
     try:
         await adispatch_custom_event(name, data)
     except Exception:  # noqa: BLE001
-        logger.debug("custom_event_not_dispatched", event=name)
+        logger.debug("custom_event_not_dispatched", event_name=name)

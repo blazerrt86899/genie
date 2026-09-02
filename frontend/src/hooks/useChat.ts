@@ -31,6 +31,8 @@ function mapMessages(rows: ConversationMessage[]): ChatMessage[] {
     sources: m.sources ?? [],
     createdAt: m.created_at,
     feedback: m.feedback ?? null,
+    cached: m.cached ?? false,
+    guardrail: m.guardrail ?? null,
   }));
 }
 
@@ -117,6 +119,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
           s.setMessageAgents(currentId, event.agents);
         } else if (event.type === "sources") {
           s.setMessageSources(currentId, event.items);
+        } else if (event.type === "guardrail") {
+          s.setTurnGuardrail(event.message || "Sensitive data was hidden before sending.");
         } else if (event.type === "plan") {
           s.setPlan(event.steps);
         } else if (event.type === "agent_start") {
@@ -174,6 +178,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       s.addMessage({ id: pendingId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
       s.setPlan([]);
+      s.setTurnGuardrail(null);
       s.clearPendingAttachments();
 
       const token = await getToken();
@@ -236,6 +241,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       s.addMessage({ id: pendingId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
       s.setPlan([]);
+      s.setTurnGuardrail(null);
 
       try {
         const { run_id } = await regenerateChat(

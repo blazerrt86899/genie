@@ -51,6 +51,8 @@ class MessageOut(BaseModel):
     attachments: list[dict] = []  # files sent with this message (user only)
     sources: list[dict] = []  # [{title, url}] cited by this message (assistant only)
     feedback: str | None = None  # "up" | "down" — the user's 👍/👎 on an assistant message
+    cached: bool = False  # assistant reply served from the response cache
+    guardrail: dict | None = None  # {redacted, flagged, message} — input scrub note (user msg)
 
 
 class ConversationPatch(BaseModel):
@@ -147,6 +149,8 @@ async def get_conversation(
                 attachments=list((m.message_metadata or {}).get("attachments", [])),
                 sources=list((m.message_metadata or {}).get("sources", [])),
                 feedback=(m.message_metadata or {}).get("feedback"),
+                cached=bool((m.message_metadata or {}).get("cached")),
+                guardrail=(m.message_metadata or {}).get("guardrail"),
             )
             for m in messages
         ],

@@ -192,6 +192,8 @@ export interface ConversationMessage {
   attachments?: MessageAttachment[];
   sources?: MessageSource[];
   feedback?: "up" | "down" | null;
+  cached?: boolean;
+  guardrail?: { redacted: string[]; flagged: string[]; message: string } | null;
 }
 
 export interface ConversationSummary {

@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 import structlog
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -239,6 +240,25 @@ def get_chat_model(
     return _build(
         spec.provider, spec.model, streaming=streaming, temperature=temperature, max_tokens=None
     )
+
+
+def provider_for(model_id: str | None) -> Provider:
+    """The provider that will actually serve ``model_id`` (after fallback)."""
+    return resolve_model_spec(model_id).provider
+
+
+def system_message(text: str, *, model_id: str | None = None, cache: bool = True):
+    """A ``SystemMessage`` for a large, static prompt.
+
+    On Anthropic, marks the block with a ``cache_control`` breakpoint so repeated
+    turns pay ~10% for the cached prefix (5-min TTL). OpenAI caches long prefixes
+    automatically; Groq has no prompt cache — both get a plain string.
+    """
+    if cache and provider_for(model_id) == "anthropic":
+        return SystemMessage(
+            content=[{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+        )
+    return SystemMessage(content=text)
 
 
 def get_utility_model(*, temperature: float = 0.4, max_tokens: int | None = None) -> BaseChatModel:

@@ -22,7 +22,14 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END
 
 from app.agents.events import emit as _emit
-from app.agents.models import ainvoke, bump_tokens, get_chat_model, get_utility_model, tokens_of
+from app.agents.models import (
+    ainvoke,
+    bump_tokens,
+    get_chat_model,
+    get_utility_model,
+    system_message,
+    tokens_of,
+)
 from app.agents.registry import AGENT_REGISTRY, KNOWN_AGENTS, agent_menu
 from app.agents.supervisor.prompts import (
     CHAT_SYSTEM_PROMPT,
@@ -247,6 +254,65 @@ async def retriever_node(state: GenieState) -> dict:
     return {"retrieved_chunks": chunks, "plan": [kb_step]}
 
 
+def _cache_eligible(state: GenieState) -> bool:
+    """Only a first-turn, tool-free, KB-free, non-time-sensitive question."""
+    from app.services import cache_service
+
+    if not settings.RESPONSE_CACHE_ENABLED or not settings.llm_configured:
+        return False
+    if len(state.get("messages") or []) != 1:  # no conversation context
+        return False
+    if state.get("has_kb") or state.get("needs_documents"):
+        return False
+    query = state.get("enhanced_query") or _last_human_text(state)
+    return cache_service.is_cacheable_query(query)
+
+
+def _last_human_text(state: GenieState) -> str:
+    for msg in reversed(state.get("messages") or []):
+        if isinstance(msg, HumanMessage) or getattr(msg, "type", None) == "human":
+            return str(msg.content)
+    return ""
+
+
+async def cache_lookup_node(state: GenieState) -> dict:
+    """Semantic response cache — serve a near-identical past answer and skip the
+    graph. A pipeline node between prompt_enhancer and retriever."""
+    if not _cache_eligible(state):
+        return {}
+
+    from app.db.session import get_sessionmaker
+    from app.services import cache_service
+
+    query = state.get("enhanced_query") or _last_human_text(state)
+    await _emit("agent_start", {"agent": "cache", "task": "Checking the cache"})
+    hit: dict | None = None
+    try:
+        async with get_sessionmaker()() as db:
+            hit = await cache_service.lookup(db, state["user_id"], query)
+    except Exception:  # noqa: BLE001 — a cache error must never block a turn
+        logger.warning("cache_lookup_failed", exc_info=True)
+    finally:
+        await _emit("agent_end", {"agent": "cache", "status": "done"})
+
+    if not hit:
+        return {}
+
+    logger.info("cache_served", similarity=round(hit["similarity"], 3), age_s=round(hit["age_s"]))
+    return {
+        "messages": [AIMessage(content=hit["response"])],
+        "final_response": hit["response"],
+        "metadata": {
+            **(state.get("metadata") or {}),
+            "cache_hit": {"similarity": hit["similarity"], "age_s": hit["age_s"]},
+        },
+    }
+
+
+def route_after_cache(state: GenieState) -> str:
+    return END if (state.get("metadata") or {}).get("cache_hit") else "retriever"
+
+
 def _format_findings(plan: list[TaskRecord], results: dict) -> str:
     """Render non-streamed findings in plan order, with globally-numbered sources."""
     blocks: list[str] = []
@@ -312,7 +378,8 @@ async def supervisor_node(state: GenieState) -> dict:
     ).with_structured_output(SupervisorPlan, include_raw=True)
     plan_out: SupervisorPlan | None = None
     try:
-        result = await ainvoke(model, [SystemMessage(content=system), *state["messages"]])
+        sys_msg = system_message(system, model_id=state.get("model"))
+        result = await ainvoke(model, [sys_msg, *state["messages"]])
         plan_out = result["parsed"]
     except Exception:  # noqa: BLE001
         logger.warning("supervisor_plan_failed", exc_info=True)
@@ -480,9 +547,10 @@ async def synthesiser_node(state: GenieState) -> dict:
         logger.info("synthesiser_direct_answer", kb=bool(kb_agents))
         await _emit("message_agents", {"agents": kb_agents})
         model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
-        resp = await model.ainvoke(
-            [SystemMessage(content=_augment_system(CHAT_SYSTEM_PROMPT, state)), *state["messages"]]
+        sys_msg = system_message(
+            _augment_system(CHAT_SYSTEM_PROMPT, state), model_id=state.get("model")
         )
+        resp = await model.ainvoke([sys_msg, *state["messages"]])
         return {
             "messages": [resp],
             "final_response": str(resp.content),
@@ -520,7 +588,9 @@ async def synthesiser_node(state: GenieState) -> dict:
 
     convo = [*state["messages"], SystemMessage(content="Specialist findings:\n" + findings)]
     model = get_chat_model(model_id=state.get("model"), streaming=True)  # streaming → own retry
-    resp = await model.ainvoke([SystemMessage(content=system), *convo])
+    resp = await model.ainvoke(
+        [system_message(system, model_id=state.get("model")), *convo]
+    )
     logger.info("synthesiser_done", answer_chars=len(str(resp.content)))
     return {
         "messages": [resp],
@@ -530,13 +600,25 @@ async def synthesiser_node(state: GenieState) -> dict:
 
 
 async def validator_node(state: GenieState) -> dict:
-    """Non-empty check, then — only when agents produced findings — an LLM
-    grounding / sanity check. A reject routes back to the supervisor (capped)."""
+    """Output guard (deterministic secret redaction) → non-empty check → an LLM
+    grounding / sanity check when agents produced findings. A reject routes back
+    to the supervisor (capped)."""
+    from app.agents.guardrails import scrub_output
+
     messages = state.get("messages") or []
     answer = str(messages[-1].content).strip() if messages else ""
+
+    clean, redacted_kinds = scrub_output(answer)
+    guard_out: dict = {}
+    if redacted_kinds:
+        answer = clean.strip()
+        last = messages[-1]
+        guard_out["messages"] = [AIMessage(content=clean, id=getattr(last, "id", None))]
+        guard_out["final_response"] = clean
+
     if not answer:
         logger.info("validator_verdict", approved=False, reason="empty")
-        return {"validation": {"approved": False, "issues": ["empty response"]}}
+        return {**guard_out, "validation": {"approved": False, "issues": ["empty response"]}}
 
     results = state.get("intermediate_results") or {}
     plan = state.get("plan") or []
@@ -546,7 +628,7 @@ async def validator_node(state: GenieState) -> dict:
     # Pure model answers (no agents) have nothing external to ground-check.
     if not composable or not settings.llm_configured:
         logger.info("validator_verdict", approved=True, checked="non_empty_only")
-        return {"validation": {"approved": True, "issues": []}}
+        return {**guard_out, "validation": {"approved": True, "issues": []}}
 
     findings = _format_findings(plan, results)
     try:
@@ -569,7 +651,7 @@ async def validator_node(state: GenieState) -> dict:
         verdict: Validation = result["parsed"]
     except Exception:  # noqa: BLE001 — don't block a good answer on a validator error
         logger.warning("validator_check_failed", exc_info=True)
-        return {"validation": {"approved": True, "issues": []}}
+        return {**guard_out, "validation": {"approved": True, "issues": []}}
 
     logger.info(
         "validator_verdict",
@@ -578,6 +660,7 @@ async def validator_node(state: GenieState) -> dict:
         checked="grounding",
     )
     return {
+        **guard_out,
         "validation": {"approved": verdict.approved, "issues": verdict.issues},
         "token_usage": bump_tokens(state.get("token_usage"), tokens_of(result), "validator"),
     }
@@ -599,6 +682,9 @@ def route_after_validator(state: GenieState) -> str:
 
 
 __all__ = [
+    "cache_lookup_node",
+    "retriever_node",
+    "route_after_cache",
     "supervisor_node",
     "executor_node",
     "synthesiser_node",

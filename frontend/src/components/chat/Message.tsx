@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckSquare, FileText, Globe, Sparkles } from "lucide-react";
+import { CheckSquare, FileText, Globe, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
@@ -26,6 +26,7 @@ const AGENT_LABELS: Record<string, { icon: typeof Globe; live: string; done: str
   rag: { icon: Globe, live: "Reading your documents", done: "Read your documents" },
   task_creator: { icon: CheckSquare, live: "Updating your tasks", done: "Updated your tasks" },
   task_summary: { icon: CheckSquare, live: "Summarising the task", done: "Summarised the task" },
+  cache: { icon: Zap, live: "Checking the cache", done: "Answered from cache" },
 };
 
 function AgentTrail({
@@ -179,6 +180,13 @@ export function Message({
               <StreamingDot />
             </span>
           )}
+        </div>
+      )}
+
+      {isUser && message.guardrail && message.guardrail.message && (
+        <div className="mt-1 flex max-w-[80%] items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[12px] text-amber-700 dark:text-amber-300">
+          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>{message.guardrail.message}</span>
         </div>
       )}
 

@@ -74,6 +74,9 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | Observability | LangSmith + AWS X-Ray | Trace every graph run |
 | LLM SDKs | `langchain-openai` · `langchain-anthropic` · `langchain-groq` | All via `agents/models.py` — no direct imports elsewhere |
 | Circuit Breaker | `tenacity` | Exponential backoff, 4 attempts (`wait_exponential(2..30s)` — rides out a Groq free-tier 429) |
+| Prompt caching | Anthropic `cache_control` (`models.system_message`) on the big static system prompts (supervisor / synthesiser); OpenAI caches long prefixes automatically; Groq n/a |
+| Response cache | pgvector `genie.response_cache` (HNSW) — a `cache_lookup` graph node serves a near-identical (cosine ≥ `RESPONSE_CACHE_SIMILARITY`) past answer for a **tool-free, first-turn, non-time-sensitive** question, skipping the graph. `services/cache_service.py` |
+| Guardrails | `core/guardrails.py` — regex scan for secrets (API keys / tokens / private keys / URL creds) + PII (email / phone / SSN / card w/ Luhn / IP). `chat_service.create_turn` redacts secrets & card/SSN before persist + LLM; `validator` re-scans the output; the user is warned (SSE `guardrail`). PII is kept. |
 | Validation | Pydantic v2 | All request/response models |
 
 ### Database
@@ -163,6 +166,8 @@ These are non-negotiable. Do not violate them. Do not find clever workarounds.
 
 8. **Observability from day one** — Every module logs its every step through `structlog` (see §21 — event names, levels, `preview()` for user content, automatic secret redaction). Every agent node emits a LangSmith trace. Every API request gets a `request_id` injected by middleware. Every SQS job gets a `job_id`. Logs are structured JSON in prod, headed for Datadog.
 
+9. **Deterministic guardrails run before any external LLM call** — `core/guardrails.py` scans and **redacts live secrets / card / SSN** in the user's message (in `chat_service.create_turn`, before it is persisted or embedded or sent to a provider) and in the model's output (`validator`). Ordinary PII is kept but flagged. A guardrail exception must never block a turn (fail-open).
+
 ---
 
 ## 5. Project File Structure
@@ -235,6 +240,7 @@ genie/
 │       │   │   ├── prompts.py
 │       │   │   └── schemas.py         ← TaskOp / TaskOps structured output
 │       │   │
+│       │   ├── guardrails/            ← input_guard_node (redact secrets/PII) + scrub_output (validator)
 │       │   └── events.py              ← emit(name, data) — agent custom events → SSE (§11)
 │       │
 │       ├── mcp/                       ← MCP layer (§22) — FastMCP tool servers
@@ -268,6 +274,7 @@ genie/
 │       │   ├── task_service.py        ← task board logic (REST + MCP + tests call this)
 │       │   ├── attachment_service.py  ← parse pdf/txt/md → text; persist; link to a message
 │       │   ├── title_service.py       ← cheap-LLM conversation titles
+│       │   ├── cache_service.py       ← semantic response cache (pgvector) — is_cacheable_query / lookup / store / sweep
 │       │   ├── memory_service.py      ← Memory consolidation logic
 │       │   ├── document_service.py    ← KB: validate → S3 put → row → SQS enqueue; list/get/chunks/delete
 │       │   └── rag/
@@ -285,6 +292,7 @@ genie/
 │           ├── clerk_api.py           ← thin Clerk Backend API client (profile enrichment)
 │           ├── aws.py                 ← boto3 s3()/sqs() singletons (LocalStack ↔ real AWS) + ensure_infra()
 │           ├── redis.py               ← async Redis client singleton
+│           ├── guardrails.py          ← pure regex scan(): secrets + PII → Finding[]; redact(); summarize() (§4.9)
 │           ├── streaming.py           ← SSE frame helpers (§11)
 │           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
 │           ├── logging.py             ← structlog config + redact_processor + preview()/mask() (§21)
@@ -475,6 +483,15 @@ AWS_SECRET_ACCESS_KEY=        # Local dev only
 # ─── Limits ──────────────────────────────────────────────────────────────────
 MAX_TOKENS_PER_RUN=50000
 RATE_LIMIT_REQUESTS_PER_MINUTE=60
+
+# ─── Guardrails / caching ────────────────────────────────────────────────────
+GUARDRAILS_ENABLED=true            # master switch for input + output scanning
+GUARDRAIL_INPUT_ENABLED=true
+GUARDRAIL_OUTPUT_ENABLED=true
+RESPONSE_CACHE_ENABLED=true        # semantic answer cache (pgvector)
+RESPONSE_CACHE_TTL_HOURS=24
+RESPONSE_CACHE_SIMILARITY=0.93     # cosine floor for a cache hit
+RESPONSE_CACHE_MAX_PER_USER=200
 ```
 
 ---
@@ -1035,9 +1052,11 @@ ALTER TABLE user_memory      ENABLE ROW LEVEL SECURITY;
 ## 9. LangGraph: GenieState & Graph Wiring
 
 > **Current reality (see §19):** the real graph runs —
-> `START → prompt_enhancer → retriever → supervisor → executor → synthesiser → validator → {supervisor | END}`.
+> `START → input_guard → prompt_enhancer → cache_lookup → {END | retriever → supervisor → executor → synthesiser → validator → {supervisor | END}}`.
 > Three agents are registered (`greeting`, `web_search`, `task_creator`);
-> `prompt_enhancer` and `retriever` are **pipeline nodes**, not registry agents
+> `input_guard` (redact secrets/PII), `prompt_enhancer`, `cache_lookup` (semantic
+> response cache — serve a near-identical past answer, skip the graph) and
+> `retriever` are **pipeline nodes**, not registry agents
 > (`retriever` = the project Knowledge Base, §10 — runs only when the chat's
 > project has a ready KB and the enhancer set `needs_documents`); the `rag`/`calendar`
 > dirs are still stubs. The compiled graph + `AsyncPostgresSaver` checkpointer are
@@ -1104,15 +1123,20 @@ Add an agent = add an `AgentSpec` here (+ its module) — no graph node needed, 
 ### Graph wiring (`app/agents/supervisor/graph.py`)
 ```python
 graph = StateGraph(GenieState)
+graph.add_node("input_guard",  input_guard_node)   # redact secrets/PII, warn (§4.9) — attachment text + safety net
 graph.add_node("prompt_enhancer", prompt_enhancer_node)  # rewrite self-contained + intent + needs_documents
+graph.add_node("cache_lookup", cache_lookup_node)  # semantic response cache — a hit routes straight to END
 graph.add_node("retriever",   retriever_node)    # project Knowledge Base (§10) — runs iff has_kb & needs_documents
 graph.add_node("supervisor",  supervisor_node)   # LLM plan → task ledger
 graph.add_node("executor",    executor_node)     # walk ledger, run agents in dep order, update statuses
 graph.add_node("synthesiser", synthesiser_node)  # compose the one user-facing reply (streams)
-graph.add_node("validator",   validator_node)    # non-empty + LLM grounding check when agents ran
+graph.add_node("validator",   validator_node)    # output guard (scrub_output) + non-empty + LLM grounding check
 
-graph.add_edge(START, "prompt_enhancer")
-graph.add_edge("prompt_enhancer", "retriever")
+graph.add_edge(START, "input_guard")
+graph.add_edge("input_guard", "prompt_enhancer")
+graph.add_edge("prompt_enhancer", "cache_lookup")
+graph.add_conditional_edges("cache_lookup", route_after_cache,
+                            {"retriever": "retriever", END: END})  # cache hit → END
 graph.add_edge("retriever", "supervisor")
 graph.add_edge("supervisor", "executor")
 graph.add_edge("executor", "synthesiser")
@@ -1120,6 +1144,14 @@ graph.add_edge("synthesiser", "validator")
 graph.add_conditional_edges("validator", route_after_validator,
                             {"supervisor": "supervisor", END: END})  # capped re-plan loop
 ```
+**cache_lookup** — serves a hit only when the query is **first-turn**
+(`len(messages)==1`), **KB-free** and passes `cache_service.is_cacheable_query`
+(no "today/latest/price/…" words, sane length). On a hit it writes the cached
+`AIMessage` + `metadata.cache_hit` and routes to END; `chat_service._generate`
+then streams the stored text in chunks with a `["cache"]` caption. A tool-free
+knowledge turn is stored back by `_generate` (empty plan, no sources, no KB).
+**Prompt caching**: `models.system_message()` wraps the supervisor / synthesiser
+system prompts with an Anthropic `cache_control` breakpoint (no-op elsewhere).
 Compiled in the lifespan with the session-mode `AsyncPostgresSaver`. No
 `interrupt_before` yet (calendar agent not built). Every non-streaming LLM call
 goes through `agents/models.py:ainvoke()` (tenacity — 4 attempts, exponential
@@ -1249,8 +1281,12 @@ default 0.15).
 ### Event Types (strict — frontend parses by `type` field)
 
 > Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `message_break`,
-> `message_agents`, `sources`, `task_created`, `task_updated`, `tasks_archived`,
-> `title`, `error`, `done` (see `core/streaming.py` + `lib/sse.ts`). `sources`
+> `message_agents`, `sources`, `guardrail`, `task_created`, `task_updated`,
+> `tasks_archived`, `title`, `error`, `done` (see `core/streaming.py` + `lib/sse.ts`).
+> `guardrail` (`{types:[…], redacted:bool, message}`) fires once before the answer
+> when the input scan hid a secret / flagged PII (§4.9) — the UI shows an amber
+> note. A **response-cache hit** streams normal `token` frames + `message_agents:["cache"]`.
+> `sources`
 > (`{items:[{title,url}]}`) is emitted once before `done` — the dedup'd
 > `intermediate_results[*].sources` (web_search etc.); the frontend renders them
 > as link cards under the message and persists them to `messages.metadata.sources`
@@ -1351,7 +1387,8 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 
 ### L2 — Supabase PostgreSQL (permanent)
-- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments` and **`feedback`** (`"up"`|`"down"` — the user's 👍/👎, no migration). Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
+- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments`, **`feedback`** (`"up"`|`"down"` 👍/👎), **`cached`** (reply served from the response cache), **`guardrail`** (`{redacted, flagged, message}` — the input scrub note on a user message). All metadata-only, no migration. Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
+- `response_cache` — the semantic answer cache: `query_norm`, `query_embedding vector(1536)` (HNSW), `response`, `model`, `hit_count`, `last_hit_at`, per-`user_id`. Migration `b8e2f4a1c9d3`. Filled/read by `services/cache_service.py`; TTL sweep runs hourly from the lifespan.
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`), **`share_token`** (unique; NULL = private) + **`shared_at`** (frozen message cutoff for the public view). Migrations `f6703a0bb868`, `f041f866790f`, `c3d9e1f4a7b2`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
 - `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
@@ -1575,6 +1612,7 @@ routing agent (`agents/rag/`)._
 
 - [x] Per-conversation model selection — `MODEL_CATALOG` (OpenAI/Anthropic/Groq), `GET /models`, composer picker, `conversations.model` (2026-09-01)
 - [x] Rich response rendering — synthesiser = response drafter (`RESPONSE_FORMAT_GUIDE`); frontend `Markdown.tsx` (react-markdown + GFM + rehype-highlight) with copyable, syntax-highlighted code blocks (2026-09-02). Backlog: KaTeX math, Mermaid diagrams, streaming re-parse debounce.
+- [x] LLM token optimisation — Anthropic prompt caching + a pgvector semantic response cache (`cache_lookup` node) + regex input/output guardrails (secret/PII redaction) (2026-09-02).
 - [ ] Per-user token quotas: `token_budget` column in `users`, enforced in supervisor
 - [ ] LangSmith evaluation datasets: build golden Q&A sets for each agent
 - [ ] LangSmith CI evaluations: run on each deploy, gate on regression threshold
@@ -1660,11 +1698,15 @@ tests/  (≈90 tests, all green)
 │   ├── test_greeting.py        ← time buckets + LLM/template fallback
 │   ├── test_web_search.py      ← Tavily mocked, summary + sources
 │   ├── test_task_creator.py    ← create / move / summarise (task_summary pill) / archive
+│   ├── test_guardrails_nodes.py ← input_guard redact/flag/fail-open · scrub_output
 │   ├── test_rag.py / test_calendar.py  ← Phase 2/3
 ├── mcp/
 │   └── test_tasks_server.py    ← in-memory Client, task_service faked
+├── core/
+│   └── test_guardrails.py      ← scan() per kind · Luhn · redact · overlap · summarize
 ├── services/
-│   ├── test_chat_service.py    ← SSE framing, message splitting
+│   ├── test_chat_service.py    ← SSE framing, message splitting, cache-hit stream
+│   ├── test_cache_service.py   ← is_cacheable_query · lookup hit/miss · store + per-user cap
 │   ├── test_task_service.py    ← create / move / archive_done / summarise
 │   ├── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
 │   ├── test_partition_service.py  ← md/txt/pdf → typed elements + stats
@@ -1678,7 +1720,7 @@ tests/  (≈90 tests, all green)
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project) · test_sharing.py
+    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project) · test_sharing.py · test_chat_regenerate.py · test_messages.py
     ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
     ├── test_models_endpoint.py · test_attachments.py · test_documents.py
 ```
@@ -1779,6 +1821,8 @@ _Also 2026-09-01 — **KB retrieval hardening** (bug: a real CV upload answered 
 _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_output(SupervisorPlan, include_raw=True)` intermittently returns `parsed=None` (emits `steps: null` / drops `rationale`). `supervisor_node` now guards `plan_out is None` (→ answer directly, keeping the `knowledge_base` step); `SupervisorPlan` has a `@field_validator("steps", mode="before")` coercing `None`→`[]` and a default `rationale`._
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
+
+_Also 2026-09-02 — **LLM token optimisation: caching + guardrails**. **Caching**: (1) Anthropic **prompt caching** — `models.system_message()` puts a `cache_control` breakpoint on the supervisor / synthesiser system prompts (no-op on OpenAI/Groq). (2) **Semantic response cache** — `genie.response_cache` pgvector table (HNSW, migration `b8e2f4a1c9d3`) + `services/cache_service.py`. New `cache_lookup` graph node (`prompt_enhancer → cache_lookup → {retriever | END}`): for a **first-turn, KB-free, non-time-sensitive** question (`is_cacheable_query` rejects "today/latest/price/news/…"), a past answer within cosine `RESPONSE_CACHE_SIMILARITY` (0.93, per-user, ≤24 h) is served straight from the row — zero LLM tokens; `_generate` streams it chunked with a `["cache"]` caption (`metadata.cached`). A tool-free knowledge turn is stored back. Hourly TTL sweep from the lifespan. **Guardrails** (`core/guardrails.py`, pure regex): `chat_service.create_turn` scans the message, **redacts live secrets + card/SSN before persist or any LLM call**, keeps ordinary PII but flags it, records `messages.metadata.guardrail`, stashes a note → `_generate` emits the SSE `guardrail` event → amber UI note (`Message`/`ChatView`). `validator_node` re-scans the model output (`scrub_output`). `input_guard` graph node redacts attachment text + is the safety net. Config `GUARDRAILS_ENABLED` / `RESPONSE_CACHE_*`. `core/logging` now imports its secret-prefix list from `core/guardrails` (single source). Fixed a latent `events.py` bug (`logger.debug(..., event=)` collided with structlog's message key). Verified: 173 backend tests, ruff + build/lint clean; graph compiles with the two new nodes._
 
 _Also 2026-09-02 — **message actions (regenerate / retry / edit · 👍👎 · copy · date)**: `POST /chat/{id}/regenerate` (`{from_message_id, edit?}`) → `chat_service.regenerate_turn` picks the anchor user message (before an assistant target, or the target itself; `edit` replaces its text via `message_repo.set_content`), `message_repo.delete_after(anchor.created_at)`, `checkpointer.adelete_thread(cid)`, stashes a `mode="regenerate"` Redis run; `_generate` replays the surviving `messages` rows as `state["messages"]` (thread just reset → no double-merge), then streams + persists as normal. New `endpoints/messages.py` → `POST /messages/{id}/feedback {vote}` → `message_repo.set_feedback` (into `messages.metadata.feedback`, no migration) + best-effort `observability.send_run_feedback` (LangSmith `user_thumbs` on `metadata.langsmith_run_id`). `MessageOut.feedback` added. Frontend: `MessageActions.tsx` (always-visible subtle row — Copy · 👍👎 · Regenerate on replies; date · Retry · Edit · Copy on user messages), `Message.tsx` inline-edit textarea (⌘/Ctrl+Enter to submit) + `"use client"`; `useChat` gains `regenerate` / `voteMessage` / a shared `consumeStream` + `refreshMessages` (swaps optimistic ids for persisted rows so a follow-up regenerate works). `chatStore` `ChatMessage` += `createdAt` / `feedback`; `truncateAfter` / `updateMessageContent` / `setMessageFeedback`. Public `/share` page shows the date only (no buttons). Verified: 148 backend tests, ruff + build/lint clean._
 
@@ -1891,6 +1935,9 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |
 | Regenerate / retry / edit a turn | `chat_service.regenerate_turn` (`adelete_thread` + replay `messages` rows) · `POST /chat/{id}/regenerate` · frontend `useChat.regenerate` + `MessageActions` |
 | Message 👍/👎 | `message_repo.set_feedback` (→ `messages.metadata.feedback`) + `core/observability.send_run_feedback` (LangSmith) · `POST /messages/{id}/feedback` |
+| Tune the response cache | `RESPONSE_CACHE_*` env vars + `services/cache_service.py` (`is_cacheable_query` time-word list, `_MIN`/`_MAX` len, similarity floor) |
+| Add / adjust a guardrail pattern | `core/guardrails.py:_PATTERNS` (+ `_LABELS`, `_SECRET_KINDS`); `_SECRET_VALUE_PREFIXES` is re-used by `core/logging` |
+| Prompt caching for a call site | wrap the system prompt with `models.system_message(text, model_id=…)` |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
@@ -1969,6 +2016,12 @@ able to reconstruct a request from the logs alone.
 - **Message actions** — `chat_service`: `chat_regenerate_accepted`,
   `chat_regenerate_seed`; `message_repo`: `messages_truncated`, `message_edited`,
   `message_feedback_set`; `core/observability`: `message_feedback_langsmith`.
+- **Guardrails** — `chat_service` / `agents/guardrails`: `guardrail_input`
+  (kinds + counts, never values), `guardrail_output_redacted`, `guardrail_error`;
+  `chat_service`: `chat_guardrail` (forwarded SSE).
+- **Response cache** — `cache_service`: `cache_hit` (similarity, age_s),
+  `cache_miss`, `cache_stored`, `cache_swept`; `nodes`: `cache_served`;
+  `chat_service`: `cache_store_failed`; `main.py`: `cache_sweep_started`.
 - **Chat share** — `conversation_repo`: `conversation_shared` / `conversation_unshared`
   (only `token_prefix`, never the full capability token); `endpoints/conversations.py`:
   `conversation_share_enabled` / `_disabled`, `share_token_collision`;

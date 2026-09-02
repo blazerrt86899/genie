@@ -13,6 +13,7 @@ from app.db.models.document import Document
 from app.db.models.document_chunk import DocumentChunk
 from app.db.models.message import Message
 from app.db.models.project import Project
+from app.db.models.response_cache import ResponseCache
 from app.db.models.task import Task
 from app.db.models.user import User
 
@@ -26,4 +27,5 @@ __all__ = [
     "Attachment",
     "Document",
     "DocumentChunk",
+    "ResponseCache",
 ]

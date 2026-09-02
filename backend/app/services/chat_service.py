@@ -95,7 +95,46 @@ async def create_turn(
             user.id, title=None, project_id=pid, model=model
         )
 
+    # ── Input guardrail — redact live secrets / card / SSN BEFORE the message is
+    # persisted or sent to any LLM; keep ordinary PII (the user's own contact
+    # details are often the point). See core/guardrails.py.
+    guardrail_note: dict | None = None
+    if settings.GUARDRAILS_ENABLED and settings.GUARDRAIL_INPUT_ENABLED:
+        from app.core import guardrails
+
+        findings = guardrails.scan(message)
+        to_redact = [f for f in findings if f.severity == "secret"
+                     or f.kind in ("ssn", "credit_card")]
+        flagged = sorted({f.kind for f in findings
+                          if f.severity == "pii" and f.kind not in ("ssn", "credit_card")})
+        if to_redact:
+            message = guardrails.redact(message, to_redact)
+        if findings:
+            redacted_kinds = sorted({f.kind for f in to_redact})
+            note_bits = []
+            if redacted_kinds:
+                note_bits.append(
+                    f"Hid {guardrails.summarize([f for f in findings if f.kind in redacted_kinds])}"
+                    " before sending — never share live secrets or card numbers."
+                )
+            if flagged:
+                note_bits.append(
+                    f"Heads-up: your message contains "
+                    f"{guardrails.summarize([f for f in findings if f.kind in flagged])}."
+                )
+            guardrail_note = {
+                "redacted": redacted_kinds,
+                "flagged": flagged,
+                "message": " ".join(note_bits),
+            }
+            logger.info(
+                "guardrail_input", redacted=redacted_kinds, flagged=flagged,
+                findings=len(findings),
+            )
+
     msg_meta: dict = {}
+    if guardrail_note:
+        msg_meta["guardrail"] = guardrail_note
     linked_ids: list[str] = []
     if attachment_ids:
         atts = await attachment_service.list_for_ids(db, user.id, attachment_ids)
@@ -118,18 +157,15 @@ async def create_turn(
     await conv_repo.touch(conversation.id)
 
     run_id = str(uuid.uuid4())
-    await redis.setex(
-        _run_key(run_id),
-        _RUN_TTL_SECONDS,
-        json.dumps(
-            {
-                "conversation_id": str(conversation.id),
-                "message": message,
-                "client_hour": client_hour,
-                "attachment_ids": linked_ids,
-            }
-        ),
-    )
+    run_payload: dict = {
+        "conversation_id": str(conversation.id),
+        "message": message,
+        "client_hour": client_hour,
+        "attachment_ids": linked_ids,
+    }
+    if guardrail_note:
+        run_payload["guardrail"] = guardrail_note
+    await redis.setex(_run_key(run_id), _RUN_TTL_SECONDS, json.dumps(run_payload))
     logger.info(
         "chat_turn_accepted",
         run_id=run_id,
@@ -186,6 +222,15 @@ async def regenerate_turn(
             new_text = edit.strip()
             if not new_text:
                 raise ValueError("edited message must not be empty")
+            if settings.GUARDRAILS_ENABLED and settings.GUARDRAIL_INPUT_ENABLED:
+                from app.core import guardrails
+
+                secrets = [f for f in guardrails.scan(new_text)
+                           if f.severity == "secret" or f.kind in ("ssn", "credit_card")]
+                if secrets:
+                    new_text = guardrails.redact(new_text, secrets)
+                    logger.info("guardrail_input", stage="edit",
+                                redacted=sorted({f.kind for f in secrets}))
             await msg_repo.set_content(anchor.id, user.id, new_text)
             anchor.content = new_text
 
@@ -243,6 +288,7 @@ async def _generate(
     client_hour = payload.get("client_hour")
     attachment_ids: list[str] = payload.get("attachment_ids") or []
     mode: str | None = payload.get("mode")  # None (normal turn) | "regenerate"
+    guardrail_note: dict | None = payload.get("guardrail")
 
     if payload["conversation_id"] != conversation_id:
         logger.warning(
@@ -346,6 +392,15 @@ async def _generate(
         },
     }
 
+    if guardrail_note:
+        yield format_sse_event(
+            "guardrail",
+            types=list(guardrail_note.get("redacted", []))
+            + list(guardrail_note.get("flagged", [])),
+            redacted=bool(guardrail_note.get("redacted")),
+            message=guardrail_note.get("message", ""),
+        ), None
+
     logger.info(
         "chat_graph_invoke",
         run_id=run_id,
@@ -443,6 +498,19 @@ async def _generate(
                 agents = list(data.get("agents") or [])
                 part_agents[-1] = agents
                 yield format_sse_event("message_agents", agents=agents), None
+            elif name == "guardrail":
+                logger.info(
+                    "chat_guardrail",
+                    run_id=run_id,
+                    types=data.get("types"),
+                    redacted=data.get("redacted"),
+                )
+                yield format_sse_event(
+                    "guardrail",
+                    types=list(data.get("types") or []),
+                    redacted=bool(data.get("redacted")),
+                    message=data.get("message") or "",
+                ), None
             elif name == "segment":
                 # an already-user-ready agent output (e.g. the greeting)
                 seg = str(data.get("text") or "").strip()
@@ -454,14 +522,25 @@ async def _generate(
                     yield format_sse_event("token", content=seg), None
 
     pairs = [(p.strip(), a) for p, a in zip(parts, part_agents, strict=False) if p.strip()]
+    graph_snapshot = None
+    cached_hit: dict | None = None
     if not pairs:
-        # Nothing streamed — recover the reply from the graph state.
+        # Nothing streamed — recover the reply from the graph state (this is also
+        # the response-cache-hit path: cache_lookup wrote the AIMessage + skipped
+        # the synthesiser).
         logger.warning("chat_no_streamed_output", run_id=run_id)
         try:
-            snapshot = await graph.aget_state(config)
-            msgs = snapshot.values.get("messages", []) if snapshot else []
+            graph_snapshot = await graph.aget_state(config)
+            values = graph_snapshot.values if graph_snapshot else {}
+            msgs = values.get("messages", [])
             text = str(msgs[-1].content).strip() if msgs else ""
-            if text:
+            cached_hit = (values.get("metadata") or {}).get("cache_hit")
+            if text and cached_hit:
+                yield format_sse_event("message_agents", agents=["cache"]), None
+                for i in range(0, len(text), 24):  # a light typing feel
+                    yield format_sse_event("token", content=text[i : i + 24]), None
+                pairs = [(text, ["cache"])]
+            elif text:
                 pairs = [(text, [])]
                 yield format_sse_event("token", content=text), None
         except Exception:  # noqa: BLE001
@@ -470,10 +549,12 @@ async def _generate(
     # Structured sources (web_search etc.) — surfaced as link cards, not baked
     # into the answer text.
     sources: list[dict] = []
+    snap_values: dict = {}
     try:
-        snap = await graph.aget_state(config)
+        snap = graph_snapshot or await graph.aget_state(config)
+        snap_values = dict(snap.values) if snap else {}
         seen: set[str] = set()
-        for r in (snap.values.get("intermediate_results") or {}).values():
+        for r in (snap_values.get("intermediate_results") or {}).values():
             for s in r.get("sources") or []:
                 url = (s.get("url") or "").strip()
                 if url and url not in seen:
@@ -502,6 +583,8 @@ async def _generate(
             meta: dict = {}
             if agents:
                 meta["agents"] = agents
+            if "cache" in agents:
+                meta["cached"] = True
             if sources and i == last:
                 meta["sources"] = sources
             if langsmith_run_id and i == last:
@@ -515,6 +598,28 @@ async def _generate(
                 created_at=now + timedelta(milliseconds=10 * i),
             )
         await conv_repo.touch(conversation.id)
+
+        # Cache a pure-knowledge answer for the next near-identical question:
+        # one message, no agents, no sources, no KB, first turn of the chat,
+        # a non-time-sensitive query — and not itself a cache/regenerate reply.
+        enhanced_q = snap_values.get("enhanced_query") or message
+        if (
+            mode != "regenerate"
+            and not cached_hit
+            and len(pairs) == 1
+            and not snap_values.get("plan")
+            and not sources
+            and not snap_values.get("retrieved_chunks")
+            and len(seed_messages) == 1
+        ):
+            from app.services import cache_service
+
+            try:
+                await cache_service.store(
+                    db, str(user.id), enhanced_q, answer, conversation.model
+                )
+            except Exception:  # noqa: BLE001 — caching is best-effort
+                logger.warning("cache_store_failed", run_id=run_id, exc_info=True)
 
         # First real exchange in this chat → auto-title it (Claude-style heading).
         if conversation.title is None:

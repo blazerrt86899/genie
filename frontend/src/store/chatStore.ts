@@ -11,6 +11,8 @@ export interface ChatMessage {
   sources?: { title: string; url: string }[]; // link cards under an assistant message
   createdAt?: string; // ISO — absent on optimistic (not-yet-persisted) messages
   feedback?: "up" | "down" | null; // the user's 👍/👎 on an assistant message
+  cached?: boolean; // assistant reply served from the response cache
+  guardrail?: { redacted: string[]; flagged: string[]; message: string } | null; // on a user message
 }
 
 export interface ProjectRef {
@@ -36,6 +38,8 @@ interface ChatState {
   conversationPinned: boolean;
   conversationUnread: boolean;
   setConversationFlags: (f: { pinned?: boolean; unread?: boolean }) => void;
+  turnGuardrail: string | null; // transient banner while a guarded turn streams
+  setTurnGuardrail: (message: string | null) => void;
   project: ProjectRef | null;
   model: string | null; // picked chat-model id; null → server default
   setModel: (model: string | null) => void;
@@ -80,6 +84,8 @@ export const useChatStore = create<ChatState>((set) => ({
       conversationPinned: f.pinned ?? s.conversationPinned,
       conversationUnread: f.unread ?? s.conversationUnread,
     })),
+  turnGuardrail: null,
+  setTurnGuardrail: (turnGuardrail) => set({ turnGuardrail }),
   project: null,
   model: null,
   setModel: (model) => set({ model }),
@@ -157,6 +163,7 @@ export const useChatStore = create<ChatState>((set) => ({
       conversationTitle: null,
       conversationPinned: false,
       conversationUnread: false,
+      turnGuardrail: null,
       project: null,
       pendingAttachments: [],
       pendingProjectId: null,

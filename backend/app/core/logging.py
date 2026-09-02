@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from app.config import settings
+from app.core.guardrails import _SECRET_VALUE_PREFIXES
 
 # ─── Redaction ───────────────────────────────────────────────────────────────
 
@@ -40,8 +41,8 @@ _SECRET_SUFFIXES: tuple[str, ...] = (
     "_token", "_secret", "_password", "_api_key", "_apikey", "_signature",
     "_credential", "_dsn",
 )
-# Value prefixes that betray a secret regardless of the field name.
-_SECRET_VALUE_PREFIXES: tuple[str, ...] = ("bearer ", "sk_", "sk-", "whsec_", "eyj")
+# `_SECRET_VALUE_PREFIXES` is imported from `core.guardrails` (single source of
+# truth shared with the input/output scanner).
 
 _URL_CREDS = re.compile(r"(?P<pre>[a-z][a-z0-9+.\-]*://[^:/@\s]+:)(?P<pw>[^@/\s]+)@")
 
