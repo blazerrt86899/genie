@@ -113,6 +113,7 @@ const DEFAULT_W = 256;
 
 function useSidebarWidth() {
   const [width, setWidth] = useState(DEFAULT_W);
+  const [isDragging, setIsDragging] = useState(false);
   const dragging = useRef(false);
   const widthRef = useRef(width);
   widthRef.current = width;
@@ -128,6 +129,7 @@ function useSidebarWidth() {
 
   const onMouseDown = useCallback(() => {
     dragging.current = true;
+    setIsDragging(true);
     document.body.style.userSelect = "none";
     document.body.style.cursor = "col-resize";
     const onMove = (e: MouseEvent) => {
@@ -137,6 +139,7 @@ function useSidebarWidth() {
     };
     const onUp = () => {
       dragging.current = false;
+      setIsDragging(false);
       document.body.style.userSelect = "";
       document.body.style.cursor = "";
       try {
@@ -151,7 +154,7 @@ function useSidebarWidth() {
     window.addEventListener("mouseup", onUp);
   }, []);
 
-  return { width, onMouseDown };
+  return { width, onMouseDown, isDragging };
 }
 
 export function Sidebar() {
@@ -159,7 +162,7 @@ export function Sidebar() {
   const router = useRouter();
   const reset = useChatStore((s) => s.reset);
   const { data: conversations, isLoading } = useConversations();
-  const { width, onMouseDown } = useSidebarWidth();
+  const { width, onMouseDown, isDragging } = useSidebarWidth();
 
   const startNew = () => {
     reset();
@@ -177,19 +180,35 @@ export function Sidebar() {
   const rest = (conversations ?? []).filter((c) => !c.pinned);
 
   return (
-    <aside
-      style={{ width }}
-      className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-card"
-    >
-      {/* drag handle to resize */}
-      <div
-        onMouseDown={onMouseDown}
-        className="group absolute right-0 top-0 z-30 h-full w-1.5 cursor-col-resize"
-        aria-label="Resize sidebar"
-        role="separator"
+    <>
+      {/* dims + blurs the app behind the sidebar while it's being resized */}
+      {isDragging && (
+        <div
+          className="fixed inset-0 z-20 bg-background/60 backdrop-blur-[2px]"
+          aria-hidden
+        />
+      )}
+      <aside
+        style={{ width }}
+        className={cn(
+          "relative z-30 flex shrink-0 flex-col overflow-hidden border-r border-border bg-card",
+          isDragging && "shadow-2xl",
+        )}
       >
-        <div className="ml-auto h-full w-px bg-transparent transition-colors group-hover:bg-brand/50" />
-      </div>
+        {/* drag handle to resize */}
+        <div
+          onMouseDown={onMouseDown}
+          className="group absolute right-0 top-0 z-30 h-full w-1.5 cursor-col-resize"
+          aria-label="Resize sidebar"
+          role="separator"
+        >
+          <div
+            className={cn(
+              "ml-auto h-full w-px transition-colors group-hover:bg-brand/50",
+              isDragging ? "bg-brand" : "bg-transparent",
+            )}
+          />
+        </div>
 
       <div className="space-y-2 p-3">
         <Link href="/" className="flex px-1">
@@ -298,6 +317,7 @@ export function Sidebar() {
           </div>
         </Show>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
