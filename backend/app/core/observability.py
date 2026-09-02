@@ -42,3 +42,21 @@ def configure_tracing() -> None:
         project=settings.LANGSMITH_PROJECT,
         endpoint=settings.LANGSMITH_ENDPOINT,
     )
+
+
+def send_run_feedback(run_id: str, score: float, comment: str | None = None) -> bool:
+    """Best-effort — record a 👍/👎 against a traced run. No-op (and never raises)
+    if LangSmith isn't configured or the client isn't importable."""
+    if not run_id or not settings.langsmith_enabled:
+        return False
+    try:
+        from langsmith import Client
+
+        Client().create_feedback(
+            run_id, key="user_thumbs", score=score, comment=comment
+        )
+        logger.info("message_feedback_langsmith", run_id=run_id, score=score)
+        return True
+    except Exception:  # noqa: BLE001 — telemetry must never break the request
+        logger.warning("message_feedback_langsmith_failed", run_id=run_id, exc_info=True)
+        return False

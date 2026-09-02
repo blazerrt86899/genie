@@ -42,6 +42,7 @@ export default async function SharedChatPage({
       kind: a.kind,
     })),
     sources: m.sources ?? [],
+    createdAt: m.created_at,
   }));
 
   return (

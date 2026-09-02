@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -139,6 +139,90 @@ async def create_turn(
     return run_id, str(conversation.id)
 
 
+async def regenerate_turn(
+    db: AsyncSession,
+    redis: Redis,
+    user: User,
+    conversation_id: str,
+    from_message_id: str,
+    edit: str | None = None,
+) -> tuple[str, str]:
+    """Truncate the conversation at ``from_message_id`` and re-run from there.
+
+    - target is an **assistant** message → regenerate it (drop it + everything
+      after; keep the user message before it).
+    - target is a **user** message → retry it (drop everything after); if ``edit``
+      is given, replace its text first.
+
+    Resets the LangGraph thread; ``_generate`` replays the surviving history.
+    """
+    try:
+        cid = uuid.UUID(conversation_id)
+        target_id = uuid.UUID(from_message_id)
+    except ValueError as exc:
+        raise ValueError("not found") from exc
+
+    conv_repo = ConversationRepository(db)
+    conversation = await conv_repo.get_for_user(cid, user.id)
+    if conversation is None:
+        raise ValueError("conversation not found")
+
+    msg_repo = MessageRepository(db)
+    rows = await msg_repo.list_for_conversation(cid)
+    idx = next((i for i, m in enumerate(rows) if m.id == target_id), None)
+    if idx is None:
+        raise ValueError("message not found")
+    target = rows[idx]
+
+    if target.role == "assistant":
+        anchor = next(
+            (rows[j] for j in range(idx - 1, -1, -1) if rows[j].role == "user"), None
+        )
+        if anchor is None:
+            raise ValueError("nothing to regenerate — no preceding user message")
+    else:
+        anchor = target
+        if edit is not None:
+            new_text = edit.strip()
+            if not new_text:
+                raise ValueError("edited message must not be empty")
+            await msg_repo.set_content(anchor.id, user.id, new_text)
+            anchor.content = new_text
+
+    deleted = await msg_repo.delete_after(cid, anchor.created_at, inclusive=False)
+
+    try:
+        await get_runtime_graph().checkpointer.adelete_thread(conversation_id)
+    except Exception:  # noqa: BLE001 — orphan checkpoint rows are harmless
+        logger.warning("checkpointer_thread_delete_failed", conversation_id=conversation_id)
+
+    await conv_repo.touch(cid)
+
+    run_id = str(uuid.uuid4())
+    await redis.setex(
+        _run_key(run_id),
+        _RUN_TTL_SECONDS,
+        json.dumps(
+            {
+                "conversation_id": conversation_id,
+                "mode": "regenerate",
+                "message": anchor.content,
+                "client_hour": None,
+                "attachment_ids": [],
+            }
+        ),
+    )
+    logger.info(
+        "chat_regenerate_accepted",
+        run_id=run_id,
+        conversation_id=conversation_id,
+        target_role=target.role,
+        edited=bool(edit),
+        deleted=deleted,
+    )
+    return run_id, conversation_id
+
+
 async def _generate(
     db: AsyncSession,
     redis: Redis,
@@ -158,6 +242,7 @@ async def _generate(
     message: str = payload["message"]
     client_hour = payload.get("client_hour")
     attachment_ids: list[str] = payload.get("attachment_ids") or []
+    mode: str | None = payload.get("mode")  # None (normal turn) | "regenerate"
 
     if payload["conversation_id"] != conversation_id:
         logger.warning(
@@ -214,10 +299,26 @@ async def _generate(
             total_chars=sum(a.char_count for a in atts),
         )
 
+    # A regenerate/retry/edit reset the checkpointer thread — replay the surviving
+    # history (from the messages table, the display source of truth) as the seed.
+    if mode == "regenerate":
+        rows = await MessageRepository(db).list_for_conversation(conversation.id)
+        seed_messages = [
+            HumanMessage(content=r.content)
+            if r.role == "user"
+            else AIMessage(content=r.content)
+            for r in rows
+        ]
+        if not seed_messages:
+            seed_messages = [HumanMessage(content=message)]
+        logger.info("chat_regenerate_seed", run_id=run_id, history_messages=len(seed_messages))
+    else:
+        seed_messages = [HumanMessage(content=message)]
+
     graph = get_runtime_graph()
     config = {"configurable": {"thread_id": conversation_id}}
     state = {
-        "messages": [HumanMessage(content=message)],
+        "messages": seed_messages,
         "user_id": str(user.id),
         "conversation_id": conversation_id,
         "project_instructions": project_instructions,

@@ -50,6 +50,7 @@ class MessageOut(BaseModel):
     agents: list[str] = []  # which agents produced this message (assistant only)
     attachments: list[dict] = []  # files sent with this message (user only)
     sources: list[dict] = []  # [{title, url}] cited by this message (assistant only)
+    feedback: str | None = None  # "up" | "down" — the user's 👍/👎 on an assistant message
 
 
 class ConversationPatch(BaseModel):
@@ -145,6 +146,7 @@ async def get_conversation(
                 agents=list((m.message_metadata or {}).get("agents", [])),
                 attachments=list((m.message_metadata or {}).get("attachments", [])),
                 sources=list((m.message_metadata or {}).get("sources", [])),
+                feedback=(m.message_metadata or {}).get("feedback"),
             )
             for m in messages
         ],

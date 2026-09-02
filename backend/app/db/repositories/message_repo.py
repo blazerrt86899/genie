@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 
 from app.core.logging import preview
 from app.db.models.message import Message
@@ -49,6 +49,70 @@ class MessageRepository(BaseRepository[Message]):
             metadata_keys=sorted((metadata or {}).keys()) or None,
         )
         return saved
+
+    async def get_for_user(
+        self, message_id: uuid.UUID, user_id: uuid.UUID
+    ) -> Message | None:
+        result = await self.db.execute(
+            select(Message).where(
+                Message.id == message_id, Message.user_id == user_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_after(
+        self, conversation_id: uuid.UUID, after: datetime, *, inclusive: bool = False
+    ) -> int:
+        """Delete every message in the conversation created at/after ``after``.
+
+        Used by regenerate / retry / edit to truncate the tail before replaying.
+        """
+        col = Message.created_at
+        cond = col >= after if inclusive else col > after
+        result = await self.db.execute(
+            delete(Message).where(Message.conversation_id == conversation_id, cond)
+        )
+        await self.db.commit()
+        count = getattr(result, "rowcount", 0) or 0
+        logger.info(
+            "messages_truncated",
+            conversation_id=str(conversation_id),
+            deleted=count,
+            inclusive=inclusive,
+        )
+        return count
+
+    async def set_content(
+        self, message_id: uuid.UUID, user_id: uuid.UUID, content: str
+    ) -> None:
+        await self.db.execute(
+            update(Message)
+            .where(Message.id == message_id, Message.user_id == user_id)
+            .values(content=content)
+        )
+        await self.db.commit()
+        logger.info("message_edited", message_id=str(message_id), chars=len(content))
+
+    async def set_feedback(
+        self, message_id: uuid.UUID, user_id: uuid.UUID, vote: str | None
+    ) -> Message | None:
+        msg = await self.get_for_user(message_id, user_id)
+        if msg is None:
+            return None
+        meta = dict(msg.message_metadata or {})
+        if vote:
+            meta["feedback"] = vote
+        else:
+            meta.pop("feedback", None)
+        await self.db.execute(
+            update(Message)
+            .where(Message.id == message_id, Message.user_id == user_id)
+            .values(message_metadata=meta)
+        )
+        await self.db.commit()
+        logger.info("message_feedback_set", message_id=str(message_id), vote=vote)
+        msg.message_metadata = meta
+        return msg
 
     async def list_for_conversation(
         self, conversation_id: uuid.UUID, limit: int = 200

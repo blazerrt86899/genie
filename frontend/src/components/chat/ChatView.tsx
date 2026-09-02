@@ -93,10 +93,8 @@ function Composer({
 
 export function ChatView({ conversationId }: { conversationId?: string }) {
   const projectParam = useSearchParams().get("project");
-  const { messages, send, isStreaming, project } = useChat(
-    conversationId,
-    projectParam,
-  );
+  const { messages, send, regenerate, voteMessage, isStreaming, project } =
+    useChat(conversationId, projectParam);
   const { data: projects } = useProjects();
   const { user } = useUser();
   const userName =
@@ -212,6 +210,11 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 message={m}
                 userName={userName}
                 activeAgents={activeAgents}
+                isStreaming={isStreaming}
+                onRegenerate={regenerate}
+                onRetry={regenerate}
+                onEdit={regenerate}
+                onVote={voteMessage}
               />
             ))}
             {pendingAgents.length > 0 && <AgentActivity agents={pendingAgents} />}

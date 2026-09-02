@@ -4,11 +4,35 @@ import { useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { useQueryClient } from "@tanstack/react-query";
-import { chatStreamUrl, getConversation, postChat } from "@/lib/api";
+import {
+  chatStreamUrl,
+  getConversation,
+  postChat,
+  regenerateChat,
+  sendMessageFeedback,
+} from "@/lib/api";
 import { parseSseStream } from "@/lib/sse";
-import { useChatStore } from "@/store/chatStore";
+import { useChatStore, type ChatMessage } from "@/store/chatStore";
+import type { ConversationMessage } from "@/lib/api";
 
 const CONVERSATIONS_KEY = ["conversations"] as const;
+
+/** API messages → store messages (used on load and after a stream completes). */
+function mapMessages(rows: ConversationMessage[]): ChatMessage[] {
+  return rows.map((m) => ({
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    agents: m.agents ?? [],
+    attachments: (m.attachments ?? []).map((a) => ({
+      filename: a.filename,
+      kind: a.kind,
+    })),
+    sources: m.sources ?? [],
+    createdAt: m.created_at,
+    feedback: m.feedback ?? null,
+  }));
+}
 
 /**
  * Drives one chat view. The route is the source of truth:
@@ -54,19 +78,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         s.setModel(conv.model);
         // the GET marked it read server-side — refresh the sidebar's bullet
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
-        s.setMessages(
-          conv.messages.map((m) => ({
-            id: m.id,
-            role: m.role,
-            content: m.content,
-            agents: m.agents ?? [],
-            attachments: (m.attachments ?? []).map((a) => ({
-              filename: a.filename,
-              kind: a.kind,
-            })),
-            sources: m.sources ?? [],
-          })),
-        );
+        s.setMessages(mapMessages(conv.messages));
       } catch {
         if (!cancelled) router.replace("/chat");
       }
@@ -75,6 +87,75 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       cancelled = true;
     };
   }, [conversationId, getToken, router]);
+
+  /** Open the SSE stream for a run and fold every frame into the store.
+   *  `firstId` is the pending assistant message tokens start flowing into. */
+  const consumeStream = useCallback(
+    async (cid: string, runId: string, firstId: string) => {
+      const s = useChatStore.getState();
+      const token = await getToken();
+      let currentId = firstId;
+
+      const res = await fetch(chatStreamUrl(cid, runId), {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok || !res.body) throw new Error(`stream failed (${res.status})`);
+
+      await parseSseStream(res.body, (event) => {
+        if (event.type === "token") {
+          s.appendToken(currentId, event.content);
+        } else if (event.type === "message_break") {
+          s.setMessagePending(currentId, false);
+          currentId = crypto.randomUUID();
+          s.addMessage({
+            id: currentId,
+            role: "assistant",
+            content: "",
+            pending: true,
+          });
+        } else if (event.type === "message_agents") {
+          s.setMessageAgents(currentId, event.agents);
+        } else if (event.type === "sources") {
+          s.setMessageSources(currentId, event.items);
+        } else if (event.type === "plan") {
+          s.setPlan(event.steps);
+        } else if (event.type === "agent_start") {
+          s.agentStarted(event.agent);
+        } else if (event.type === "agent_end") {
+          s.agentEnded(event.agent);
+        } else if (
+          event.type === "task_created" ||
+          event.type === "task_updated" ||
+          event.type === "tasks_archived"
+        ) {
+          qc.invalidateQueries({ queryKey: ["tasks"] });
+        } else if (event.type === "error") {
+          s.appendToken(currentId, `\n\n⚠️ ${event.message}`);
+        } else if (event.type === "title") {
+          s.setConversationTitle(event.title);
+          qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+        }
+      });
+
+      s.setMessagePending(currentId, false);
+    },
+    [getToken, qc],
+  );
+
+  /** Replace the optimistic (client-id) messages with the persisted rows, so
+   *  the action bar gets real ids + dates and a follow-up regenerate works. */
+  const refreshMessages = useCallback(async () => {
+    const cid = useChatStore.getState().conversationId;
+    if (!cid) return;
+    try {
+      const conv = await getConversation(cid, await getToken());
+      if (useChatStore.getState().conversationId === cid) {
+        useChatStore.getState().setMessages(mapMessages(conv.messages));
+      }
+    } catch {
+      /* keep the optimistic view */
+    }
+  }, [getToken]);
 
   const send = useCallback(
     async (text: string) => {
@@ -89,10 +170,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         content: message,
         attachments: ready.map((a) => ({ filename: a.filename, kind: a.kind })),
       });
-      // One turn can produce several assistant messages (e.g. greeting, then the
-      // answer); `currentId` points at the one tokens currently flow into.
-      let currentId = crypto.randomUUID();
-      s.addMessage({ id: currentId, role: "assistant", content: "", pending: true });
+      const pendingId = crypto.randomUUID();
+      s.addMessage({ id: pendingId, role: "assistant", content: "", pending: true });
       s.setActiveAgents([]);
       s.setPlan([]);
       s.clearPendingAttachments();
@@ -117,65 +196,85 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         if (!existingCid) {
           qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
           const newProj = pendingProjectId ?? projectId;
-          if (newProj) {
-            qc.invalidateQueries({ queryKey: ["project", newProj] });
-          }
+          if (newProj) qc.invalidateQueries({ queryKey: ["project", newProj] });
           router.replace(`/chat/${conversation_id}`);
         }
-
-        const res = await fetch(chatStreamUrl(conversation_id, run_id), {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (!res.ok || !res.body) throw new Error(`stream failed (${res.status})`);
-
-        await parseSseStream(res.body, (event) => {
-          if (event.type === "token") {
-            s.appendToken(currentId, event.content);
-          } else if (event.type === "message_break") {
-            s.setMessagePending(currentId, false);
-            currentId = crypto.randomUUID();
-            s.addMessage({
-              id: currentId,
-              role: "assistant",
-              content: "",
-              pending: true,
-            });
-          } else if (event.type === "message_agents") {
-            s.setMessageAgents(currentId, event.agents);
-          } else if (event.type === "sources") {
-            s.setMessageSources(currentId, event.items);
-          } else if (event.type === "plan") {
-            s.setPlan(event.steps);
-          } else if (event.type === "agent_start") {
-            s.agentStarted(event.agent);
-          } else if (event.type === "agent_end") {
-            s.agentEnded(event.agent);
-          } else if (
-            event.type === "task_created" ||
-            event.type === "task_updated" ||
-            event.type === "tasks_archived"
-          ) {
-            qc.invalidateQueries({ queryKey: ["tasks"] });
-          } else if (event.type === "error") {
-            s.appendToken(currentId, `\n\n⚠️ ${event.message}`);
-          } else if (event.type === "title") {
-            s.setConversationTitle(event.title);
-            qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
-          }
-        });
+        await consumeStream(conversation_id, run_id, pendingId);
+        void refreshMessages();
       } catch (err) {
         s.appendToken(
-          currentId,
+          pendingId,
           `\n\n⚠️ ${err instanceof Error ? err.message : "Something went wrong"}`,
         );
+        s.setMessagePending(pendingId, false);
       } finally {
-        s.setMessagePending(currentId, false);
         s.setRunId(null);
         s.setActiveAgents([]);
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
       }
     },
-    [getToken, router, qc, projectId],
+    [getToken, router, qc, projectId, consumeStream, refreshMessages],
+  );
+
+  /** Regenerate a Genie reply, or retry / edit one of the user's messages.
+   *  Everything after the target is discarded and the turn re-runs. */
+  const regenerate = useCallback(
+    async (fromMessageId: string, edit?: string) => {
+      const s = useChatStore.getState();
+      if (s.runId) return;
+      const cid = s.conversationId;
+      const target = s.messages.find((m) => m.id === fromMessageId);
+      if (!cid || !target) return;
+
+      if (target.role === "assistant") {
+        s.truncateAfter(fromMessageId, { inclusive: true });
+      } else {
+        if (edit != null) s.updateMessageContent(fromMessageId, edit.trim());
+        s.truncateAfter(fromMessageId);
+      }
+      const pendingId = crypto.randomUUID();
+      s.addMessage({ id: pendingId, role: "assistant", content: "", pending: true });
+      s.setActiveAgents([]);
+      s.setPlan([]);
+
+      try {
+        const { run_id } = await regenerateChat(
+          cid,
+          fromMessageId,
+          edit != null ? edit.trim() : null,
+          await getToken(),
+        );
+        s.setRunId(run_id);
+        await consumeStream(cid, run_id, pendingId);
+        void refreshMessages();
+      } catch (err) {
+        s.appendToken(
+          pendingId,
+          `\n\n⚠️ ${err instanceof Error ? err.message : "Something went wrong"}`,
+        );
+        s.setMessagePending(pendingId, false);
+      } finally {
+        s.setRunId(null);
+        s.setActiveAgents([]);
+        qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+      }
+    },
+    [getToken, qc, consumeStream, refreshMessages],
+  );
+
+  const voteMessage = useCallback(
+    async (messageId: string, vote: "up" | "down") => {
+      const s = useChatStore.getState();
+      const cur = s.messages.find((m) => m.id === messageId)?.feedback ?? null;
+      const next = cur === vote ? null : vote;
+      s.setMessageFeedback(messageId, next);
+      try {
+        await sendMessageFeedback(messageId, next, await getToken());
+      } catch {
+        s.setMessageFeedback(messageId, cur); // revert
+      }
+    },
+    [getToken],
   );
 
   return {
@@ -184,5 +283,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
     project: store.project,
     title: store.conversationTitle,
     send,
+    regenerate,
+    voteMessage,
   };
 }

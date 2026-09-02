@@ -74,6 +74,34 @@ async def create_chat_run(
     return ChatAccepted(run_id=run_id, conversation_id=conversation_id)
 
 
+class RegenerateRequest(BaseModel):
+    from_message_id: str
+    edit: str | None = None  # present → replace the (user) target's text first
+
+
+@router.post("/{conversation_id}/regenerate", response_model=ChatAccepted)
+async def regenerate_chat_run(
+    conversation_id: str,
+    body: RegenerateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> ChatAccepted:
+    """Truncate the conversation at ``from_message_id`` and re-run from there —
+    regenerate a Genie reply, or retry/edit one of the user's messages."""
+    if not await short_term.check_rate_limit(
+        redis, str(user.id), settings.RATE_LIMIT_REQUESTS_PER_MINUTE
+    ):
+        raise HTTPException(status_code=429, detail="rate limit")
+    try:
+        run_id, cid = await chat_service.regenerate_turn(
+            db, redis, user, conversation_id, body.from_message_id, body.edit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatAccepted(run_id=run_id, conversation_id=cid)
+
+
 @router.get("/{conversation_id}/stream")
 async def stream_chat(
     conversation_id: str,

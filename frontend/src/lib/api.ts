@@ -91,6 +91,32 @@ export function postChat(
   });
 }
 
+/** Truncate a conversation at a message and re-run — regenerate a Genie reply,
+ *  or retry / edit one of the user's messages (pass `edit`). */
+export function regenerateChat(
+  conversationId: string,
+  fromMessageId: string,
+  edit: string | null,
+  token?: string | null,
+): Promise<ChatAccepted> {
+  return apiFetch<ChatAccepted>(`/api/v1/chat/${conversationId}/regenerate`, {
+    method: "POST",
+    token,
+    body: JSON.stringify({ from_message_id: fromMessageId, edit }),
+  });
+}
+
+export function sendMessageFeedback(
+  messageId: string,
+  vote: "up" | "down" | null,
+  token?: string | null,
+): Promise<{ vote: string | null }> {
+  return apiFetch<{ vote: string | null }>(
+    `/api/v1/messages/${messageId}/feedback`,
+    { method: "POST", token, body: JSON.stringify({ vote }) },
+  );
+}
+
 // ─── Attachments (composer "+" menu) ───────────────────────────────────────
 
 export interface AttachmentDto {
@@ -165,6 +191,7 @@ export interface ConversationMessage {
   agents?: string[];
   attachments?: MessageAttachment[];
   sources?: MessageSource[];
+  feedback?: "up" | "down" | null;
 }
 
 export interface ConversationSummary {

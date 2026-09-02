@@ -189,8 +189,9 @@ genie/
 │       │   └── endpoints/
 │       │       ├── webhooks.py        ← POST /webhooks/clerk (user.created/updated/deleted)
 │       │       ├── users.py           ← GET /users/me (resolve Clerk token → internal user)
-│       │       ├── chat.py            ← /chat (POST), /chat/{id}/stream (GET SSE)
+│       │       ├── chat.py            ← /chat (POST), /chat/{id}/stream (GET SSE), /chat/{id}/regenerate (POST — retry/edit/regenerate)
 │       │       ├── conversations.py   ← /conversations list · GET · PATCH · DELETE · {id}/share (GET/POST/DELETE)
+│       │       ├── messages.py        ← POST /messages/{id}/feedback — 👍/👎 (metadata + best-effort LangSmith)
 │       │       ├── public.py          ← GET /public/shared/{token} — unauthenticated read-only shared chat
 │       │       ├── models.py          ← GET /models (the composer's model-picker catalog)
 │       │       ├── attachments.py     ← POST/DELETE /attachments (composer "+" file uploads)
@@ -324,7 +325,8 @@ genie/
 │       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu + Share button; scroll-shadow when scrolled
 │       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
 │       │   │   ├── ShareChatModal.tsx ← Keep private ↔ Create public link + copy — POST/DELETE /conversations/{id}/share
-│       │   │   ├── Message.tsx        ← user = subtle box (plain text) · Genie = borderless, rendered as rich Markdown
+│       │   │   ├── Message.tsx        ← user = subtle box (plain text) + inline edit · Genie = borderless rich Markdown; + MessageActions row
+│       │   │   ├── MessageActions.tsx ← per-message row: Copy · 👍/👎 · Regenerate (assistant) / Retry · Edit (user) · date
 │       │   │   ├── Markdown.tsx       ← react-markdown + remark-gfm + rehype-highlight; token-styled headings/tables/lists/quotes
 │       │   │   ├── CodeBlock.tsx      ← fenced-code chrome: language label + Copy button over the hljs-tokenised <pre>
 │       │   │   ├── DocumentCard.tsx   ← ```document fence → boxed draft (email/letter/application/memo…): kind header · Subject row · Copy
@@ -1157,6 +1159,15 @@ findings only — it NEVER repeats a streamed segment (told "a greeting was alre
 sent separately — don't greet again"). Lone greeting / all-streamed ⇒ no LLM
 call. Empty plan ⇒ it answers the user directly.
 
+**Regenerate / retry / edit** (`chat_service.regenerate_turn`, `POST /chat/{id}/regenerate`)
+truncate the conversation at a message and re-run: pick the anchor user message
+(the one before an assistant target, or the target itself for a user message —
+optionally with `edit` replacing its text), `messages.delete_after(anchor)`,
+`checkpointer.adelete_thread(cid)`, stash a `mode="regenerate"` run. `_generate`
+then seeds `state["messages"]` by replaying the surviving `messages` rows
+(Human/AI) instead of `[HumanMessage(new)]` — the just-reset thread starts empty
+so there's no double-merge.
+
 **The synthesiser is also Genie's response drafter.** `RESPONSE_FORMAT_GUIDE`
 (`agents/supervisor/prompts.py`) is appended to both user-facing prompts
 (`SYNTHESISER_SYSTEM_PROMPT`, `CHAT_SYSTEM_PROMPT`) — it tells the model to pick
@@ -1340,7 +1351,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 
 ### L2 — Supabase PostgreSQL (permanent)
-- `messages` — full conversation history
+- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments` and **`feedback`** (`"up"`|`"down"` — the user's 👍/👎, no migration). Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`), **`share_token`** (unique; NULL = private) + **`shared_at`** (frozen message cutoff for the public view). Migrations `f6703a0bb868`, `f041f866790f`, `c3d9e1f4a7b2`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
 - `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
@@ -1382,7 +1393,9 @@ GET    /api/v1/users/me                → {id, email, full_name, avatar_url, to
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
 POST   /api/v1/chat                    → {run_id, conversation_id}  (body: message, conversation_id?, project_id?, model?, attachment_ids?, client_hour?)
 GET    /api/v1/chat/{conv_id}/stream   → SSE stream  (query param: run_id)
+POST   /api/v1/chat/{conv_id}/regenerate → {run_id, conversation_id}  (body: from_message_id, edit?) — truncate at that message + re-run; then GET …/stream
 POST   /api/v1/chat/{conv_id}/confirm  → resume after calendar write interrupt
+POST   /api/v1/messages/{message_id}/feedback → {vote}  (body: {vote: "up"|"down"|null}) — 👍/👎 on an assistant reply; stored in messages.metadata + best-effort LangSmith run feedback
 
 # ── Models (Clerk JWT required) ──────────────────────────────────────────────
 GET    /api/v1/models                  → {models:[{id,label,provider,hint}], default}  — the composer picker; only providers with a key
@@ -1393,7 +1406,7 @@ DELETE /api/v1/attachments/{id}        → 204
 
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model,pinned,unread}], pinned first then newest-activity
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model + `share`{token,url,shared_at}|null; **clears `unread`**
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources` + `feedback`) + project{id,name} + model + `share`{token,url,shared_at}|null; **clears `unread`**
 PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null, pinned?: bool, unread?: bool}  (only fields present are touched)
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 GET    /api/v1/conversations/{id}/share  → {token,url,shared_at} | null   (owner — current public-link state)
@@ -1767,6 +1780,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
+_Also 2026-09-02 — **message actions (regenerate / retry / edit · 👍👎 · copy · date)**: `POST /chat/{id}/regenerate` (`{from_message_id, edit?}`) → `chat_service.regenerate_turn` picks the anchor user message (before an assistant target, or the target itself; `edit` replaces its text via `message_repo.set_content`), `message_repo.delete_after(anchor.created_at)`, `checkpointer.adelete_thread(cid)`, stashes a `mode="regenerate"` Redis run; `_generate` replays the surviving `messages` rows as `state["messages"]` (thread just reset → no double-merge), then streams + persists as normal. New `endpoints/messages.py` → `POST /messages/{id}/feedback {vote}` → `message_repo.set_feedback` (into `messages.metadata.feedback`, no migration) + best-effort `observability.send_run_feedback` (LangSmith `user_thumbs` on `metadata.langsmith_run_id`). `MessageOut.feedback` added. Frontend: `MessageActions.tsx` (always-visible subtle row — Copy · 👍👎 · Regenerate on replies; date · Retry · Edit · Copy on user messages), `Message.tsx` inline-edit textarea (⌘/Ctrl+Enter to submit) + `"use client"`; `useChat` gains `regenerate` / `voteMessage` / a shared `consumeStream` + `refreshMessages` (swaps optimistic ids for persisted rows so a follow-up regenerate works). `chatStore` `ChatMessage` += `createdAt` / `feedback`; `truncateAfter` / `updateMessageContent` / `setMessageFeedback`. Public `/share` page shows the date only (no buttons). Verified: 148 backend tests, ruff + build/lint clean._
+
 _Also 2026-09-02 — **business-document draft card**: `DOCUMENT_BLOCK_GUIDE` (`agents/supervisor/prompts.py`, appended to both user-facing prompts) tells the drafter to emit a ```` ```document ```` fence — `key: value` metadata (`kind:` from email|letter|application|cover-letter|memo|proposal|message|agenda|note; `subject:` / `to:` for mail), a `---`, then the Markdown body — whenever the user asks it to WRITE a business communication (not for code / "how to write" advice / outlines). Frontend `components/chat/DocumentCard.tsx`: `Markdown.tsx`'s `pre` handler routes a `language-document` block (rehype-highlight `plainText: ["document"]` keeps the class, no tokenising) to a boxed card — kind icon + label header, `Subject:` / `To:` row, **Copy** button (`Subject: …\n\n` + body for mail), body via a nested `<Markdown>`. Streaming-safe (before `---` arrives the whole block is the body). Single draft for now — A/B/C variant tabs + Gmail/mailto send deferred. Verified: SSR smoke test (class kept, no `hljs` spans), 140 backend tests, build/lint clean._
 
 _Also 2026-09-02 — **rich response rendering + synthesiser-as-drafter**: `RESPONSE_FORMAT_GUIDE` (`agents/supervisor/prompts.py`) appended to `SYNTHESISER_SYSTEM_PROMPT` + `CHAT_SYSTEM_PROMPT` — one spec telling the model to choose the lightest structure and use GFM (styled headings only when long, pipe tables, fenced code with an explicit language tag for every code/query/config/command, inline code, blockquote caveats, `[1]` citations, no "Sources" list). No separate formatting pass — still one streamed synthesiser call. Frontend: `components/chat/Markdown.tsx` (`react-markdown` v9 + `remark-gfm` + `rehype-highlight`) + `CodeBlock.tsx` (language label + Copy button over the hljs-tokenised `<pre>`); `Message.tsx` renders Genie replies through it (user messages stay plain text). `globals.css` gains `--code-*` / `--hl-*` vars + `.hljs-*` rules so code themes follow light/dark with no JS. Deliberately **no `rehype-raw`** (no raw-HTML → zero XSS surface); `javascript:` links render inert. `/chat` bundle +~93 KB. KaTeX + Mermaid deferred. Verified: SSR smoke test (table + `hljs language-sql` spans + blockquote), 140 backend tests, ruff + frontend build/lint clean._
@@ -1874,6 +1889,8 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
 | Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
 | Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |
+| Regenerate / retry / edit a turn | `chat_service.regenerate_turn` (`adelete_thread` + replay `messages` rows) · `POST /chat/{id}/regenerate` · frontend `useChat.regenerate` + `MessageActions` |
+| Message 👍/👎 | `message_repo.set_feedback` (→ `messages.metadata.feedback`) + `core/observability.send_run_feedback` (LangSmith) · `POST /messages/{id}/feedback` |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
@@ -1949,6 +1966,9 @@ able to reconstruct a request from the logs alone.
   `db_get_by_id` / `*_listed` at debug. Each repo logs its mutations
   (`conversation_created`, `message_persisted`, `project_updated`, `user_*`).
   `db/session.py`: engine init (URL scrubbed), `db_session_rollback`.
+- **Message actions** — `chat_service`: `chat_regenerate_accepted`,
+  `chat_regenerate_seed`; `message_repo`: `messages_truncated`, `message_edited`,
+  `message_feedback_set`; `core/observability`: `message_feedback_langsmith`.
 - **Chat share** — `conversation_repo`: `conversation_shared` / `conversation_unshared`
   (only `token_prefix`, never the full capability token); `endpoints/conversations.py`:
   `conversation_share_enabled` / `_disabled`, `share_token_collision`;

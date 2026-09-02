@@ -1,9 +1,13 @@
+"use client";
+
+import { useState } from "react";
 import { CheckSquare, FileText, Globe, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
 import { SourceCards } from "./SourceCards";
 import { Markdown } from "./Markdown";
+import { MessageActions } from "./MessageActions";
 
 function initials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -70,12 +74,36 @@ export function Message({
   message,
   userName = "You",
   activeAgents = [],
+  isStreaming = false,
+  onRegenerate,
+  onRetry,
+  onEdit,
+  onVote,
 }: {
   message: ChatMessage;
   userName?: string;
   activeAgents?: string[];
+  isStreaming?: boolean;
+  onRegenerate?: (id: string) => void;
+  onRetry?: (id: string) => void;
+  onEdit?: (id: string, text: string) => void;
+  onVote?: (id: string, vote: "up" | "down") => void;
 }) {
   const isUser = message.role === "user";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
+
+  const interactive = !!(onRegenerate || onRetry || onEdit || onVote);
+  // Show the row for its actions, or (read-only, e.g. the public /share page)
+  // just to carry the date.
+  const showActions =
+    !message.pending && !editing && (interactive || !!message.createdAt);
+
+  function commitEdit() {
+    const next = draft.trim();
+    setEditing(false);
+    if (next && next !== message.content) onEdit?.(message.id, next);
+  }
 
   // Genie's messages blend into the page (no bubble, Claude-style); the user's
   // sit in a subtle right-aligned box.
@@ -106,9 +134,41 @@ export function Message({
       )}
 
       {isUser ? (
-        <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-muted px-3.5 py-2.5 text-[15px] leading-relaxed text-foreground">
-          {message.content}
-        </div>
+        editing ? (
+          <div className="w-full max-w-[80%]">
+            <textarea
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) commitEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              rows={Math.min(8, draft.split("\n").length + 1)}
+              className="w-full resize-none rounded-2xl border border-input bg-background px-3.5 py-2.5 text-[15px] leading-relaxed outline-none focus:ring-2 focus:ring-ring"
+            />
+            <div className="mt-1.5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditing(false)}
+                className="rounded-md px-2.5 py-1 text-xs text-muted-foreground hover:bg-accent"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={commitEdit}
+                className="rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-brand-foreground hover:opacity-90"
+              >
+                Save &amp; submit
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl rounded-tr-sm bg-muted px-3.5 py-2.5 text-[15px] leading-relaxed text-foreground">
+            {message.content}
+          </div>
+        )
       ) : (
         <div className="w-full leading-relaxed text-foreground">
           {message.content ? (
@@ -124,6 +184,29 @@ export function Message({
 
       {!isUser && message.sources && message.sources.length > 0 && (
         <SourceCards sources={message.sources} />
+      )}
+
+      {showActions && (
+        <MessageActions
+          message={message}
+          isStreaming={isStreaming}
+          onCopy={() => navigator.clipboard.writeText(message.content).catch(() => {})}
+          onRegenerate={
+            !isUser && onRegenerate ? () => onRegenerate(message.id) : undefined
+          }
+          onRetry={isUser && onRetry ? () => onRetry(message.id) : undefined}
+          onEdit={
+            isUser && onEdit
+              ? () => {
+                  setDraft(message.content);
+                  setEditing(true);
+                }
+              : undefined
+          }
+          onVote={
+            !isUser && onVote ? (v) => onVote(message.id, v) : undefined
+          }
+        />
       )}
     </div>
   );

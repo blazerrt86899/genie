@@ -9,6 +9,8 @@ export interface ChatMessage {
   agents?: string[]; // agents that produced this assistant message
   attachments?: { filename: string; kind: string }[]; // files sent with a user message
   sources?: { title: string; url: string }[]; // link cards under an assistant message
+  createdAt?: string; // ISO — absent on optimistic (not-yet-persisted) messages
+  feedback?: "up" | "down" | null; // the user's 👍/👎 on an assistant message
 }
 
 export interface ProjectRef {
@@ -51,6 +53,9 @@ interface ChatState {
   setMessagePending: (id: string, pending: boolean) => void;
   setMessageAgents: (id: string, agents: string[]) => void;
   setMessageSources: (id: string, sources: { title: string; url: string }[]) => void;
+  setMessageFeedback: (id: string, feedback: "up" | "down" | null) => void;
+  updateMessageContent: (id: string, content: string) => void;
+  truncateAfter: (id: string, opts?: { inclusive?: boolean }) => void;
   setActiveAgents: (agents: string[]) => void;
   agentStarted: (agent: string) => void;
   agentEnded: (agent: string) => void;
@@ -116,6 +121,20 @@ export const useChatStore = create<ChatState>((set) => ({
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, sources } : m)),
     })),
+  setMessageFeedback: (id, feedback) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, feedback } : m)),
+    })),
+  updateMessageContent: (id, content) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, content } : m)),
+    })),
+  truncateAfter: (id, opts) =>
+    set((s) => {
+      const i = s.messages.findIndex((m) => m.id === id);
+      if (i === -1) return {};
+      return { messages: s.messages.slice(0, opts?.inclusive ? i : i + 1) };
+    }),
   setActiveAgents: (agents) => set({ activeAgents: agents }),
   agentStarted: (agent) =>
     set((s) => ({
