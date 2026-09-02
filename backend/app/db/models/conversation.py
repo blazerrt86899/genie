@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Index, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base, TimestampMixin
@@ -36,6 +36,10 @@ class Conversation(Base, TimestampMixin):
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Picked chat-model id (MODEL_CATALOG). NULL → the server default.
     model: Mapped[str | None] = mapped_column(String(40))
+    # Sidebar: pinned chats sort to a section at the top; `unread` is a manual
+    # flag (set from the ⋯ menu) that clears when the chat is opened.
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    unread: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     user: Mapped[User] = relationship(back_populates="conversations")
     project: Mapped[Project | None] = relationship(back_populates="conversations")

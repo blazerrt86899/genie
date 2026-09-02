@@ -42,7 +42,12 @@ export function usePatchConversation() {
       body,
     }: {
       id: string;
-      body: { title?: string; project_id?: string | null };
+      body: {
+        title?: string;
+        project_id?: string | null;
+        pinned?: boolean;
+        unread?: boolean;
+      };
     }) => patchConversation(id, body, await getToken()),
     onSuccess: (_data, { body }) => {
       qc.invalidateQueries({ queryKey: KEY });

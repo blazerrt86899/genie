@@ -31,6 +31,9 @@ interface ChatState {
   conversationId: string | null;
   conversationTitle: string | null;
   setConversationTitle: (title: string | null) => void;
+  conversationPinned: boolean;
+  conversationUnread: boolean;
+  setConversationFlags: (f: { pinned?: boolean; unread?: boolean }) => void;
   project: ProjectRef | null;
   model: string | null; // picked chat-model id; null → server default
   setModel: (model: string | null) => void;
@@ -65,6 +68,13 @@ export const useChatStore = create<ChatState>((set) => ({
   conversationId: null,
   conversationTitle: null,
   setConversationTitle: (conversationTitle) => set({ conversationTitle }),
+  conversationPinned: false,
+  conversationUnread: false,
+  setConversationFlags: (f) =>
+    set((s) => ({
+      conversationPinned: f.pinned ?? s.conversationPinned,
+      conversationUnread: f.unread ?? s.conversationUnread,
+    })),
   project: null,
   model: null,
   setModel: (model) => set({ model }),
@@ -126,6 +136,8 @@ export const useChatStore = create<ChatState>((set) => ({
       runId: null,
       conversationId: null,
       conversationTitle: null,
+      conversationPinned: false,
+      conversationUnread: false,
       project: null,
       pendingAttachments: [],
       pendingProjectId: null,

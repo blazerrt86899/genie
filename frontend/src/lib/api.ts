@@ -174,6 +174,8 @@ export interface ConversationSummary {
   last_message_at: string | null;
   project_id: string | null;
   model: string | null;
+  pinned: boolean;
+  unread: boolean;
 }
 
 export interface ConversationDetail extends ConversationSummary {
@@ -206,7 +208,12 @@ export function deleteConversation(
 
 export function patchConversation(
   id: string,
-  body: { project_id?: string | null; title?: string },
+  body: {
+    project_id?: string | null;
+    title?: string;
+    pinned?: boolean;
+    unread?: boolean;
+  },
   token?: string | null,
 ): Promise<ConversationSummary> {
   return apiFetch<ConversationSummary>(`/api/v1/conversations/${id}`, {

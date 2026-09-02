@@ -35,6 +35,8 @@ class ConversationSummary(BaseModel):
     last_message_at: datetime | None
     project_id: str | None
     model: str | None  # picked chat-model id (MODEL_CATALOG); None → server default
+    pinned: bool = False
+    unread: bool = False
 
 
 class MessageOut(BaseModel):
@@ -50,6 +52,8 @@ class MessageOut(BaseModel):
 class ConversationPatch(BaseModel):
     project_id: str | None = None  # move into a project, or null to detach
     title: str | None = None  # rename
+    pinned: bool | None = None  # pin / unpin
+    unread: bool | None = None  # mark as unread / read
 
 
 class ConversationDetail(ConversationSummary):
@@ -65,6 +69,8 @@ def conversation_summary(c) -> ConversationSummary:
         last_message_at=c.last_message_at,
         project_id=str(c.project_id) if c.project_id else None,
         model=c.model,
+        pinned=bool(getattr(c, "pinned", False)),
+        unread=bool(getattr(c, "unread", False)),
     )
 
 
@@ -88,10 +94,15 @@ async def get_conversation(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="conversation not found") from exc
 
-    conv = await ConversationRepository(db).get_for_user(cid, user.id)
+    conv_repo = ConversationRepository(db)
+    conv = await conv_repo.get_for_user(cid, user.id)
     if conv is None:
         logger.info("conversation_get_404", conversation_id=conversation_id, user_id=str(user.id))
         raise HTTPException(status_code=404, detail="conversation not found")
+
+    if conv.unread:  # opening a chat marks it read
+        await conv_repo.mark_read(cid, user.id)
+        conv.unread = False
 
     project_ref: ProjectRef | None = None
     if conv.project_id is not None:
@@ -125,8 +136,9 @@ async def patch_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ConversationSummary:
-    """Rename (``title``), and/or move into a project (``project_id``, null = detach).
-    Only the fields present in the body are touched."""
+    """Rename (``title``), pin/unpin (``pinned``), mark read/unread (``unread``),
+    and/or move into a project (``project_id``, null = detach). Only the fields
+    present in the body are touched."""
     try:
         cid = uuid.UUID(conversation_id)
     except ValueError as exc:
@@ -142,6 +154,10 @@ async def patch_conversation(
         title = (fields["title"] or "").strip()
         if title:
             await conv_repo.set_title(cid, user.id, title[:255])
+
+    flags = {k: bool(fields[k]) for k in ("pinned", "unread") if k in fields}
+    if flags:
+        await conv_repo.set_flag(cid, user.id, **flags)
 
     if "project_id" in fields:
         pid: uuid.UUID | None = None

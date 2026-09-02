@@ -95,7 +95,7 @@ async def test_delete_bad_uuid_is_404(client):
 @pytest.fixture
 def patch_client(monkeypatch):
     conv = SimpleNamespace(
-        id=uuid.uuid4(), title="X", project_id=None, model=None,
+        id=uuid.uuid4(), title="X", project_id=None, model=None, pinned=False, unread=False,
         created_at=_NOW, last_message_at=_NOW,
     )
     proj_id = uuid.uuid4()
@@ -111,6 +111,10 @@ def patch_client(monkeypatch):
 
         async def set_title(self, cid, uid, t):
             conv.title = t
+
+        async def set_flag(self, cid, uid, **v):
+            for k, val in v.items():
+                setattr(conv, k, val)
 
     class FakeProjectRepo:
         def __init__(self, _db): ...
@@ -179,3 +183,12 @@ async def test_patch_renames_without_touching_project(patch_client):
     assert resp.status_code == 200
     assert resp.json()["title"] == "My renamed chat"
     assert conv.project_id is not None  # project_id absent from body → untouched
+
+
+async def test_patch_pin_and_unread(patch_client):
+    client, conv, _ = patch_client
+    async with client as c:
+        r1 = await c.patch(f"/api/v1/conversations/{conv.id}", json={"pinned": True})
+        r2 = await c.patch(f"/api/v1/conversations/{conv.id}", json={"unread": True})
+    assert r1.json()["pinned"] is True
+    assert r2.json()["unread"] is True and conv.pinned is True  # pin unaffected

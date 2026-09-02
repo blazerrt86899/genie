@@ -309,7 +309,7 @@ genie/
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
-│       │   ├── Sidebar.tsx            ← New chat · Projects · Tasks · chat list · account · drag-to-resize (localStorage width)
+│       │   ├── Sidebar.tsx            ← New chat · Projects · Tasks · Pinned + Chats lists (read/unread bullet, per-row ConversationMenu) · account · drag-to-resize
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
 │       │   │   └── knowledge-base/    ← KnowledgeBasePanel · DocumentUpload · DocumentList · PipelineModal · ChunkViewer · RagSettingsForm
@@ -318,7 +318,8 @@ genie/
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
 │       │   │   ├── ChatView.tsx       ← ChatHeader + PlanStrip + message list + composer
-│       │   │   ├── ChatHeader.tsx     ← sticky top bar: title + ▾ menu (Rename · Add to project · Delete)
+│       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu (ConversationMenu)
+│       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
 │       │   │   ├── Message.tsx        ← user = subtle box · Genie = borderless, blends into the page
 │       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards under a message
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
@@ -335,7 +336,7 @@ genie/
 │       │
 │       ├── hooks/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
-│       │   ├── useConversations.ts    ← TanStack Query list + delete mutation (sidebar)
+│       │   ├── useConversations.ts    ← TanStack Query list + patch (title/project/pinned/unread) + delete mutations
 │       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
 │       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
@@ -1313,7 +1314,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
-- `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default). Migration `f6703a0bb868`.
+- `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`). Migrations `f6703a0bb868`, `f041f866790f`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
 - `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
 - `documents` — a project Knowledge-Base source (`kind`, `s3_key`, `status`, `phase`, `stats`, `processed_at`). Migration `883a87726339`.
@@ -1364,9 +1365,9 @@ POST   /api/v1/attachments             → 201 {id,filename,kind,char_count,toke
 DELETE /api/v1/attachments/{id}        → 204
 
 # ── Conversations ─────────────────────────────────────────────────────────────
-GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model}], newest-activity first
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model
-PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null}  rename and/or move into a project (only fields present are touched)
+GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model,pinned,unread}], pinned first then newest-activity
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model; **clears `unread`** (opening a chat marks it read)
+PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null, pinned?: bool, unread?: bool}  (only fields present are touched)
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
 
 # ── Projects ─────────────────────────────────────────────────────────────────
@@ -1732,6 +1733,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
+_Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `conversations.unread` Boolean columns (migration `f041f866790f`). `conversation_repo.list_for_user` orders `pinned DESC, last_message_at DESC NULLS LAST`; new `set_flag(**bools)` + `mark_read()`. `GET /conversations/{id}` clears `unread` on open; `PATCH /conversations/{id}` accepts `pinned?` / `unread?`. `ConversationSummary` carries both. Frontend: `ChatHeader` refactored onto the new shared **`ConversationMenu`** (⋯ dropdown — Pin/Unpin · Mark read/unread · Rename · Add-to-project submenu · Delete) with a pin glyph on the title trigger; `Sidebar` splits the list into a **Pinned** section then **Chats**, each row showing a read/unread bullet (filled `bg-brand` = unread) and the same `ConversationMenu` on hover + inline rename. `useChat` marks a chat read locally on open and invalidates the sidebar list._
+
 | Phase | Status | Completion |
 |-------|--------|-----------|
 | Phase 0 — Scaffold | 🟢 Complete | 100% |
@@ -1766,7 +1769,7 @@ _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`*
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
-- ✅ **Conversations**: `GET /conversations` (recency-ordered via `conversations.last_message_at`, bumped every message), `PATCH /conversations/{id}` (`project_id` → move into / detach from a project), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
+- ✅ **Conversations**: `GET /conversations` (pinned first, then recency via `conversations.last_message_at`, bumped every message), `GET /conversations/{id}` (clears `unread`), `PATCH /conversations/{id}` (`title` / `project_id` move-or-detach / `pinned` / `unread` — only fields present are touched), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
 - ✅ **Attachments** (`attachment_service` + `attachment_repo` + `endpoints/attachments.py` + `models/attachment.py`, migration `0b4ae74dbb70`) — `parse_upload` (pure: extension → text; `pypdf` PDF, utf-8 txt/md; 5 MB cap; `AttachmentError` → 422). `create_turn` accepts `attachment_ids`, links rows to the user message, stashes them in the Redis run payload; `_generate` loads the text into `GenieState['attachments']`. `nodes._attachment_note` / `_format_attachments` (§9). One-shot per turn.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ `rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), SQS workers, per-user token quotas

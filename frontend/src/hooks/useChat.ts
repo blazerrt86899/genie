@@ -49,8 +49,11 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         if (cancelled) return;
         s.setConversationId(conv.id);
         s.setConversationTitle(conv.title);
+        s.setConversationFlags({ pinned: conv.pinned, unread: false });
         s.setProject(conv.project);
         s.setModel(conv.model);
+        // the GET marked it read server-side — refresh the sidebar's bullet
+        qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
         s.setMessages(
           conv.messages.map((m) => ({
             id: m.id,

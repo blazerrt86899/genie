@@ -51,6 +51,7 @@ class ConversationRepository(BaseRepository[Conversation]):
             select(Conversation)
             .where(Conversation.user_id == user_id)
             .order_by(
+                Conversation.pinned.desc(),  # pinned first (own section in the sidebar)
                 Conversation.last_message_at.desc().nulls_last(),
                 Conversation.created_at.desc(),
             )
@@ -110,6 +111,30 @@ class ConversationRepository(BaseRepository[Conversation]):
         logger.info(
             "conversation_model_set", conversation_id=str(conversation_id), model=model
         )
+
+    async def set_flag(
+        self, conversation_id: uuid.UUID, user_id: uuid.UUID, **values: bool
+    ) -> None:
+        """Set ``pinned`` / ``unread`` booleans."""
+        await self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+            .values(**values)
+        )
+        await self.db.commit()
+        logger.info("conversation_flag_set", conversation_id=str(conversation_id), **values)
+
+    async def mark_read(self, conversation_id: uuid.UUID, user_id: uuid.UUID) -> None:
+        await self.db.execute(
+            update(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                Conversation.user_id == user_id,
+                Conversation.unread.is_(True),
+            )
+            .values(unread=False)
+        )
+        await self.db.commit()
 
     async def set_project(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID, project_id: uuid.UUID | None
