@@ -92,7 +92,7 @@ export function ConversationMenu({
       {open && (
         <div
           className={cn(
-            "absolute top-full z-40 mt-1 w-52 rounded-lg border border-border bg-card p-1 shadow-lg",
+            "absolute top-full z-50 mt-1 w-52 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-xl ring-1 ring-black/5",
             align === "right" ? "right-0" : "left-0",
           )}
           onClick={(e) => e.stopPropagation()}
@@ -139,7 +139,7 @@ export function ConversationMenu({
               />
             </button>
             {projOpen && (
-              <ul className="mt-1 max-h-56 overflow-y-auto rounded-md border border-border bg-background p-1">
+              <ul className="mt-1 max-h-56 overflow-y-auto rounded-md border border-border bg-popover p-1 shadow-lg">
                 {conversation.projectId && (
                   <li>
                     <button
