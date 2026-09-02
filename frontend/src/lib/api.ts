@@ -178,9 +178,16 @@ export interface ConversationSummary {
   unread: boolean;
 }
 
+export interface ShareInfo {
+  token: string;
+  url: string;
+  shared_at: string;
+}
+
 export interface ConversationDetail extends ConversationSummary {
   project: { id: string; name: string } | null;
   messages: ConversationMessage[];
+  share: ShareInfo | null;
 }
 
 export function getConversation(
@@ -188,6 +195,52 @@ export function getConversation(
   token?: string | null,
 ): Promise<ConversationDetail> {
   return apiFetch<ConversationDetail>(`/api/v1/conversations/${id}`, { token });
+}
+
+export function getConversationShare(
+  id: string,
+  token?: string | null,
+): Promise<ShareInfo | null> {
+  return apiFetch<ShareInfo | null>(`/api/v1/conversations/${id}/share`, {
+    token,
+  });
+}
+
+export function shareConversation(
+  id: string,
+  token?: string | null,
+): Promise<ShareInfo> {
+  return apiFetch<ShareInfo>(`/api/v1/conversations/${id}/share`, {
+    method: "POST",
+    token,
+  });
+}
+
+export function unshareConversation(
+  id: string,
+  token?: string | null,
+): Promise<void> {
+  return apiFetch<void>(`/api/v1/conversations/${id}/share`, {
+    method: "DELETE",
+    token,
+  });
+}
+
+// ─── Public (unauthenticated) shared-chat view ─────────────────────────────
+
+export interface SharedConversation {
+  title: string | null;
+  shared_at: string;
+  message_count: number;
+  messages: ConversationMessage[];
+}
+
+export function getSharedConversation(
+  shareToken: string,
+): Promise<SharedConversation> {
+  return apiFetch<SharedConversation>(
+    `/api/v1/public/shared/${encodeURIComponent(shareToken)}`,
+  );
 }
 
 export function listConversations(

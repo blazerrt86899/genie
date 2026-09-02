@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import secrets
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.clerk import get_current_user
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
@@ -56,9 +59,27 @@ class ConversationPatch(BaseModel):
     unread: bool | None = None  # mark as unread / read
 
 
+class ShareInfo(BaseModel):
+    token: str
+    url: str  # absolute — {FRONTEND_BASE_URL}/share/{token}
+    shared_at: datetime
+
+
 class ConversationDetail(ConversationSummary):
     project: ProjectRef | None
     messages: list[MessageOut]
+    share: ShareInfo | None = None
+
+
+def _share_info(c) -> ShareInfo | None:
+    token = getattr(c, "share_token", None)
+    if not token or getattr(c, "shared_at", None) is None:
+        return None
+    return ShareInfo(
+        token=token,
+        url=f"{settings.FRONTEND_BASE_URL.rstrip('/')}/share/{token}",
+        shared_at=c.shared_at,
+    )
 
 
 def conversation_summary(c) -> ConversationSummary:
@@ -114,6 +135,7 @@ async def get_conversation(
     return ConversationDetail(
         **conversation_summary(conv).model_dump(),
         project=project_ref,
+        share=_share_info(conv),
         messages=[
             MessageOut(
                 id=str(m.id),
@@ -172,6 +194,74 @@ async def patch_conversation(
 
     updated = await conv_repo.get_for_user(cid, user.id)
     return conversation_summary(updated)
+
+
+async def _owned_conversation(conversation_id: str, user: User, db: AsyncSession):
+    try:
+        cid = uuid.UUID(conversation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found") from exc
+    conv = await ConversationRepository(db).get_for_user(cid, user.id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return cid, conv
+
+
+@router.get("/{conversation_id}/share", response_model=ShareInfo | None)
+async def get_conversation_share(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ShareInfo | None:
+    _, conv = await _owned_conversation(conversation_id, user, db)
+    return _share_info(conv)
+
+
+@router.post("/{conversation_id}/share", response_model=ShareInfo)
+async def enable_conversation_share(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ShareInfo:
+    """Create the public link, or return the existing one unchanged (stable URL).
+    The message cutoff (`shared_at`) is frozen at first share — disable then
+    re-enable to rotate the token and move the cutoff forward."""
+    cid, conv = await _owned_conversation(conversation_id, user, db)
+    existing = _share_info(conv)
+    if existing is not None:
+        return existing
+
+    repo = ConversationRepository(db)
+    now = datetime.now(UTC)
+    for _ in range(3):
+        token = secrets.token_urlsafe(16)  # 22 chars, 128-bit
+        try:
+            await repo.set_share(cid, user.id, token, now)
+            break
+        except IntegrityError:  # token collision — vanishingly rare
+            await db.rollback()
+            logger.warning("share_token_collision", conversation_id=conversation_id)
+    else:
+        raise HTTPException(status_code=500, detail="could not allocate a share link")
+
+    logger.info("conversation_share_enabled", conversation_id=conversation_id)
+    return ShareInfo(
+        token=token,
+        url=f"{settings.FRONTEND_BASE_URL.rstrip('/')}/share/{token}",
+        shared_at=now,
+    )
+
+
+@router.delete("/{conversation_id}/share", status_code=204)
+async def disable_conversation_share(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    cid, _ = await _owned_conversation(conversation_id, user, db)
+    await ConversationRepository(db).clear_share(cid, user.id)
+    logger.info("conversation_share_disabled", conversation_id=conversation_id)
+    return Response(status_code=204)
 
 
 @router.delete("/{conversation_id}", status_code=204)

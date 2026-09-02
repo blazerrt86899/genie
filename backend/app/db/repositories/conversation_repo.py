@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -135,6 +136,43 @@ class ConversationRepository(BaseRepository[Conversation]):
             .values(unread=False)
         )
         await self.db.commit()
+
+    async def get_by_share_token(self, token: str) -> Conversation | None:
+        """Public path — no user filter. The 128-bit token is the capability."""
+        result = await self.db.execute(
+            select(Conversation).where(Conversation.share_token == token)
+        )
+        return result.scalar_one_or_none()
+
+    async def set_share(
+        self,
+        conversation_id: uuid.UUID,
+        user_id: uuid.UUID,
+        token: str,
+        shared_at: datetime,
+    ) -> None:
+        await self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+            .values(share_token=token, shared_at=shared_at)
+        )
+        await self.db.commit()
+        logger.info(
+            "conversation_shared",
+            conversation_id=str(conversation_id),
+            token_prefix=token[:6],
+        )
+
+    async def clear_share(
+        self, conversation_id: uuid.UUID, user_id: uuid.UUID
+    ) -> None:
+        await self.db.execute(
+            update(Conversation)
+            .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+            .values(share_token=None, shared_at=None)
+        )
+        await self.db.commit()
+        logger.info("conversation_unshared", conversation_id=str(conversation_id))
 
     async def set_project(
         self, conversation_id: uuid.UUID, user_id: uuid.UUID, project_id: uuid.UUID | None

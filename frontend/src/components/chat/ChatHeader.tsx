@@ -3,15 +3,23 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ChevronDown, FolderKanban, Pin } from "lucide-react";
+import { ChevronDown, FolderKanban, Pin, Share } from "lucide-react";
 import {
   ConversationMenu,
   type ConversationMenuTarget,
 } from "./ConversationMenu";
+import { ShareChatModal } from "./ShareChatModal";
 import { usePatchConversation } from "@/hooks/useConversations";
 import { useChatStore } from "@/store/chatStore";
+import { cn } from "@/lib/utils";
 
-export function ChatHeader({ conversationId }: { conversationId: string }) {
+export function ChatHeader({
+  conversationId,
+  elevated = false,
+}: {
+  conversationId: string;
+  elevated?: boolean;
+}) {
   const router = useRouter();
   const title = useChatStore((s) => s.conversationTitle);
   const project = useChatStore((s) => s.project);
@@ -25,6 +33,7 @@ export function ChatHeader({ conversationId }: { conversationId: string }) {
 
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
+  const [shareOpen, setShareOpen] = useState(false);
 
   const label = title || "New chat";
   const target: ConversationMenuTarget = {
@@ -45,7 +54,14 @@ export function ChatHeader({ conversationId }: { conversationId: string }) {
   }
 
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-border bg-background px-4 py-2 sm:px-6">
+    <div
+      className={cn(
+        "z-10 flex items-center justify-between gap-3 border-b bg-background px-4 py-2 transition-shadow sm:px-6",
+        elevated
+          ? "border-transparent shadow-[0_6px_16px_-10px_rgba(0,0,0,0.5)]"
+          : "border-border",
+      )}
+    >
       <div className="flex min-w-0 items-center gap-2">
         {renaming ? (
           <input
@@ -99,6 +115,21 @@ export function ChatHeader({ conversationId }: { conversationId: string }) {
           </Link>
         )}
       </div>
+
+      <button
+        type="button"
+        onClick={() => setShareOpen(true)}
+        className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <Share className="h-3.5 w-3.5" />
+        Share
+      </button>
+
+      <ShareChatModal
+        conversationId={conversationId}
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+      />
     </div>
   );
 }

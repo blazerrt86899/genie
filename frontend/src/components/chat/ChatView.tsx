@@ -8,6 +8,8 @@ import { FolderKanban, SendHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/hooks/useChat";
 import { useProjects } from "@/hooks/useProjects";
+import { useScrollShadow } from "@/hooks/useScrollShadow";
+import { cn } from "@/lib/utils";
 import { useChatStore } from "@/store/chatStore";
 import { Message } from "./Message";
 import { AgentActivity } from "./AgentActivity";
@@ -105,6 +107,12 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const storedConversationId = useChatStore((s) => s.conversationId);
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
+  const {
+    ref: scrollRef,
+    onScroll,
+    atTop,
+    atBottom,
+  } = useScrollShadow<HTMLDivElement>();
 
   const uploading = pendingAttachments.some((a) => a.status === "uploading");
 
@@ -142,7 +150,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      {!isEmpty && cid && <ChatHeader conversationId={cid} />}
+      {!isEmpty && cid && (
+        <ChatHeader conversationId={cid} elevated={!atTop} />
+      )}
 
       {/* Fresh chat in a project (no header yet) still shows the project chip */}
       {isEmpty && activeProject && (
@@ -191,7 +201,11 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
         </div>
       ) : (
         <>
-          <div className="flex flex-1 flex-col gap-8 overflow-y-auto p-4 py-6 sm:px-6">
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            className="flex flex-1 flex-col gap-8 overflow-y-auto p-4 py-6 sm:px-6"
+          >
             {messages.map((m) => (
               <Message
                 key={m.id}
@@ -204,7 +218,14 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
             <div ref={endRef} />
           </div>
 
-          <div className="border-t border-border">
+          <div
+            className={cn(
+              "border-t transition-shadow",
+              atBottom
+                ? "border-border"
+                : "border-transparent shadow-[0_-6px_16px_-10px_rgba(0,0,0,0.5)]",
+            )}
+          >
             <div className="p-3 sm:px-6">
               <Composer
                 input={input}

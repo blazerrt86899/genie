@@ -189,7 +189,8 @@ genie/
 │       │       ├── webhooks.py        ← POST /webhooks/clerk (user.created/updated/deleted)
 │       │       ├── users.py           ← GET /users/me (resolve Clerk token → internal user)
 │       │       ├── chat.py            ← /chat (POST), /chat/{id}/stream (GET SSE)
-│       │       ├── conversations.py   ← /conversations list · GET · PATCH (move to project) · DELETE
+│       │       ├── conversations.py   ← /conversations list · GET · PATCH · DELETE · {id}/share (GET/POST/DELETE)
+│       │       ├── public.py          ← GET /public/shared/{token} — unauthenticated read-only shared chat
 │       │       ├── models.py          ← GET /models (the composer's model-picker catalog)
 │       │       ├── attachments.py     ← POST/DELETE /attachments (composer "+" file uploads)
 │       │       ├── tasks.py           ← /tasks CRUD
@@ -302,6 +303,7 @@ genie/
 │       │   ├── sign-in/[[...sign-in]]/page.tsx   ← Clerk hosted <SignIn />
 │       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp forceRedirectUrl="/welcome">
 │       │   ├── welcome/page.tsx         ← post-sign-up: poll GET /users/me → /chat (§7.8)
+│       │   ├── share/[token]/           ← public read-only shared chat (page.tsx + not-found.tsx) — outside (app), no auth
 │       │   └── (app)/
 │       │       ├── layout.tsx         ← auth() gate (redirect to /sign-in) + Sidebar
 │       │       ├── chat/page.tsx      ← new chat  ·  chat/[id]/page.tsx ← a conversation
@@ -318,10 +320,11 @@ genie/
 │       │   │                              VoiceComingSoon, CtaBand, Footer, Container, Wordmark
 │       │   ├── chat/
 │       │   │   ├── ChatView.tsx       ← ChatHeader + PlanStrip + message list + composer
-│       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu (ConversationMenu)
+│       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu + Share button; scroll-shadow when scrolled
 │       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
+│       │   │   ├── ShareChatModal.tsx ← Keep private ↔ Create public link + copy — POST/DELETE /conversations/{id}/share
 │       │   │   ├── Message.tsx        ← user = subtle box · Genie = borderless, blends into the page
-│       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards under a message
+│       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards (http(s)-only href on the public page)
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
 │       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
@@ -341,6 +344,8 @@ genie/
 │       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
 │       │   ├── useDocuments.ts        ← KB list (polls while ingesting) + upload/delete + useDocumentPipeline (SSE)
+│       │   ├── useShareConversation.ts← share state query + enable/disable mutations (["share", id])
+│       │   ├── useScrollShadow.ts     ← {atTop, atBottom} for a scroll container → sticky-header/footer shadow
 │       │   └── useTasks.ts            ← tasks list + patch/archive-done/delete (TanStack Query)
 │       │
 │       ├── providers/
@@ -382,6 +387,7 @@ genie/
 
 # App
 APP_ENV=development          # development | staging | production
+FRONTEND_BASE_URL=http://localhost:3000   # absolute base for public share URLs ({base}/share/{token}); no trailing slash
 
 # ─── Clerk Auth (backend) ────────────────────────────────────────────────────
 # Get from Clerk Dashboard → API Keys
@@ -1314,7 +1320,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 ### L2 — Supabase PostgreSQL (permanent)
 - `messages` — full conversation history
-- `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`). Migrations `f6703a0bb868`, `f041f866790f`.
+- `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`), **`share_token`** (unique; NULL = private) + **`shared_at`** (frozen message cutoff for the public view). Migrations `f6703a0bb868`, `f041f866790f`, `c3d9e1f4a7b2`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
 - `attachments` — a file the user attached to one message (`kind` pdf/txt/md; `content` = extracted text). Conversation-scoped, one-shot turn context — **distinct** from `documents`. Migration `0b4ae74dbb70`.
 - `documents` — a project Knowledge-Base source (`kind`, `s3_key`, `status`, `phase`, `stats`, `processed_at`). Migration `883a87726339`.
@@ -1366,9 +1372,15 @@ DELETE /api/v1/attachments/{id}        → 204
 
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model,pinned,unread}], pinned first then newest-activity
-GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model; **clears `unread`** (opening a chat marks it read)
+GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources`) + project{id,name} + model + `share`{token,url,shared_at}|null; **clears `unread`**
 PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null, pinned?: bool, unread?: bool}  (only fields present are touched)
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
+GET    /api/v1/conversations/{id}/share  → {token,url,shared_at} | null   (owner — current public-link state)
+POST   /api/v1/conversations/{id}/share  → {token,url,shared_at}   (enable; idempotent — same token; `shared_at` frozen at first share)
+DELETE /api/v1/conversations/{id}/share  → 204   (disable — the link 404s; re-enabling mints a NEW token)
+
+# ── Public (NO auth — IP rate-limited, noindex) ──────────────────────────────
+GET    /api/v1/public/shared/{token}   → {title, shared_at, message_count, messages[]}  — only messages ≤ `shared_at`; whitelisted fields only (no user_id/email/project/model); 404 if unknown/revoked; 429 on abuse
 
 # ── Projects ─────────────────────────────────────────────────────────────────
 POST   /api/v1/projects                → 201 {id,name,description,instructions,...}
@@ -1631,7 +1643,7 @@ tests/  (≈90 tests, all green)
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project)
+    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project) · test_sharing.py
     ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
     ├── test_models_endpoint.py · test_attachments.py · test_documents.py
 ```
@@ -1733,6 +1745,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
+_Also 2026-09-02 — **chat share (public view link) + chat-scroll shadow**: `conversations.share_token` (unique) + `shared_at` (migration `c3d9e1f4a7b2`). Owner routes `GET/POST/DELETE /conversations/{id}/share` (`conversation_repo.set_share` / `clear_share` / `get_by_share_token`; token = `secrets.token_urlsafe(16)`, 128-bit; POST idempotent — returns the existing token; `shared_at` frozen at first share, re-enabling mints a new token). New **unauthenticated** `endpoints/public.py` → `GET /api/v1/public/shared/{token}`: IP-rate-limited (reuses `check_rate_limit`), `Cache-Control: public, max-age=60` + `X-Robots-Tag: noindex`, returns only messages with `created_at <= shared_at` and a **whitelist** (`title`, `role`, `content`, `agents`, `sources`, attachment `filename`/`kind`) — never `user_id` / email / project / model. Frontend: `ShareChatModal` (Keep private ↔ Create public link + Copy link) from the new **Share** button in `ChatHeader`; `useShareConversation` (`["share", id]` query + enable/disable). Public page `app/share/[token]/page.tsx` (+ `not-found.tsx`) — server component, outside `(app)`, `robots: noindex`, reuses `<Message>`; `SourceCards` now only renders an `<a>` for `http(s)` URLs. `FRONTEND_BASE_URL` setting builds the absolute share URL. Chat-scroll shadow: `useScrollShadow` → `ChatHeader` gets a bottom shadow when `!atTop`, the composer a top shadow when `!atBottom`. (Sidebar-resize scrim + modal backdrop-blur were offered and deferred.) Verified: 139 backend tests, ruff + frontend build/lint clean._
+
 _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `conversations.unread` Boolean columns (migration `f041f866790f`). `conversation_repo.list_for_user` orders `pinned DESC, last_message_at DESC NULLS LAST`; new `set_flag(**bools)` + `mark_read()`. `GET /conversations/{id}` clears `unread` on open; `PATCH /conversations/{id}` accepts `pinned?` / `unread?`. `ConversationSummary` carries both. Frontend: `ChatHeader` refactored onto the new shared **`ConversationMenu`** (⋯ dropdown — Pin/Unpin · Mark read/unread · Rename · Add-to-project submenu · Delete) with a pin glyph on the title trigger; `Sidebar` splits the list into a **Pinned** section then **Chats**, each row showing a read/unread bullet (filled `bg-brand` = unread) and the same `ConversationMenu` on hover + inline rename. `useChat` marks a chat read locally on open and invalidates the sidebar list._
 
 | Phase | Status | Completion |
@@ -1769,7 +1783,7 @@ _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `c
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
-- ✅ **Conversations**: `GET /conversations` (pinned first, then recency via `conversations.last_message_at`, bumped every message), `GET /conversations/{id}` (clears `unread`), `PATCH /conversations/{id}` (`title` / `project_id` move-or-detach / `pinned` / `unread` — only fields present are touched), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
+- ✅ **Conversations**: `GET /conversations` (pinned first, then recency via `conversations.last_message_at`, bumped every message), `GET /conversations/{id}` (clears `unread`; carries `share`), `PATCH /conversations/{id}` (`title` / `project_id` move-or-detach / `pinned` / `unread` — only fields present are touched), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`), **`{id}/share` GET/POST/DELETE** (public-link control — `conversation_repo.set_share` / `clear_share`, token `secrets.token_urlsafe(16)`, `shared_at` frozen at first share). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
 - ✅ **Attachments** (`attachment_service` + `attachment_repo` + `endpoints/attachments.py` + `models/attachment.py`, migration `0b4ae74dbb70`) — `parse_upload` (pure: extension → text; `pypdf` PDF, utf-8 txt/md; 5 MB cap; `AttachmentError` → 422). `create_turn` accepts `attachment_ids`, links rows to the user message, stashes them in the Redis run payload; `_generate` loads the text into `GenieState['attachments']`. `nodes._attachment_note` / `_format_attachments` (§9). One-shot per turn.
 - ✅ **Projects** (`models/project.py`, `project_repo.py`, `endpoints/projects.py`) — Claude-style: full CRUD; `conversations.project_id` (`ON DELETE CASCADE`); `POST /chat` takes `project_id` (new chats inherit it); `_generate` loads `project.instructions` fresh each turn → `GenieState.project_instructions` → the supervisor + synthesiser respect them. Chats stay isolated (thread = conversation_id). Knowledge docs = later.
 - ⬜ `rag`/`calendar` agents, parallel fan-out, cross-conversation memory (Phase 6 — §15), SQS workers, per-user token quotas
@@ -1830,6 +1844,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Add a new API endpoint | `api/v1/endpoints/{resource}.py` + register in `api/v1/router.py` |
 | Add DB table | New SQLAlchemy model in `db/models/` + Alembic migration + repository |
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
+| Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
 | Update memory consolidation | `workers/memory_consolidation.py` + `memory/long_term.py` |
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
@@ -1905,6 +1920,10 @@ able to reconstruct a request from the logs alone.
   `db_get_by_id` / `*_listed` at debug. Each repo logs its mutations
   (`conversation_created`, `message_persisted`, `project_updated`, `user_*`).
   `db/session.py`: engine init (URL scrubbed), `db_session_rollback`.
+- **Chat share** — `conversation_repo`: `conversation_shared` / `conversation_unshared`
+  (only `token_prefix`, never the full capability token); `endpoints/conversations.py`:
+  `conversation_share_enabled` / `_disabled`, `share_token_collision`;
+  `endpoints/public.py`: `shared_view_served` (`token_prefix`, `message_count`, `ip`).
 - **Startup** — `main.py`: `startup_begin` (which integrations are configured),
   `agent_registry_loaded`, `redis_connected`, `database_connected`,
   `checkpointer_ready`, `startup_complete`; `configure_tracing()` logs LangSmith

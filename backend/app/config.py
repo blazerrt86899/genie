@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     CORS_ALLOW_ORIGINS: str = "http://localhost:3000"
+    # Absolute base of the Next.js app — used to build public share URLs
+    # (`{FRONTEND_BASE_URL}/share/{token}`). No trailing slash.
+    FRONTEND_BASE_URL: str = "http://localhost:3000"
 
     # ─── Clerk ──────────────────────────────────────────────────────────────
     CLERK_SECRET_KEY: str | None = None

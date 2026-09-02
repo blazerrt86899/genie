@@ -40,6 +40,11 @@ class Conversation(Base, TimestampMixin):
     # flag (set from the ⋯ menu) that clears when the chat is opened.
     pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     unread: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Public share link. NULL token = not shared. `shared_at` is the frozen
+    # message cutoff — the public view shows only messages created at or before
+    # it (toggling the link off then on rotates the token and moves the cutoff).
+    share_token: Mapped[str | None] = mapped_column(String(24), unique=True)
+    shared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user: Mapped[User] = relationship(back_populates="conversations")
     project: Mapped[Project | None] = relationship(back_populates="conversations")

@@ -8,6 +8,9 @@ function host(url: string) {
   }
 }
 
+// These render on the public shared-chat page — only follow real web links.
+const safe = (url: string) => /^https?:\/\//i.test(url);
+
 export function SourceCards({
   sources,
 }: {
@@ -21,28 +24,44 @@ export function SourceCards({
         Sources
       </p>
       <div className="flex flex-col gap-1.5">
-        {sources.map((s, i) => (
-          <a
-            key={i}
-            href={s.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="group flex items-start gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm transition-colors hover:border-brand/40 hover:bg-accent"
-          >
-            <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded bg-muted text-[10px] font-medium text-muted-foreground">
-              {i + 1}
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate font-medium text-foreground">
-                {s.title}
+        {sources.map((s, i) => {
+          const clickable = safe(s.url);
+          const inner = (
+            <>
+              <span className="mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded bg-muted text-[10px] font-medium text-muted-foreground">
+                {i + 1}
               </span>
-              <span className="block truncate text-xs text-muted-foreground">
-                {host(s.url)}
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium text-foreground">
+                  {s.title}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {host(s.url)}
+                </span>
               </span>
-            </span>
-            <ArrowUpRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/50 group-hover:text-brand" />
-          </a>
-        ))}
+              {clickable && (
+                <ArrowUpRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/50 group-hover:text-brand" />
+              )}
+            </>
+          );
+          const className =
+            "group flex items-start gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm transition-colors hover:border-brand/40 hover:bg-accent";
+          return clickable ? (
+            <a
+              key={i}
+              href={s.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={className}
+            >
+              {inner}
+            </a>
+          ) : (
+            <div key={i} className={className}>
+              {inner}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
