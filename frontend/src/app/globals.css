@@ -15,75 +15,78 @@
   :root {
     color-scheme: light;
 
-    --background: 0 0% 100%;
-    --foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 47%;
+    /* Nebula palette — violet brand + a luminous cyan companion */
+    --background: 225 40% 99%;
+    --foreground: 226 40% 12%;
+    --muted: 225 32% 95%;
+    --muted-foreground: 224 14% 42%;
     --card: 0 0% 100%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
-    --border: 214 32% 91%;
-    --input: 214 32% 91%;
-    --primary: 222 47% 11%;
-    --primary-foreground: 210 40% 98%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
-    --ring: 262 83% 58%;
+    --popover-foreground: 226 40% 12%;
+    --border: 224 30% 90%;
+    --input: 224 30% 90%;
+    --primary: 226 40% 12%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 225 40% 96%;
+    --accent-foreground: 226 40% 12%;
+    --ring: 258 84% 60%;
 
-    /* brand — violet → indigo "magic" */
-    --brand: 262 83% 58%;
-    --brand-2: 243 75% 59%;
+    /* brand — violet → cyan "nebula" */
+    --brand: 258 84% 60%;
+    --brand-2: 190 82% 42%;
     --brand-foreground: 0 0% 100%;
-    --glow: 262 90% 62%;
+    --glow: 258 84% 62%;
+    --glow-2: 190 82% 50%;
 
     /* code blocks (Markdown renderer + highlight.js tokens) */
-    --code-bg: 240 24% 98%;
-    --code-fg: 222 28% 26%;
-    --hl-keyword: 262 60% 50%;
+    --code-bg: 225 36% 97%;
+    --code-fg: 226 24% 28%;
+    --hl-keyword: 258 60% 52%;
     --hl-string: 142 42% 36%;
     --hl-number: 28 68% 44%;
-    --hl-comment: 220 12% 52%;
-    --hl-title: 214 62% 44%;
+    --hl-comment: 224 12% 52%;
+    --hl-title: 195 66% 40%;
     --hl-attr: 214 52% 40%;
-    --hl-type: 188 52% 36%;
-    --hl-literal: 262 55% 52%;
-    --hl-meta: 220 12% 48%;
+    --hl-type: 190 52% 36%;
+    --hl-literal: 258 55% 54%;
+    --hl-meta: 224 12% 48%;
   }
 
   .dark {
     color-scheme: dark;
 
-    --background: 250 30% 5%;
-    --foreground: 220 20% 96%;
-    --muted: 250 20% 13%;
-    --muted-foreground: 245 12% 62%;
-    --card: 250 24% 8%;
-    --popover: 250 22% 13%;
-    --popover-foreground: 220 20% 96%;
-    --border: 250 18% 18%;
-    --input: 250 18% 18%;
-    --primary: 210 40% 98%;
-    --primary-foreground: 222 47% 11%;
-    --accent: 250 20% 15%;
-    --accent-foreground: 210 40% 98%;
-    --ring: 263 80% 68%;
+    --background: 225 32% 5%;
+    --foreground: 220 22% 96%;
+    --muted: 225 22% 12%;
+    --muted-foreground: 222 14% 62%;
+    --card: 226 26% 8%;
+    --popover: 226 24% 12%;
+    --popover-foreground: 220 22% 96%;
+    --border: 225 18% 17%;
+    --input: 225 18% 17%;
+    --primary: 220 22% 96%;
+    --primary-foreground: 226 30% 7%;
+    --accent: 226 22% 15%;
+    --accent-foreground: 220 22% 98%;
+    --ring: 258 90% 68%;
 
-    --brand: 263 82% 68%;
-    --brand-2: 245 80% 70%;
-    --brand-foreground: 250 30% 6%;
-    --glow: 265 90% 65%;
+    --brand: 258 90% 66%;
+    --brand-2: 188 86% 55%;
+    --brand-foreground: 226 30% 7%;
+    --glow: 260 90% 66%;
+    --glow-2: 189 90% 56%;
 
-    --code-bg: 250 25% 10%;
+    --code-bg: 226 24% 11%;
     --code-fg: 220 16% 84%;
-    --hl-keyword: 263 70% 76%;
+    --hl-keyword: 258 85% 78%;
     --hl-string: 142 46% 66%;
     --hl-number: 28 82% 70%;
-    --hl-comment: 245 10% 52%;
-    --hl-title: 210 82% 74%;
+    --hl-comment: 224 10% 52%;
+    --hl-title: 189 74% 68%;
     --hl-attr: 200 66% 72%;
-    --hl-type: 180 54% 66%;
-    --hl-literal: 263 66% 76%;
-    --hl-meta: 245 10% 56%;
+    --hl-type: 189 55% 62%;
+    --hl-literal: 258 78% 78%;
+    --hl-meta: 224 10% 56%;
   }
 
   * {
@@ -160,6 +163,101 @@
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* ── Aurora — the moving "nebula" backdrop for the chat window ─────────── */
+  .aurora {
+    position: absolute;
+    inset: 0;
+    z-index: -10;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .aurora-blob {
+    position: absolute;
+    border-radius: 9999px;
+    filter: blur(80px);
+    opacity: 0.55;
+    will-change: transform;
+  }
+  .aurora-1 {
+    width: 62vw;
+    height: 62vw;
+    left: -12vw;
+    top: -22vw;
+    background: radial-gradient(
+      circle at 30% 30%,
+      hsl(var(--glow) / 0.6),
+      transparent 70%
+    );
+    animation: aurora-a 26s ease-in-out infinite alternate;
+  }
+  .aurora-2 {
+    width: 56vw;
+    height: 56vw;
+    right: -14vw;
+    top: -6vw;
+    background: radial-gradient(
+      circle at 60% 40%,
+      hsl(var(--glow-2) / 0.5),
+      transparent 70%
+    );
+    animation: aurora-b 34s ease-in-out infinite alternate;
+  }
+  .aurora-3 {
+    width: 74vw;
+    height: 74vw;
+    left: 18vw;
+    bottom: -44vw;
+    background: radial-gradient(
+      circle at 50% 50%,
+      hsl(var(--glow) / 0.32),
+      transparent 70%
+    );
+    animation: aurora-c 42s ease-in-out infinite alternate;
+  }
+  /* fade the aurora into the page so text never sits on a hard gradient edge */
+  .aurora-veil {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      ellipse 90% 60% at 50% -10%,
+      transparent,
+      hsl(var(--background) / 0.55) 75%
+    );
+  }
+  @keyframes aurora-a {
+    to {
+      transform: translate3d(8vw, 6vw, 0) scale(1.18);
+    }
+  }
+  @keyframes aurora-b {
+    from {
+      transform: scale(1.05);
+    }
+    to {
+      transform: translate3d(-10vw, 5vw, 0) scale(0.9);
+    }
+  }
+  @keyframes aurora-c {
+    to {
+      transform: translate3d(5vw, -9vw, 0) scale(1.22);
+    }
+  }
+  :root:not(.dark) .aurora-blob {
+    opacity: 0.3;
+    filter: blur(96px);
+  }
+  .aurora--subtle .aurora-blob {
+    opacity: 0.18;
+  }
+  :root:not(.dark) .aurora--subtle .aurora-blob {
+    opacity: 0.14;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .aurora-blob {
+      animation: none;
+    }
   }
   /* Infinite logo marquee */
   @keyframes genie-marquee {

@@ -38,6 +38,7 @@ const config: Config = {
         },
         "brand-2": "hsl(var(--brand-2))",
         glow: "hsl(var(--glow))",
+        "glow-2": "hsl(var(--glow-2))",
       },
     },
   },

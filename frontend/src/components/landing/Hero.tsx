@@ -8,10 +8,10 @@ import { Container } from "./Container";
 export function Hero() {
   return (
     <section className="relative overflow-hidden">
-      {/* backdrop */}
+      {/* backdrop — violet core with a cyan companion (the "nebula" identity) */}
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-x-0 -top-40 -z-10 h-[600px] bg-[radial-gradient(ellipse_60%_50%_at_50%_0%,hsl(var(--glow)/0.16),transparent)]"
+        className="pointer-events-none absolute inset-x-0 -top-40 -z-10 h-[600px] bg-[radial-gradient(ellipse_55%_50%_at_45%_0%,hsl(var(--glow)/0.16),transparent),radial-gradient(ellipse_38%_38%_at_78%_8%,hsl(var(--glow-2)/0.13),transparent)]"
       />
       <Container className="grid items-center gap-14 py-16 sm:py-24 lg:grid-cols-[1.05fr_0.95fr] lg:gap-10">
         <div>

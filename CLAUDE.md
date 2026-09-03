@@ -119,8 +119,9 @@ Supabase Studio shows the tables via its schema switcher.
 | Component | Choice | Notes |
 |-----------|--------|-------|
 | Framework | Next.js 15 | App Router only (no Pages Router). React 19. |
-| Styling | Tailwind CSS v3 | `darkMode: "class"` + CSS-var tokens (incl. `--brand` violet→indigo) |
+| Styling | Tailwind CSS v3 | `darkMode: "class"` + CSS-var tokens. **"Nebula" palette**: `--brand` violet + `--brand-2` cyan; every brand gradient is violet→cyan. `--glow` / `--glow-2` feed the aurora. |
 | Theme | `next-themes` | Global light/dark toggle (`attribute="class"`, `defaultTheme="system"`), `<ThemeProvider>` outermost in `layout.tsx` |
+| Ambient bg | `components/chat/AuroraBackdrop.tsx` | Pure-CSS drifting violet/cyan blobs behind the chat window (`globals.css` `.aurora-*`). Full on the empty chat, `subtle` behind a conversation; freezes under `prefers-reduced-motion`. |
 | State | Zustand | Global chat/task/agent state |
 | Streaming | Native `EventSource` API | SSE — no third-party lib needed |
 | Data Fetching | TanStack Query v5 | REST endpoints + cache invalidation |
@@ -308,7 +309,7 @@ genie/
 │       ├── middleware.ts              ← bare clerkMiddleware() + /__clerk/:path* matcher
 │       ├── app/                       ← App Router pages
 │       │   ├── layout.tsx             ← ThemeProvider › ClerkProvider (in <body>) › QueryProvider
-│       │   ├── globals.css            ← Tailwind + light/dark CSS-var tokens + marquee keyframes
+│       │   ├── globals.css            ← Tailwind + Nebula CSS-var tokens (violet/cyan) + marquee / aurora keyframes
 │       │   ├── page.tsx               ← Marketing landing (SiteHeader/Hero/…/Footer)
 │       │   ├── sign-in/[[...sign-in]]/page.tsx   ← Clerk hosted <SignIn />
 │       │   ├── sign-up/[[...sign-up]]/page.tsx   ← Clerk hosted <SignUp forceRedirectUrl="/welcome">
@@ -344,6 +345,7 @@ genie/
 │       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
 │       │   │   ├── PlusMenu.tsx       ← composer "+" — Add files · Add to project
 │       │   │   ├── AttachmentChips.tsx← staged uploads shown in the composer
+│       │   │   ├── AuroraBackdrop.tsx ← moving violet/cyan "nebula" backdrop (full on empty chat · `subtle` in-conversation)
 │       │   │   └── StreamingDot.tsx   ← Animated typing indicator
 │       │   ├── tasks/
 │       │   │   ├── TaskBoard.tsx      ← 3 cols + HTML5 drag + "Archive done" + "Archived (N)"
@@ -1821,6 +1823,8 @@ _Also 2026-09-01 — **KB retrieval hardening** (bug: a real CV upload answered 
 _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_output(SupervisorPlan, include_raw=True)` intermittently returns `parsed=None` (emits `steps: null` / drops `rationale`). `supervisor_node` now guards `plan_out is None` (→ answer directly, keeping the `knowledge_base` step); `SupervisorPlan` has a `@field_validator("steps", mode="before")` coercing `None`→`[]` and a default `rationale`._
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
+
+_Also 2026-09-03 — **"Nebula" palette + moving aurora backdrop**: retuned every `globals.css` token (light + dark) to a deep space-navy base with a **violet `--brand` + cyan `--brand-2`** identity — every brand gradient (`Wordmark`, `Button variant="brand"`, `Hero` heading) is now violet→cyan. New `--glow-2` (cyan) token + `glow-2` Tailwind colour. `components/chat/AuroraBackdrop.tsx` — three pure-CSS `blur(80px)` radial blobs drifting on 26/34/42 s loops (`globals.css` `.aurora-*`), rendered once in `ChatView` (`subtle={!isEmpty}` → full on the empty chat, barely-there behind a conversation), `-z-10` inside an `isolate` root, a `.aurora-veil` fades it into the page so text stays crisp; `prefers-reduced-motion` freezes the blobs. `Hero` backdrop gained a cyan companion glow. No JS, bundle unchanged. Verified: build + lint clean._
 
 _Also 2026-09-03 — **collapsible sidebar**: `Sidebar` collapses to a 64 px icon rail (Gemini-style) — toggle button in the header (`PanelLeftClose`/`PanelLeftOpen`) or `⌘/Ctrl + \`; state in `localStorage["genie.sidebar_collapsed"]`. Collapsed = wordmark→sparkle glyph, `New chat`/`Projects`/`Tasks` as centred icons (`NavItem` component, `title` tooltips), chat list hidden, footer = `BackendStatus` dot (`compact` prop) + `UserButton`. `transition-[width]` animates it (suppressed while drag-resizing). Drag handle disabled when collapsed._
 

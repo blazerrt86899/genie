@@ -19,6 +19,7 @@ import { ModelPicker } from "./ModelPicker";
 import { PlusMenu } from "./PlusMenu";
 import { AttachmentChips } from "./AttachmentChips";
 import { ChatHeader } from "./ChatHeader";
+import { AuroraBackdrop } from "./AuroraBackdrop";
 
 const MAX_COMPOSER_HEIGHT = 208; // px — ~8 lines, then scroll
 
@@ -148,7 +149,9 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
   const cid = conversationId ?? storedConversationId ?? undefined;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative isolate flex h-full flex-col">
+      <AuroraBackdrop subtle={!isEmpty} />
+
       {!isEmpty && cid && (
         <ChatHeader conversationId={cid} elevated={!atTop} />
       )}
