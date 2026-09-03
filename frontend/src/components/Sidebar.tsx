@@ -18,6 +18,7 @@ import {
   PanelLeftOpen,
   Pin,
   Plus,
+  Search,
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ import {
   type ConversationMenuTarget,
 } from "@/components/chat/ConversationMenu";
 import { Wordmark } from "@/components/landing/Wordmark";
+import { SearchChatsModal } from "@/components/chat/SearchChatsModal";
 
 function ConversationRow({
   conversation,
@@ -205,33 +207,47 @@ function useSidebarWidth() {
   };
 }
 
+const NAV_CLS = (collapsed: boolean, active: boolean) =>
+  cn(
+    "flex w-full items-center gap-2 rounded-md py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+    collapsed ? "justify-center px-0" : "px-2",
+    active && "bg-accent font-medium text-foreground",
+  );
+
 function NavItem({
   href,
+  onClick,
   icon: Icon,
   label,
-  active,
+  active = false,
   collapsed,
 }: {
-  href: string;
+  href?: string;
+  onClick?: () => void;
   icon: ComponentType<{ className?: string }>;
   label: string;
-  active: boolean;
+  active?: boolean;
   collapsed: boolean;
 }) {
-  return (
-    <Link
-      href={href}
-      title={collapsed ? label : undefined}
-      aria-label={label}
-      className={cn(
-        "flex items-center gap-2 rounded-md py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-        collapsed ? "justify-center px-0" : "px-2",
-        active && "bg-accent font-medium text-foreground",
-      )}
-    >
+  const inner = (
+    <>
       <Icon className="h-4 w-4 shrink-0" />
       {!collapsed && label}
+    </>
+  );
+  const common = {
+    title: collapsed ? label : undefined,
+    "aria-label": label,
+    className: NAV_CLS(collapsed, active),
+  };
+  return href ? (
+    <Link href={href} {...common}>
+      {inner}
     </Link>
+  ) : (
+    <button type="button" onClick={onClick} {...common}>
+      {inner}
+    </button>
   );
 }
 
@@ -242,6 +258,18 @@ export function Sidebar() {
   const { data: conversations, isLoading } = useConversations();
   const { width, collapsed, toggleCollapsed, onMouseDown, isDragging } =
     useSidebarWidth();
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const startNew = () => {
     reset();
@@ -350,6 +378,12 @@ export function Sidebar() {
               New chat
             </Button>
           )}
+          <NavItem
+            onClick={() => setSearchOpen(true)}
+            icon={Search}
+            label="Search chats"
+            collapsed={collapsed}
+          />
           <NavItem
             href="/projects"
             icon={FolderKanban}
@@ -472,6 +506,8 @@ export function Sidebar() {
           </Show>
         </div>
       </aside>
+
+      <SearchChatsModal open={searchOpen} onClose={() => setSearchOpen(false)} />
     </>
   );
 }

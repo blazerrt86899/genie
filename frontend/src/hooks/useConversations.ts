@@ -2,6 +2,7 @@
 
 import { useAuth } from "@clerk/nextjs";
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -10,6 +11,8 @@ import {
   deleteConversation,
   listConversations,
   patchConversation,
+  searchConversations,
+  type ConversationSearchResult,
   type ConversationSummary,
 } from "@/lib/api";
 
@@ -21,6 +24,18 @@ export function useConversations() {
     queryKey: KEY,
     queryFn: async () => listConversations(await getToken()),
     staleTime: 10_000,
+  });
+}
+
+export function useSearchConversations(q: string) {
+  const { getToken } = useAuth();
+  const query = q.trim();
+  return useQuery<ConversationSearchResult[]>({
+    queryKey: [...KEY, "search", query],
+    queryFn: async () => searchConversations(query, await getToken()),
+    enabled: query.length >= 2,
+    staleTime: 30_000,
+    placeholderData: keepPreviousData,
   });
 }
 

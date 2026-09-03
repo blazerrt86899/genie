@@ -322,7 +322,7 @@ genie/
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
-│       │   ├── Sidebar.tsx            ← New chat · Projects · Tasks · Pinned + Chats lists · account · drag-to-resize (blur scrim) · collapse to an icon rail (⌘\\, `genie.sidebar_collapsed`)
+│       │   ├── Sidebar.tsx            ← New chat · Search chats (⌘K) · Projects · Tasks · Pinned + Chats lists · account · collapse to an icon rail (⌘\\)
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
 │       │   │   └── knowledge-base/    ← KnowledgeBasePanel · DocumentUpload · DocumentList · PipelineModal · ChunkViewer · RagSettingsForm
@@ -334,6 +334,7 @@ genie/
 │       │   │   ├── ChatHeader.tsx     ← top bar: pin glyph + title + ⋯ menu + Share button; scroll-shadow when scrolled
 │       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
 │       │   │   ├── ShareChatModal.tsx ← Keep private ↔ Create public link + copy — POST/DELETE /conversations/{id}/share
+│       │   │   ├── SearchChatsModal.tsx← ⌘K command palette — searches every chat by title + message content (GET /conversations/search)
 │       │   │   ├── Message.tsx        ← user = subtle box (plain text) + inline edit · Genie = borderless rich Markdown; + MessageActions row
 │       │   │   ├── MessageActions.tsx ← per-message row: Copy · 👍/👎 · Regenerate (assistant) / Retry · Edit (user) · date
 │       │   │   ├── Markdown.tsx       ← react-markdown + remark-gfm + rehype-highlight; token-styled headings/tables/lists/quotes
@@ -355,7 +356,8 @@ genie/
 │       │
 │       ├── hooks/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
-│       │   ├── useConversations.ts    ← TanStack Query list + patch (title/project/pinned/unread) + delete mutations
+│       │   ├── useConversations.ts    ← TanStack Query list + search (title+content) + patch (title/project/pinned/unread) + delete
+│       │   ├── useDebouncedValue.ts   ← generic debounce (search input)
 │       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
 │       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
@@ -1445,6 +1447,7 @@ DELETE /api/v1/attachments/{id}        → 204
 
 # ── Conversations ─────────────────────────────────────────────────────────────
 GET    /api/v1/conversations           → [{id,title,created_at,last_message_at,project_id,model,pinned,unread}], pinned first then newest-activity
+GET    /api/v1/conversations/search    → ?q=&limit=  → [ConversationSummary + `snippet`], title **and** message-content ILIKE, per-user (declared before /{id})
 GET    /api/v1/conversations/{id}      → conversation + messages (+ per-message `agents` + `attachments` + `sources` + `feedback`) + project{id,name} + model + `share`{token,url,shared_at}|null; **clears `unread`**
 PATCH  /api/v1/conversations/{id}      → {title?, project_id?: str|null, pinned?: bool, unread?: bool}  (only fields present are touched)
 DELETE /api/v1/conversations/{id}      → 204 (cascades messages + drops the LangGraph thread)
@@ -1722,7 +1725,7 @@ tests/  (≈90 tests, all green)
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project) · test_sharing.py · test_chat_regenerate.py · test_messages.py
+    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project, + search) · test_sharing.py · test_chat_regenerate.py · test_messages.py
     ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
     ├── test_models_endpoint.py · test_attachments.py · test_documents.py
 ```
@@ -1823,6 +1826,8 @@ _Also 2026-09-01 — **KB retrieval hardening** (bug: a real CV upload answered 
 _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_output(SupervisorPlan, include_raw=True)` intermittently returns `parsed=None` (emits `steps: null` / drops `rationale`). `supervisor_node` now guards `plan_out is None` (→ answer directly, keeping the `knowledge_base` step); `SupervisorPlan` has a `@field_validator("steps", mode="before")` coercing `None`→`[]` and a default `rationale`._
 
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
+
+_Also 2026-09-03 — **search chats (⌘K command palette)**: `GET /api/v1/conversations/search?q=&limit=` (declared before `/{id}`) → `conversation_repo.search` — one query, `Conversation.title ILIKE` OR an `EXISTS` on `messages.content ILIKE` (`%`/`_` escaped), ordered like the sidebar list, plus a correlated-subquery `snippet` (leading 160 chars of the first matching message). No FTS index — plain ILIKE is fine for a personal history (trigram GIN → backlog). Frontend: `components/chat/SearchChatsModal.tsx` — top-anchored overlay, debounced (`hooks/useDebouncedValue.ts`) `useSearchConversations` (`enabled` at ≥2 chars, `keepPreviousData`); blank query shows "Recent" (first 8 of `useConversations`); ↑/↓/Enter/Esc + mouse; rows show title · project glyph · snippet · `relativeDay` (`lib/date.ts`). Opened from a new **Search chats** `NavItem` (button variant) in `Sidebar` or `⌘/Ctrl+K`. 177 backend tests, build/lint clean._
 
 _Also 2026-09-03 — **"Nebula" palette + moving aurora backdrop**: retuned every `globals.css` token (light + dark) to a deep space-navy base with a **violet `--brand` + cyan `--brand-2`** identity — every brand gradient (`Wordmark`, `Button variant="brand"`, `Hero` heading) is now violet→cyan. New `--glow-2` (cyan) token + `glow-2` Tailwind colour. `components/chat/AuroraBackdrop.tsx` — three pure-CSS `blur(80px)` radial blobs drifting on 26/34/42 s loops (`globals.css` `.aurora-*`), rendered once in `ChatView` (`subtle={!isEmpty}` → full on the empty chat, barely-there behind a conversation), `-z-10` inside an `isolate` root, a `.aurora-veil` fades it into the page so text stays crisp; `prefers-reduced-motion` freezes the blobs. `Hero` backdrop gained a cyan companion glow. No JS, bundle unchanged. Verified: build + lint clean._
 
@@ -1936,6 +1941,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Add DB table | New SQLAlchemy model in `db/models/` + Alembic migration + repository |
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
+| Chat search | `conversation_repo.search` (title + `messages.content` ILIKE) + `GET /conversations/search` + frontend `SearchChatsModal` (⌘K) |
 | Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
 | Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
 | Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |
@@ -2028,6 +2034,8 @@ able to reconstruct a request from the logs alone.
 - **Response cache** — `cache_service`: `cache_hit` (similarity, age_s),
   `cache_miss`, `cache_stored`, `cache_swept`; `nodes`: `cache_served`;
   `chat_service`: `cache_store_failed`; `main.py`: `cache_sweep_started`.
+- **Chat search** — `conversation_repo`: `conversations_searched` (`query_len` +
+  `count`, never the query text).
 - **Chat share** — `conversation_repo`: `conversation_shared` / `conversation_unshared`
   (only `token_prefix`, never the full capability token); `endpoints/conversations.py`:
   `conversation_share_enabled` / `_disabled`, `share_token_collision`;

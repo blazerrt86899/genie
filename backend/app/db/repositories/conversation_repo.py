@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 import structlog
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 
 from app.db.models.conversation import Conversation
 from app.db.repositories.base import BaseRepository
@@ -60,6 +60,61 @@ class ConversationRepository(BaseRepository[Conversation]):
         )
         rows = list(result.scalars().all())
         logger.debug("conversations_listed", user_id=str(user_id), count=len(rows))
+        return rows
+
+    async def search(
+        self, user_id: uuid.UUID, query: str, limit: int = 30
+    ) -> list[tuple[Conversation, str | None]]:
+        """Conversations whose title OR any message content matches ``query``.
+
+        Returns ``(conversation, snippet)`` — ``snippet`` is a short excerpt of
+        the first matching message, or ``None`` for a title-only match. Plain
+        ``ILIKE`` (no FTS index) — fine for a personal chat history.
+        """
+        from app.db.models.message import Message
+
+        q = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pat = f"%{q}%"
+
+        msg_match = (
+            select(Message.id)
+            .where(
+                Message.conversation_id == Conversation.id,
+                Message.content.ilike(pat, escape="\\"),
+            )
+            .correlate(Conversation)
+        )
+        snippet_sq = (
+            select(func.substr(Message.content, 1, 160))
+            .where(
+                Message.conversation_id == Conversation.id,
+                Message.content.ilike(pat, escape="\\"),
+            )
+            .order_by(Message.created_at.asc())
+            .limit(1)
+            .correlate(Conversation)
+            .scalar_subquery()
+        )
+
+        result = await self.db.execute(
+            select(Conversation, snippet_sq)
+            .where(
+                Conversation.user_id == user_id,
+                or_(Conversation.title.ilike(pat, escape="\\"), msg_match.exists()),
+            )
+            .order_by(
+                Conversation.last_message_at.desc().nulls_last(),
+                Conversation.created_at.desc(),
+            )
+            .limit(limit)
+        )
+        rows = [(c, s) for c, s in result.all()]
+        logger.info(
+            "conversations_searched",
+            user_id=str(user_id),
+            query_len=len(query),
+            count=len(rows),
+        )
         return rows
 
     async def list_for_project(

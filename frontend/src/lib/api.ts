@@ -278,6 +278,21 @@ export function listConversations(
   return apiFetch<ConversationSummary[]>("/api/v1/conversations", { token });
 }
 
+export interface ConversationSearchResult extends ConversationSummary {
+  snippet: string | null; // excerpt of the matching message (content match only)
+}
+
+export function searchConversations(
+  q: string,
+  token?: string | null,
+  limit = 30,
+): Promise<ConversationSearchResult[]> {
+  return apiFetch<ConversationSearchResult[]>(
+    `/api/v1/conversations/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    { token },
+  );
+}
+
 export function deleteConversation(
   id: string,
   token?: string | null,

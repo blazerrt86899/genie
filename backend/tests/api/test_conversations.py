@@ -27,6 +27,7 @@ _B = SimpleNamespace(id=uuid.uuid4(), title="Newer", project_id=None, model="gpt
 
 class FakeConvRepo:
     deleted: set[str] = set()
+    search_args: tuple = ()
 
     def __init__(self, _db) -> None: ...
 
@@ -36,6 +37,14 @@ class FakeConvRepo:
 
     async def delete_for_user(self, conversation_id, user_id):
         return str(conversation_id) == str(_A.id)
+
+    async def search(self, user_id, query, limit=30):
+        FakeConvRepo.search_args = (user_id, query, limit)
+        if query == "newer":
+            return [(_B, None)]  # title match, no snippet
+        if query == "inside":
+            return [(_A, "…a message that mentions inside somewhere…")]
+        return []
 
 
 @pytest.fixture
@@ -69,6 +78,37 @@ async def test_list_is_recency_ordered(client):
     body = resp.json()
     assert [row["title"] for row in body] == ["Newer", "Older"]
     assert body[0]["last_message_at"] is not None
+
+
+async def test_search_title_match(client):
+    async with client as c:
+        resp = await c.get("/api/v1/conversations/search?q=newer")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [r["title"] for r in body] == ["Newer"]
+    assert body[0]["snippet"] is None
+    assert FakeConvRepo.search_args[1] == "newer"  # trimmed query passed through
+
+
+async def test_search_message_match_has_snippet(client):
+    async with client as c:
+        resp = await c.get("/api/v1/conversations/search?q=inside&limit=5")
+    body = resp.json()
+    assert body[0]["title"] == "Older"
+    assert "inside" in body[0]["snippet"]
+    assert FakeConvRepo.search_args[2] == 5
+
+
+async def test_search_no_match_is_empty(client):
+    async with client as c:
+        resp = await c.get("/api/v1/conversations/search?q=zzzznope")
+    assert resp.status_code == 200 and resp.json() == []
+
+
+async def test_search_missing_q_is_422(client):
+    async with client as c:
+        resp = await c.get("/api/v1/conversations/search")
+    assert resp.status_code == 422
 
 
 async def test_delete_ok(client):

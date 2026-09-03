@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,6 +105,26 @@ async def list_conversations(
 ) -> list[ConversationSummary]:
     rows = await ConversationRepository(db).list_for_user(user.id)
     return [conversation_summary(c) for c in rows]
+
+
+class ConversationSearchResult(ConversationSummary):
+    snippet: str | None = None  # excerpt of the first matching message (content match only)
+
+
+# NB: declared before `/{conversation_id}` so "search" isn't parsed as an id.
+@router.get("/search", response_model=list[ConversationSearchResult])
+async def search_conversations(
+    q: str = Query(min_length=1, max_length=200),
+    limit: int = Query(30, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSearchResult]:
+    """Search the user's conversations by title **and** message content."""
+    rows = await ConversationRepository(db).search(user.id, q.strip(), limit)
+    return [
+        ConversationSearchResult(**conversation_summary(c).model_dump(), snippet=s)
+        for c, s in rows
+    ]
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
