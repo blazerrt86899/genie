@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clerk import get_current_user
 from app.db.models.user import User
+from app.db.repositories.conversation_repo import ConversationRepository
+from app.db.repositories.message_repo import MessageRepository
+from app.db.session import get_db
 
 logger = structlog.get_logger(__name__)
 
@@ -36,4 +42,29 @@ async def read_me(user: User = Depends(get_current_user)) -> UserMe:
         full_name=user.full_name,
         avatar_url=user.avatar_url,
         token_budget=user.token_budget,
+    )
+
+
+class UsageOut(BaseModel):
+    token_budget: int
+    tokens_used_30d: int
+    messages_30d: int
+    conversations: int
+
+
+@router.get("/me/usage", response_model=UsageOut)
+async def read_usage(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UsageOut:
+    """Activity for the Settings → Usage panel (rough, from `messages.metadata`)."""
+    since = datetime.now(UTC) - timedelta(days=30)
+    u = await MessageRepository(db).usage_since(user.id, since)
+    conversations = await ConversationRepository(db).count_for_user(user.id)
+    logger.info("users_usage", user_id=str(user.id), tokens_30d=u["tokens"])
+    return UsageOut(
+        token_budget=user.token_budget,
+        tokens_used_30d=u["tokens"],
+        messages_30d=u["messages"],
+        conversations=conversations,
     )

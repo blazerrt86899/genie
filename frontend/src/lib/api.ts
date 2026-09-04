@@ -61,6 +61,17 @@ export function getMe(token?: string | null): Promise<Me> {
   return apiFetch<Me>("/api/v1/users/me", { token });
 }
 
+export interface UsageInfo {
+  token_budget: number;
+  tokens_used_30d: number;
+  messages_30d: number;
+  conversations: number;
+}
+
+export function getUsage(token?: string | null): Promise<UsageInfo> {
+  return apiFetch<UsageInfo>("/api/v1/users/me/usage", { token });
+}
+
 // ─── Chat ──────────────────────────────────────────────────────────────────
 
 export interface ChatAccepted {

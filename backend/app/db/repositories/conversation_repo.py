@@ -117,6 +117,16 @@ class ConversationRepository(BaseRepository[Conversation]):
         )
         return rows
 
+    async def count_for_user(self, user_id: uuid.UUID) -> int:
+        return int(
+            await self.db.scalar(
+                select(func.count())
+                .select_from(Conversation)
+                .where(Conversation.user_id == user_id)
+            )
+            or 0
+        )
+
     async def list_for_project(
         self, project_id: uuid.UUID, user_id: uuid.UUID
     ) -> list[Conversation]:

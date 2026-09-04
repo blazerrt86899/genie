@@ -144,3 +144,35 @@ async def test_garbage_token_is_401(client):
             "/api/v1/users/me", headers={"Authorization": "Bearer not-a-jwt"}
         )
     assert resp.status_code == 401
+
+
+async def test_usage(client, monkeypatch):
+    from app.api.v1.endpoints import users as users_ep
+
+    class FakeMsgRepo:
+        def __init__(self, _db): ...
+
+        async def usage_since(self, user_id, since):
+            return {"tokens": 4200, "messages": 12}
+
+    class FakeConvRepo:
+        def __init__(self, _db): ...
+
+        async def count_for_user(self, user_id):
+            return 3
+
+    monkeypatch.setattr(users_ep, "MessageRepository", FakeMsgRepo)
+    monkeypatch.setattr(users_ep, "ConversationRepository", FakeConvRepo)
+
+    async with client as c:
+        resp = await c.get(
+            "/api/v1/users/me/usage",
+            headers={"Authorization": f"Bearer {_token('user_u1')}"},
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "token_budget": 100000,
+        "tokens_used_30d": 4200,
+        "messages_30d": 12,
+        "conversations": 3,
+    }

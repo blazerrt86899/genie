@@ -19,6 +19,7 @@ import {
   Pin,
   Plus,
   Search,
+  Settings,
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,7 @@ import {
 } from "@/components/chat/ConversationMenu";
 import { Wordmark } from "@/components/landing/Wordmark";
 import { SearchChatsModal } from "@/components/chat/SearchChatsModal";
+import { SettingsModal } from "@/components/settings/SettingsModal";
 
 function ConversationRow({
   conversation,
@@ -261,12 +263,16 @@ export function Sidebar() {
   const { width, collapsed, toggleCollapsed, onMouseDown, isDragging } =
     useSidebarWidth();
   const [searchOpen, setSearchOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setSearchOpen((v) => !v);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -498,11 +504,33 @@ export function Sidebar() {
           </Show>
           <Show when="signed-in">
             {collapsed ? (
-              <UserButton />
+              <>
+                <UserButton />
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  title="Settings (⌘,)"
+                  aria-label="Settings"
+                  className="grid h-9 w-9 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
+              </>
             ) : (
               <div className="flex items-center gap-2 px-1">
                 <UserButton />
-                <span className="text-xs text-muted-foreground">Account</span>
+                <span className="flex-1 truncate text-xs text-muted-foreground">
+                  Account
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(true)}
+                  title="Settings (⌘,)"
+                  aria-label="Settings"
+                  className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  <Settings className="h-4 w-4" />
+                </button>
               </div>
             )}
           </Show>
@@ -510,6 +538,7 @@ export function Sidebar() {
       </aside>
 
       <SearchChatsModal open={searchOpen} onClose={() => setSearchOpen(false)} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </>
   );
 }

@@ -322,7 +322,7 @@ genie/
 │       │       └── tasks/page.tsx     ← Task board
 │       │
 │       ├── components/
-│       │   ├── Sidebar.tsx            ← New chat · Search chats (⌘K) · Projects · Tasks · Pinned + Chats lists · account · collapse to an icon rail (⌘\\)
+│       │   ├── Sidebar.tsx            ← New chat · Search chats (⌘K) · Projects · Tasks · Pinned + Chats lists · account + Settings gear (⌘,) · collapse to an icon rail (⌘\\)
 │       │   ├── BackendStatus.tsx      ← live GET /health dot (TanStack Query)
 │       │   ├── projects/              ← ProjectsIndex, ProjectView, NewProjectDialog
 │       │   │   └── knowledge-base/    ← KnowledgeBasePanel · DocumentUpload · DocumentList · PipelineModal · ChunkViewer · RagSettingsForm
@@ -335,6 +335,8 @@ genie/
 │       │   │   ├── ConversationMenu.tsx← shared ⋯ dropdown: Pin · Mark read/unread · Rename · Add to project · Delete
 │       │   │   ├── ShareChatModal.tsx ← Keep private ↔ Create public link + copy — POST/DELETE /conversations/{id}/share
 │       │   │   ├── SearchChatsModal.tsx← ⌘K command palette — searches every chat by title + message content (GET /conversations/search)
+│       │   ├── settings/
+│       │   │   └── SettingsModal.tsx   ← ⌘, dialog — General (Appearance toggle) · Account (Clerk <UserProfile>) · Usage (/users/me/usage)
 │       │   │   ├── Message.tsx        ← user = subtle box (plain text) + inline edit · Genie = borderless rich Markdown; + MessageActions row
 │       │   │   ├── MessageActions.tsx ← per-message row: Copy · 👍/👎 · Regenerate (assistant) / Retry · Edit (user) · date
 │       │   │   ├── Markdown.tsx       ← react-markdown + remark-gfm + rehype-highlight; token-styled headings/tables/lists/quotes
@@ -358,6 +360,7 @@ genie/
 │       │   ├── useChat.ts             ← route-driven: load /chat/[id], POST + SSE, router.replace on new
 │       │   ├── useConversations.ts    ← TanStack Query list + search (title+content) + patch (title/project/pinned/unread) + delete
 │       │   ├── useDebouncedValue.ts   ← generic debounce (search input)
+│       │   ├── useUsage.ts            ← GET /users/me/usage (Settings → Usage)
 │       │   ├── useModels.ts           ← GET /models catalog (staleTime ∞) for the picker
 │       │   ├── useAttachments.ts      ← upload/delete → chatStore.pendingAttachments
 │       │   ├── useProjects.ts         ← projects list/detail/CRUD (TanStack Query)
@@ -1391,7 +1394,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 
 ### L2 — Supabase PostgreSQL (permanent)
-- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments`, **`feedback`** (`"up"`|`"down"` 👍/👎), **`cached`** (reply served from the response cache), **`guardrail`** (`{redacted, flagged, message}` — the input scrub note on a user message). All metadata-only, no migration. Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
+- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments` / **`total_tokens`** (the turn's usage, for Settings → Usage), **`feedback`** (`"up"`|`"down"` 👍/👎), **`cached`** (reply served from the response cache), **`guardrail`** (`{redacted, flagged, message}` — the input scrub note on a user message). All metadata-only, no migration. Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
 - `response_cache` — the semantic answer cache: `query_norm`, `query_embedding vector(1536)` (HNSW), `response`, `model`, `hit_count`, `last_hit_at`, per-`user_id`. Migration `b8e2f4a1c9d3`. Filled/read by `services/cache_service.py`; TTL sweep runs hourly from the lifespan.
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`), **`share_token`** (unique; NULL = private) + **`shared_at`** (frozen message cutoff for the public view). Migrations `f6703a0bb868`, `f041f866790f`, `c3d9e1f4a7b2`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
@@ -1429,6 +1432,7 @@ POST   /api/v1/webhooks/clerk          → Clerk user lifecycle sync (user.creat
 
 # ── Users (Clerk JWT required) ───────────────────────────────────────────────
 GET    /api/v1/users/me                → {id, email, full_name, avatar_url, token_budget}
+GET    /api/v1/users/me/usage          → {token_budget, tokens_used_30d, messages_30d, conversations}  (Settings → Usage; sums `messages.metadata.total_tokens`)
                                          Use this to confirm user is synced after sign-up
 
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
@@ -1725,7 +1729,7 @@ tests/  (≈90 tests, all green)
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py · test_conversations.py (+ PATCH project, + search) · test_sharing.py · test_chat_regenerate.py · test_messages.py
+    ├── test_webhooks.py · test_users_me.py (+ usage) · test_conversations.py (+ PATCH project, + search) · test_sharing.py · test_chat_regenerate.py · test_messages.py
     ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
     ├── test_models_endpoint.py · test_attachments.py · test_documents.py
 ```
@@ -1828,6 +1832,8 @@ _Also 2026-09-01 — **supervisor plan crash guard**: Groq's `with_structured_ou
 _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`** — sticky top bar with the conversation title + a ▾ menu: **Rename** (→ `PATCH /conversations/{id} {title}`, which now merges only the fields present), **Add to project** submenu, **Delete**; the project chip moved here. (2) **Sidebar** drag-to-resize (right-edge handle, 220-460 px, `localStorage["genie.sidebar_w"]`). (3) **`Message`** — the user's messages sit in a subtle right-aligned box; **Genie's have no bubble/border and blend into the page**. (4) **`SourceCards`** — `sources` SSE event (`{items:[{title,url}]}`, emitted once before `done` from the dedup'd `intermediate_results[*].sources`) → link cards under the message; persisted to `messages.metadata.sources` and returned by `GET /conversations/{id}`; the synthesiser is told to cite `[1]` inline but not print a Sources list. Verified live: a web_search turn emits 5 source cards, no trailing "Sources:" text._
 
 _Also 2026-09-03 — **search chats (⌘K command palette)**: `GET /api/v1/conversations/search?q=&limit=` (declared before `/{id}`) → `conversation_repo.search` — one query, `Conversation.title ILIKE` OR an `EXISTS` on `messages.content ILIKE` (`%`/`_` escaped), ordered like the sidebar list, plus a correlated-subquery `snippet` (leading 160 chars of the first matching message). No FTS index — plain ILIKE is fine for a personal history (trigram GIN → backlog). Frontend: `components/chat/SearchChatsModal.tsx` — top-anchored overlay, debounced (`hooks/useDebouncedValue.ts`) `useSearchConversations` (`enabled` at ≥2 chars, `keepPreviousData`); blank query shows "Recent" (first 8 of `useConversations`); ↑/↓/Enter/Esc + mouse; rows show title · project glyph · snippet · `relativeDay` (`lib/date.ts`). Opened from a new **Search chats** `NavItem` (button variant) in `Sidebar` or `⌘/Ctrl+K`. 177 backend tests, build/lint clean._
+
+_Also 2026-09-04 — **Settings modal (General · Account · Usage)**: `components/settings/SettingsModal.tsx` — a two-pane dialog (left pill rail + right panel) opened from a Settings gear in the sidebar footer or `⌘/Ctrl+,`. **General** → an Appearance segmented control (System / Light / Dark, `next-themes`). **Account** → embedded Clerk `<UserProfile routing="hash">` themed borderless via `clerkAppearance`. **Usage** → `GET /users/me/usage` (`message_repo.usage_since` sums `messages.metadata.total_tokens` + counts, `conversation_repo.count_for_user`) → a token-budget bar + 3 stat tiles; `useUsage` hook. `chat_service._generate` now persists the turn's `total_tokens` on the last assistant message's metadata (no migration). 178 backend tests, ruff + build/lint clean._
 
 _Also 2026-09-03 — **premium light-mode + pill sidebar polish**: retuned the light palette (soft tinted-white ground `228 44% 98.5%`, warmer neutrals, bluer `--accent`, softer `--border`) and added a **`--sidebar`** surface token (light + dark) + `sidebar` Tailwind colour so the sidebar reads distinct from the content. `Sidebar` nav items (`NAV_CLS`), the "New chat" button, chat rows (`ConversationRow`), the rename input, section headers, and `SearchChatsModal` rows are all `rounded-full` pills now (`bg-accent` hover/active, `px-3.5`). `AuroraBackdrop` gained a `.aurora-center` — a slow-pulsing soft blue halo directly behind the greeting + composer on the empty chat (the Gemini-style glow); drift blobs dialled down. Composer is `rounded-[28px]` on `bg-card` with a brand-tinted glow shadow, round send button. Light `--glow` violet / `--glow-2` blue. Verified: build + lint clean._
 
@@ -1944,6 +1950,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Change SSE event schema | `core/streaming.py` + `frontend/src/lib/sse.ts` (must stay in sync) |
 | Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
 | Chat search | `conversation_repo.search` (title + `messages.content` ILIKE) + `GET /conversations/search` + frontend `SearchChatsModal` (⌘K) |
+| Settings modal / usage | `components/settings/SettingsModal.tsx` (⌘,) — General/Account/Usage; usage from `GET /users/me/usage` (`message_repo.usage_since`) |
 | Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
 | Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
 | Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |

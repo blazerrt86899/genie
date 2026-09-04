@@ -589,6 +589,8 @@ async def _generate(
                 meta["sources"] = sources
             if langsmith_run_id and i == last:
                 meta["langsmith_run_id"] = langsmith_run_id
+            if total_tokens and i == last:
+                meta["total_tokens"] = total_tokens
             await MessageRepository(db).add_message(
                 conversation.id,
                 user.id,

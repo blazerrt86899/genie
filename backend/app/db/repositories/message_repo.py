@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.core.logging import preview
 from app.db.models.message import Message
@@ -128,3 +128,24 @@ class MessageRepository(BaseRepository[Message]):
             "messages_loaded", conversation_id=str(conversation_id), count=len(rows)
         )
         return rows
+
+    async def usage_since(self, user_id: uuid.UUID, since: datetime) -> dict:
+        """Rough usage for the Settings → Usage panel: summed reply tokens
+        (`metadata.total_tokens`, persisted from ``done``) + message count."""
+        tokens = await self.db.scalar(
+            select(
+                func.coalesce(
+                    func.sum(Message.message_metadata["total_tokens"].as_integer()), 0
+                )
+            ).where(
+                Message.user_id == user_id,
+                Message.role == "assistant",
+                Message.created_at >= since,
+            )
+        )
+        messages = await self.db.scalar(
+            select(func.count())
+            .select_from(Message)
+            .where(Message.user_id == user_id, Message.created_at >= since)
+        )
+        return {"tokens": int(tokens or 0), "messages": int(messages or 0)}

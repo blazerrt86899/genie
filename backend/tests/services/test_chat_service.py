@@ -192,7 +192,10 @@ async def test_stream_turn_emits_tokens_then_done(monkeypatch):
     assert FakeConvRepo.titled == "Learn ML"
     assert FakeConvRepo.touched >= 2  # user msg + assistant msg
     assert ("assistant", "Hello") in FakeMsgRepo.added
-    assert FakeMsgRepo.last_metadata == {"langsmith_run_id": "trace-123"}
+    assert FakeMsgRepo.last_metadata == {
+        "langsmith_run_id": "trace-123",
+        "total_tokens": 7,
+    }
     assert f"run:{run_id}" not in redis.store  # consumed
 
 
