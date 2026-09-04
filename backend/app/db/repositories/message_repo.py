@@ -129,23 +129,26 @@ class MessageRepository(BaseRepository[Message]):
         )
         return rows
 
-    async def usage_since(self, user_id: uuid.UUID, since: datetime) -> dict:
-        """Rough usage for the Settings → Usage panel: summed reply tokens
-        (`metadata.total_tokens`, persisted from ``done``) + message count."""
-        tokens = await self.db.scalar(
-            select(
-                func.coalesce(
-                    func.sum(Message.message_metadata["total_tokens"].as_integer()), 0
-                )
-            ).where(
-                Message.user_id == user_id,
-                Message.role == "assistant",
-                Message.created_at >= since,
-            )
+    async def usage_totals(
+        self, user_id: uuid.UUID, since: datetime | None = None
+    ) -> dict:
+        """Usage for the Settings → Usage panel: summed reply tokens + message
+        count. Uses the persisted `metadata.total_tokens` where present, else a
+        ``chars / 4`` estimate so pre-tracking chats aren't shown as 0.
+        ``since=None`` → all time."""
+        per_msg = func.coalesce(
+            Message.message_metadata["total_tokens"].as_integer(),
+            func.char_length(Message.content) / 4,
         )
-        messages = await self.db.scalar(
-            select(func.count())
-            .select_from(Message)
-            .where(Message.user_id == user_id, Message.created_at >= since)
+        tok_q = select(func.coalesce(func.sum(per_msg), 0)).where(
+            Message.user_id == user_id, Message.role == "assistant"
         )
+        msg_q = (
+            select(func.count()).select_from(Message).where(Message.user_id == user_id)
+        )
+        if since is not None:
+            tok_q = tok_q.where(Message.created_at >= since)
+            msg_q = msg_q.where(Message.created_at >= since)
+        tokens = await self.db.scalar(tok_q)
+        messages = await self.db.scalar(msg_q)
         return {"tokens": int(tokens or 0), "messages": int(messages or 0)}

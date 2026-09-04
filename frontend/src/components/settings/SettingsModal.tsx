@@ -175,13 +175,15 @@ function UsagePanel() {
 
   const pct =
     data && data.token_budget > 0
-      ? Math.min(100, Math.round((data.tokens_used_30d / data.token_budget) * 100))
+      ? Math.min(100, Math.round((data.tokens_used / data.token_budget) * 100))
       : 0;
 
   return (
     <section>
       <h2 className="text-base font-semibold">Usage</h2>
-      <p className="mt-1 text-xs text-muted-foreground">Last 30 days.</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Approximate, across all your chats.
+      </p>
 
       {isError ? (
         <p className="mt-6 text-sm text-muted-foreground">
@@ -202,8 +204,8 @@ function UsagePanel() {
             <div className="flex items-baseline justify-between text-sm">
               <span className="font-medium">Tokens used</span>
               <span className="text-muted-foreground">
-                {data.tokens_used_30d.toLocaleString()} /{" "}
-                {data.token_budget.toLocaleString()}
+                {data.tokens_used.toLocaleString()} of{" "}
+                {data.token_budget.toLocaleString()} allowance
               </span>
             </div>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
@@ -216,8 +218,8 @@ function UsagePanel() {
 
           <div className="mt-3 grid grid-cols-3 gap-3">
             <Stat label="Conversations" value={data.conversations} />
-            <Stat label="Messages" value={data.messages_30d} />
-            <Stat label="Tokens" value={data.tokens_used_30d} />
+            <Stat label="Messages" value={data.messages} />
+            <Stat label="Tokens" value={data.tokens_used} />
           </div>
         </>
       )}

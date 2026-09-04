@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -47,8 +45,8 @@ async def read_me(user: User = Depends(get_current_user)) -> UserMe:
 
 class UsageOut(BaseModel):
     token_budget: int
-    tokens_used_30d: int
-    messages_30d: int
+    tokens_used: int  # all-time, from messages.metadata.total_tokens (chars/4 fallback)
+    messages: int
     conversations: int
 
 
@@ -58,13 +56,12 @@ async def read_usage(
     db: AsyncSession = Depends(get_db),
 ) -> UsageOut:
     """Activity for the Settings → Usage panel (rough, from `messages.metadata`)."""
-    since = datetime.now(UTC) - timedelta(days=30)
-    u = await MessageRepository(db).usage_since(user.id, since)
+    u = await MessageRepository(db).usage_totals(user.id)
     conversations = await ConversationRepository(db).count_for_user(user.id)
-    logger.info("users_usage", user_id=str(user.id), tokens_30d=u["tokens"])
+    logger.info("users_usage", user_id=str(user.id), tokens=u["tokens"])
     return UsageOut(
         token_budget=user.token_budget,
-        tokens_used_30d=u["tokens"],
-        messages_30d=u["messages"],
+        tokens_used=u["tokens"],
+        messages=u["messages"],
         conversations=conversations,
     )

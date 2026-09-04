@@ -565,6 +565,12 @@ async def _generate(
     if sources:
         yield format_sse_event("sources", items=sources), None
 
+    # The graph nodes accumulate `token_usage.total` via `models.bump_tokens`
+    # (prompt_enhancer + supervisor + synthesiser + validator) — that's the
+    # authoritative count; the streamed-event sum is a fallback.
+    graph_tokens = int((snap_values.get("token_usage") or {}).get("total", 0) or 0)
+    total_tokens = max(total_tokens, graph_tokens)
+
     logger.info(
         "chat_graph_done",
         run_id=run_id,
@@ -572,6 +578,7 @@ async def _generate(
         message_agents=[a for _, a in pairs],
         streamed_token_frames=token_frames,
         total_tokens=total_tokens,
+        graph_tokens=graph_tokens,
         sources=len(sources),
     )
     answer = "\n\n".join(p for p, _ in pairs)

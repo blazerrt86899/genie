@@ -152,7 +152,7 @@ async def test_usage(client, monkeypatch):
     class FakeMsgRepo:
         def __init__(self, _db): ...
 
-        async def usage_since(self, user_id, since):
+        async def usage_totals(self, user_id, since=None):
             return {"tokens": 4200, "messages": 12}
 
     class FakeConvRepo:
@@ -172,7 +172,7 @@ async def test_usage(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {
         "token_budget": 100000,
-        "tokens_used_30d": 4200,
-        "messages_30d": 12,
+        "tokens_used": 4200,
+        "messages": 12,
         "conversations": 3,
     }

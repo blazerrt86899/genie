@@ -63,8 +63,8 @@ export function getMe(token?: string | null): Promise<Me> {
 
 export interface UsageInfo {
   token_budget: number;
-  tokens_used_30d: number;
-  messages_30d: number;
+  tokens_used: number;
+  messages: number;
   conversations: number;
 }
 

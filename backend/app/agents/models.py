@@ -179,6 +179,7 @@ def _build(
             effort = _groq_light_reasoning(model)
             if effort:
                 kwargs["reasoning_effort"] = effort
+        # Groq streams a final usage chunk automatically → usage_metadata is set.
         return ChatGroq(
             model=model,
             temperature=temperature,
@@ -212,6 +213,7 @@ def _build(
         model=model,
         temperature=temperature,
         streaming=streaming,
+        stream_usage=streaming,  # include token usage on the final streamed chunk
         max_tokens=max_tokens,
         max_retries=max_retries,
         api_key=settings.OPENAI_API_KEY,
