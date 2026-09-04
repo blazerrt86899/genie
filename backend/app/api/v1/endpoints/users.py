@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.clerk import get_current_user
+from app.core.usage import window_bounds
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.message_repo import MessageRepository
@@ -69,11 +70,10 @@ async def read_usage(
 
     Windows are UTC: the day resets at 00:00, the week resets Monday 00:00.
     Token counts are approximate (`messages.metadata.total_tokens`, `chars/4`
-    fallback for pre-tracking messages). Limits are **not enforced yet**.
+    fallback for pre-tracking messages). Limits are enforced in ``POST /chat``
+    when ``USAGE_LIMITS_ENFORCED`` (see ``app/core/usage.py``).
     """
-    now = datetime.now(UTC)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = day_start - timedelta(days=now.weekday())  # Monday
+    day_start, week_start = window_bounds()
 
     msg_repo = MessageRepository(db)
     windows = await msg_repo.token_usage_windows(user.id, day_start, week_start)

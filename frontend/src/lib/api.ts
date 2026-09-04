@@ -20,6 +20,17 @@ export class ApiError extends Error {
 
 type FetchOptions = RequestInit & { token?: string | null };
 
+/** Prefer FastAPI's `{"detail": "..."}` over the raw JSON body for error text. */
+function errorText(body: string, statusText: string): string {
+  try {
+    const j = JSON.parse(body);
+    if (typeof j?.detail === "string") return j.detail;
+  } catch {
+    /* not JSON */
+  }
+  return body || statusText;
+}
+
 export async function apiFetch<T = unknown>(
   path: string,
   { token, headers, ...options }: FetchOptions = {},
@@ -35,7 +46,7 @@ export async function apiFetch<T = unknown>(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new ApiError(res.status, body || res.statusText);
+    throw new ApiError(res.status, errorText(body, res.statusText));
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -159,7 +170,7 @@ export async function uploadAttachment(
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new ApiError(res.status, body || res.statusText);
+    throw new ApiError(res.status, errorText(body, res.statusText));
   }
   return (await res.json()) as AttachmentDto;
 }
@@ -469,7 +480,7 @@ export async function uploadDocument(
     headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: form,
   });
-  if (!res.ok) throw new ApiError(res.status, (await res.text()) || res.statusText);
+  if (!res.ok) throw new ApiError(res.status, errorText(await res.text(), res.statusText));
   return (await res.json()) as DocumentDto;
 }
 

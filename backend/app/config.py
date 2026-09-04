@@ -131,9 +131,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_REQUESTS_PER_MINUTE: int = 60
     SUPERVISOR_MAX_TURNS: int = 2  # how many times the supervisor may (re)plan per run
 
-    # ─── Usage limits (shown in Settings → Usage; not enforced yet) ────────
+    # ─── Usage limits (Settings → Usage) ──────────────────────────────────
     DAILY_TOKEN_LIMIT: int = 100_000
     WEEKLY_TOKEN_LIMIT: int = 700_000
+    USAGE_LIMITS_ENFORCED: bool = True  # block a turn once daily/weekly is exhausted
 
     # ─── Guardrails (input/output PII + secret scanning) ───────────────────
     GUARDRAILS_ENABLED: bool = True

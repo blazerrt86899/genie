@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.core.clerk import get_current_user
 from app.core.redis import get_redis
+from app.core.usage import enforce_token_limits
 from app.db.models.user import User
 from app.db.session import get_db
 from app.memory import short_term
@@ -55,6 +56,7 @@ async def create_chat_run(
             status_code=429,
             detail=f"rate limit: {settings.RATE_LIMIT_REQUESTS_PER_MINUTE} messages/minute",
         )
+    await enforce_token_limits(db, user.id)
 
     try:
         run_id, conversation_id = await chat_service.create_turn(
@@ -93,6 +95,7 @@ async def regenerate_chat_run(
         redis, str(user.id), settings.RATE_LIMIT_REQUESTS_PER_MINUTE
     ):
         raise HTTPException(status_code=429, detail="rate limit")
+    await enforce_token_limits(db, user.id)
     try:
         run_id, cid = await chat_service.regenerate_turn(
             db, redis, user, conversation_id, body.from_message_id, body.edit

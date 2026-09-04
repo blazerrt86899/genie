@@ -294,6 +294,7 @@ genie/
 │           ├── aws.py                 ← boto3 s3()/sqs() singletons (LocalStack ↔ real AWS) + ensure_infra()
 │           ├── redis.py               ← async Redis client singleton
 │           ├── guardrails.py          ← pure regex scan(): secrets + PII → Finding[]; redact(); summarize() (§4.9)
+│           ├── usage.py               ← window_bounds() + enforce_token_limits() → 429 (Settings → Usage)
 │           ├── streaming.py           ← SSE frame helpers (§11)
 │           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
 │           ├── logging.py             ← structlog config + redact_processor + preview()/mask() (§21)
@@ -490,6 +491,9 @@ AWS_SECRET_ACCESS_KEY=        # Local dev only
 # ─── Limits ──────────────────────────────────────────────────────────────────
 MAX_TOKENS_PER_RUN=50000
 RATE_LIMIT_REQUESTS_PER_MINUTE=60
+DAILY_TOKEN_LIMIT=100000           # Settings → Usage — reply tokens per UTC day
+WEEKLY_TOKEN_LIMIT=700000          # …per UTC week (resets Monday 00:00)
+USAGE_LIMITS_ENFORCED=true         # block a turn (429) once daily/weekly is exhausted
 
 # ─── Guardrails / caching ────────────────────────────────────────────────────
 GUARDRAILS_ENABLED=true            # master switch for input + output scanning
@@ -1432,7 +1436,7 @@ POST   /api/v1/webhooks/clerk          → Clerk user lifecycle sync (user.creat
 
 # ── Users (Clerk JWT required) ───────────────────────────────────────────────
 GET    /api/v1/users/me                → {id, email, full_name, avatar_url, token_budget}
-GET    /api/v1/users/me/usage          → {daily{used,limit,resets_at}, weekly{…}, tokens_total, messages, conversations}  (Settings → Usage; UTC day/week windows, `DAILY_TOKEN_LIMIT`/`WEEKLY_TOKEN_LIMIT`; `messages.metadata.total_tokens` + `chars/4` estimate; **not enforced**)
+GET    /api/v1/users/me/usage          → {daily{used,limit,resets_at}, weekly{…}, tokens_total, messages, conversations}  (Settings → Usage; UTC day/week windows, `DAILY_TOKEN_LIMIT`/`WEEKLY_TOKEN_LIMIT`; `messages.metadata.total_tokens` + `chars/4` estimate). **Enforced** when `USAGE_LIMITS_ENFORCED`: `POST /chat` + `/regenerate` 429 once the daily or weekly window is exhausted (`core/usage.enforce_token_limits`, weekly checked first)
                                          Use this to confirm user is synced after sign-up
 
 # ── Chat (Clerk JWT required) ────────────────────────────────────────────────
@@ -1712,7 +1716,8 @@ tests/  (≈90 tests, all green)
 ├── mcp/
 │   └── test_tasks_server.py    ← in-memory Client, task_service faked
 ├── core/
-│   └── test_guardrails.py      ← scan() per kind · Luhn · redact · overlap · summarize
+│   ├── test_guardrails.py      ← scan() per kind · Luhn · redact · overlap · summarize
+│   └── test_usage.py           ← enforce_token_limits: under / daily / weekly-first / disabled
 ├── services/
 │   ├── test_chat_service.py    ← SSE framing, message splitting, cache-hit stream
 │   ├── test_cache_service.py   ← is_cacheable_query · lookup hit/miss · store + per-user cap
@@ -1833,7 +1838,9 @@ _Also 2026-09-02 — **chat UI redesign** (Claude-inspired): (1) **`ChatHeader`*
 
 _Also 2026-09-03 — **search chats (⌘K command palette)**: `GET /api/v1/conversations/search?q=&limit=` (declared before `/{id}`) → `conversation_repo.search` — one query, `Conversation.title ILIKE` OR an `EXISTS` on `messages.content ILIKE` (`%`/`_` escaped), ordered like the sidebar list, plus a correlated-subquery `snippet` (leading 160 chars of the first matching message). No FTS index — plain ILIKE is fine for a personal history (trigram GIN → backlog). Frontend: `components/chat/SearchChatsModal.tsx` — top-anchored overlay, debounced (`hooks/useDebouncedValue.ts`) `useSearchConversations` (`enabled` at ≥2 chars, `keepPreviousData`); blank query shows "Recent" (first 8 of `useConversations`); ↑/↓/Enter/Esc + mouse; rows show title · project glyph · snippet · `relativeDay` (`lib/date.ts`). Opened from a new **Search chats** `NavItem` (button variant) in `Sidebar` or `⌘/Ctrl+K`. 177 backend tests, build/lint clean._
 
-_Also 2026-09-04 — **Settings modal (General · Account · Usage)**: `components/settings/SettingsModal.tsx` — a two-pane dialog (left pill rail + right panel) opened from a Settings gear in the sidebar footer or `⌘/Ctrl+,`. **General** → an Appearance segmented control (System / Light / Dark, `next-themes`). **Account** → embedded Clerk `<UserProfile routing="hash">` themed borderless via `clerkAppearance`. **Usage** → `GET /users/me/usage` → **daily** (`DAILY_TOKEN_LIMIT` 100k) + **weekly** (`WEEKLY_TOKEN_LIMIT` 700k) progress bars showing *% of limit used* + a reset hint ("resets in ~Nh" / "resets Monday"), computed against UTC day/week windows (`message_repo.token_usage_windows`, one conditional-aggregate query); then 3 stat tiles (Conversations, Messages, all-time Tokens). Token counts are estimated (`messages.metadata.total_tokens` where present, `char_length/4` otherwise). **Limits are displayed, not enforced.** `chat_service._generate` persists the turn's token count on the last assistant message (`token_usage.total` from the graph state, else the streamed-event sum; no migration); `models._build` sets `stream_usage` for OpenAI streaming. 178 backend tests, ruff + build/lint clean._
+_Also 2026-09-04 — **Settings modal (General · Account · Usage)**: `components/settings/SettingsModal.tsx` — a two-pane dialog (left pill rail + right panel) opened from a Settings gear in the sidebar footer or `⌘/Ctrl+,`. **General** → an Appearance segmented control (System / Light / Dark, `next-themes`). **Account** → embedded Clerk `<UserProfile routing="hash">` themed borderless via `clerkAppearance`. **Usage** → `GET /users/me/usage` → **daily** (`DAILY_TOKEN_LIMIT` 100k) + **weekly** (`WEEKLY_TOKEN_LIMIT` 700k) progress bars showing *% of limit used* + a reset hint ("resets in ~Nh" / "resets Monday"), computed against UTC day/week windows (`message_repo.token_usage_windows`, one conditional-aggregate query); then 3 stat tiles (Conversations, Messages, all-time Tokens). Token counts are estimated (`messages.metadata.total_tokens` where present, `char_length/4` otherwise). `chat_service._generate` persists the turn's token count on the last assistant message (`token_usage.total` from the graph state, else the streamed-event sum; no migration); `models._build` sets `stream_usage` for OpenAI streaming. 178 backend tests, ruff + build/lint clean._
+
+_Also 2026-09-04 — **usage-limit enforcement**: `core/usage.py` — `window_bounds()` (shared with `GET /users/me/usage`) + `enforce_token_limits(db, user_id)` → `HTTPException(429)` with a reset hint ("resets in ~Nh" / "resets Friday") once the daily or weekly reply-token window is exhausted (weekly checked first). Wired into both `POST /chat` routes (`create_chat_run`, `regenerate_chat_run`) right after the rate-limit check. Config `USAGE_LIMITS_ENFORCED` (default `true`) toggles it. `message_repo.token_usage_windows` reused for the counts. Frontend: `hooks/useUsage.ts` (`["usage"]` query, `staleTime 60s`), invalidated in `useChat`'s `finally` after every turn; `ChatView` computes `overLimit`/`limitLabel`, blocks `handleSend`, and passes `blocked`/`blockedLabel` to `Composer` → disabled textarea + PlusMenu + ModelPicker + send, amber "token limit reached" banner. `lib/api.ts` gains an `errorText()` helper that surfaces the 429 `detail` string. `tests/core/test_usage.py` (4). 182 backend tests, ruff + build/lint clean._
 
 _Also 2026-09-03 — **premium light-mode + pill sidebar polish**: retuned the light palette (soft tinted-white ground `228 44% 98.5%`, warmer neutrals, bluer `--accent`, softer `--border`) and added a **`--sidebar`** surface token (light + dark) + `sidebar` Tailwind colour so the sidebar reads distinct from the content. `Sidebar` nav items (`NAV_CLS`), the "New chat" button, chat rows (`ConversationRow`), the rename input, section headers, and `SearchChatsModal` rows are all `rounded-full` pills now (`bg-accent` hover/active, `px-3.5`). `AuroraBackdrop` gained a `.aurora-center` — a slow-pulsing soft blue halo directly behind the greeting + composer on the empty chat (the Gemini-style glow); drift blobs dialled down. Composer is `rounded-[28px]` on `bg-card` with a brand-tinted glow shadow, round send button. Light `--glow` violet / `--glow-2` blue. Verified: build + lint clean._
 
@@ -1884,6 +1891,7 @@ _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `c
 - ✅ **Unified LLM layer + model picker** (`agents/models.py`) — `MODEL_CATALOG` (8 models · OpenAI/Anthropic/Groq); `_build(provider, model, …)` → `ChatOpenAI` / `ChatAnthropic` / `ChatGroq`; `get_chat_model(model_id=…)` → `resolve_model_spec` (unknown/keyless → `_default_spec()` = `LLM_PROVIDER` + `chat_model_name`, logged `model_id_unresolved`). The 4 chat-model call sites (`supervisor` / `synthesiser` ×2 / `web_search` / `task_creator`) pass `model_id=state.get("model")`; `get_utility_model()` untouched. `conversations.model` persists the pick (`chat_service.create_turn` sets/updates it; `_generate` → `GenieState['model']`). `GET /api/v1/models` lists the catalog filtered to configured providers. `ainvoke()` = tenacity `AsyncRetrying` (4 attempts, `wait_exponential(2..30s)`) on `openai` / `anthropic` / `groq` transient errors (dynamic `_transient_errors()`); streaming keeps langchain's `max_retries=2`. `tokens_of()` + `bump_tokens()` → `token_usage.by_agent` per node.
 - ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
 - ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).
+- ✅ **Usage limits** — `core/usage.enforce_token_limits` in both `POST /chat` routes → 429 once the daily (`DAILY_TOKEN_LIMIT`) or weekly (`WEEKLY_TOKEN_LIMIT`) reply-token window is spent; `USAGE_LIMITS_ENFORCED` toggles. Frontend `useUsage` disables the composer + shows an amber banner.
 - ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
@@ -1951,6 +1959,7 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Chat share / public view | `conversation_repo` share helpers + `endpoints/conversations.py` `{id}/share` + `endpoints/public.py` (unauth); frontend `ShareChatModal` + `app/share/[token]/` |
 | Chat search | `conversation_repo.search` (title + `messages.content` ILIKE) + `GET /conversations/search` + frontend `SearchChatsModal` (⌘K) |
 | Settings modal / usage | `components/settings/SettingsModal.tsx` (⌘,) — General/Account/Usage; daily/weekly token limits from `GET /users/me/usage` (`message_repo.token_usage_windows`, `DAILY_/WEEKLY_TOKEN_LIMIT`); tune limits via those env vars |
+| Usage-limit enforcement | `core/usage.py:enforce_token_limits` (called in `endpoints/chat.py` — both `POST /chat` routes) → 429; `USAGE_LIMITS_ENFORCED` toggles it; frontend `useUsage` + `ChatView` disables the composer + amber banner when over |
 | Tune answer formatting | `RESPONSE_FORMAT_GUIDE` in `agents/supervisor/prompts.py` (the synthesiser/drafter spec) |
 | Code-block colours / a highlighted language | `globals.css` `.hljs-*` rules + `--hl-*` / `--code-*` vars; languages come from `rehype-highlight`'s common set automatically |
 | Business-doc draft card | `DOCUMENT_BLOCK_GUIDE` in `agents/supervisor/prompts.py` (when/how the model emits ```` ```document ````) + `components/chat/DocumentCard.tsx` (render + Copy) |
@@ -2043,6 +2052,8 @@ able to reconstruct a request from the logs alone.
 - **Response cache** — `cache_service`: `cache_hit` (similarity, age_s),
   `cache_miss`, `cache_stored`, `cache_swept`; `nodes`: `cache_served`;
   `chat_service`: `cache_store_failed`; `main.py`: `cache_sweep_started`.
+- **Usage limits** — `core/usage.py`: `usage_limit_block` (`window` daily|weekly,
+  `used`, `user_id` — never message content); `endpoints/users.py`: `users_usage`.
 - **Chat search** — `conversation_repo`: `conversations_searched` (`query_len` +
   `count`, never the query text).
 - **Chat share** — `conversation_repo`: `conversation_shared` / `conversation_unshared`

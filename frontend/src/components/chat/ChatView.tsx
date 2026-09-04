@@ -8,6 +8,7 @@ import { FolderKanban, SendHorizontal, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChat } from "@/hooks/useChat";
 import { useProjects } from "@/hooks/useProjects";
+import { useUsage } from "@/hooks/useUsage";
 import { useScrollShadow } from "@/hooks/useScrollShadow";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/store/chatStore";
@@ -30,6 +31,8 @@ function Composer({
   isStreaming,
   autoFocus,
   conversationId,
+  blocked,
+  blockedLabel,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -37,7 +40,10 @@ function Composer({
   isStreaming: boolean;
   autoFocus?: boolean;
   conversationId?: string;
+  blocked?: boolean;
+  blockedLabel?: string;
 }) {
+  const disabled = isStreaming || !!blocked;
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow the textarea with its content, up to a cap.
@@ -49,39 +55,49 @@ function Composer({
   }, [input]);
 
   return (
-    <div className="rounded-[28px] border border-border bg-card shadow-[0_2px_10px_-2px_hsl(226_40%_11%/0.06),0_12px_40px_-12px_hsl(var(--glow)/0.18)] transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring dark:shadow-[0_2px_24px_-6px_hsl(var(--glow)/0.2)]">
-      <AttachmentChips />
-      <textarea
-        ref={taRef}
-        // eslint-disable-next-line jsx-a11y/no-autofocus
-        autoFocus={autoFocus}
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            onSend();
+    <div>
+      {blocked && blockedLabel && (
+        <div className="mb-2 flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-[13px] text-amber-700 dark:text-amber-300">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span>{blockedLabel} New messages are paused until it resets.</span>
+        </div>
+      )}
+      <div className="rounded-[28px] border border-border bg-card shadow-[0_2px_10px_-2px_hsl(226_40%_11%/0.06),0_12px_40px_-12px_hsl(var(--glow)/0.18)] transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring dark:shadow-[0_2px_24px_-6px_hsl(var(--glow)/0.2)]">
+        <AttachmentChips />
+        <textarea
+          ref={taRef}
+          // eslint-disable-next-line jsx-a11y/no-autofocus
+          autoFocus={autoFocus}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+          rows={2}
+          placeholder={
+            blocked ? "Token limit reached" : "How can I help you today?"
           }
-        }}
-        rows={2}
-        placeholder="How can I help you today?"
-        disabled={isStreaming}
-        className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
-      />
-      <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-2">
-        <PlusMenu conversationId={conversationId} disabled={isStreaming} />
-        <div className="flex items-center gap-1.5">
-          <ModelPicker disabled={isStreaming} />
-          <Button
-            variant="brand"
-            size="icon"
-            className="rounded-full"
-            onClick={onSend}
-            disabled={isStreaming || !input.trim()}
-            aria-label="Send"
-          >
-            <SendHorizontal className="h-4 w-4" />
-          </Button>
+          disabled={disabled}
+          className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
+        />
+        <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-2">
+          <PlusMenu conversationId={conversationId} disabled={disabled} />
+          <div className="flex items-center gap-1.5">
+            <ModelPicker disabled={disabled} />
+            <Button
+              variant="brand"
+              size="icon"
+              className="rounded-full"
+              onClick={onSend}
+              disabled={disabled || !input.trim()}
+              aria-label="Send"
+            >
+              <SendHorizontal className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </div>
@@ -112,6 +128,16 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
 
   const uploading = pendingAttachments.some((a) => a.status === "uploading");
 
+  const { data: usage } = useUsage();
+  const overLimit =
+    !!usage &&
+    (usage.daily.used >= usage.daily.limit ||
+      usage.weekly.used >= usage.weekly.limit);
+  const limitLabel =
+    usage && usage.weekly.used >= usage.weekly.limit
+      ? "You've reached this week's token limit."
+      : "You've reached today's token limit.";
+
   // Active agents whose message hasn't started yet → shown at the list tail.
   const pendingAgents = useMemo(() => {
     const claimed = new Set(messages.flatMap((m) => m.agents ?? []));
@@ -136,7 +162,7 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
 
   function handleSend() {
     const text = input.trim();
-    if (!text || isStreaming || uploading) return;
+    if (!text || isStreaming || uploading || overLimit) return;
     setInput("");
     void send(text);
   }
@@ -189,6 +215,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               onSend={handleSend}
               isStreaming={isStreaming}
               conversationId={conversationId}
+              blocked={overLimit}
+              blockedLabel={limitLabel}
               autoFocus
             />
           </div>
@@ -238,6 +266,8 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
                 onSend={handleSend}
                 isStreaming={isStreaming}
                 conversationId={conversationId}
+                blocked={overLimit}
+                blockedLabel={limitLabel}
               />
             </div>
           </div>

@@ -216,6 +216,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         s.setRunId(null);
         s.setActiveAgents([]);
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+        qc.invalidateQueries({ queryKey: ["usage"] });
       }
     },
     [getToken, router, qc, projectId, consumeStream, refreshMessages],
@@ -263,6 +264,7 @@ export function useChat(conversationId?: string, projectId?: string | null) {
         s.setRunId(null);
         s.setActiveAgents([]);
         qc.invalidateQueries({ queryKey: CONVERSATIONS_KEY });
+        qc.invalidateQueries({ queryKey: ["usage"] });
       }
     },
     [getToken, qc, consumeStream, refreshMessages],
