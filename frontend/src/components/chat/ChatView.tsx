@@ -68,12 +68,7 @@ function Composer({
         disabled={isStreaming}
         className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
       />
-      <p className="select-none px-4 pt-1 text-xs text-muted-foreground/60">
-        <kbd className="font-sans">Enter</kbd> to send ·{" "}
-        <kbd className="font-sans">Shift</kbd>+
-        <kbd className="font-sans">Enter</kbd> for a new line
-      </p>
-      <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1.5">
+      <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-2">
         <PlusMenu conversationId={conversationId} disabled={isStreaming} />
         <div className="flex items-center gap-1.5">
           <ModelPicker disabled={isStreaming} />
@@ -195,10 +190,6 @@ export function ChatView({ conversationId }: { conversationId?: string }) {
               conversationId={conversationId}
               autoFocus
             />
-            <p className="mt-2 text-center text-xs text-muted-foreground">
-              Genie routes your message to the right specialists and streams back
-              one answer.
-            </p>
           </div>
         </div>
       ) : (
