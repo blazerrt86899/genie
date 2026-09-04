@@ -16,7 +16,7 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
   const model = useChatStore((s) => s.model);
   const setModel = useChatStore((s) => s.setModel);
   const [open, setOpen] = useState(false);
-  const [dropUp, setDropUp] = useState(false);
+  const [maxH, setMaxH] = useState(288);
   const ref = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -30,14 +30,13 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
   }, [open]);
 
   function toggle() {
-    setOpen((v) => {
-      if (!v && btnRef.current) {
-        // Open downwards by default; flip up only when there isn't room below.
-        const below = window.innerHeight - btnRef.current.getBoundingClientRect().bottom;
-        setDropUp(below < 320);
-      }
-      return !v;
-    });
+    if (!open && btnRef.current) {
+      // Always drop downwards — cap the height to the room below so the menu
+      // never covers the composer and the list just scrolls when it's tight.
+      const below = window.innerHeight - btnRef.current.getBoundingClientRect().bottom;
+      setMaxH(Math.max(180, Math.min(288, below - 16)));
+    }
+    setOpen((v) => !v);
   }
 
   const models = data?.models ?? [];
@@ -73,10 +72,8 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
       {open && (
         <ul
           role="listbox"
-          className={cn(
-            "absolute right-0 z-20 max-h-72 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg",
-            dropUp ? "bottom-full mb-1.5" : "top-full mt-1.5",
-          )}
+          style={{ maxHeight: maxH }}
+          className="absolute right-0 top-full z-20 mt-1.5 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg"
         >
           {models.map((m) => (
             <li key={m.id}>
