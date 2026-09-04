@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import structlog
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.clerk import get_current_user
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
@@ -43,9 +46,16 @@ async def read_me(user: User = Depends(get_current_user)) -> UserMe:
     )
 
 
+class UsageWindow(BaseModel):
+    used: int
+    limit: int
+    resets_at: datetime  # ISO — the frontend renders "resets in Nh" / "resets Monday"
+
+
 class UsageOut(BaseModel):
-    token_budget: int
-    tokens_used: int  # all-time, from messages.metadata.total_tokens (chars/4 fallback)
+    daily: UsageWindow
+    weekly: UsageWindow
+    tokens_total: int  # all-time (estimated)
     messages: int
     conversations: int
 
@@ -55,13 +65,39 @@ async def read_usage(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> UsageOut:
-    """Activity for the Settings → Usage panel (rough, from `messages.metadata`)."""
-    u = await MessageRepository(db).usage_totals(user.id)
+    """Activity + daily/weekly token limits for Settings → Usage.
+
+    Windows are UTC: the day resets at 00:00, the week resets Monday 00:00.
+    Token counts are approximate (`messages.metadata.total_tokens`, `chars/4`
+    fallback for pre-tracking messages). Limits are **not enforced yet**.
+    """
+    now = datetime.now(UTC)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = day_start - timedelta(days=now.weekday())  # Monday
+
+    msg_repo = MessageRepository(db)
+    windows = await msg_repo.token_usage_windows(user.id, day_start, week_start)
+    totals = await msg_repo.usage_totals(user.id)
     conversations = await ConversationRepository(db).count_for_user(user.id)
-    logger.info("users_usage", user_id=str(user.id), tokens=u["tokens"])
+
+    logger.info(
+        "users_usage",
+        user_id=str(user.id),
+        daily=windows["daily"],
+        weekly=windows["weekly"],
+    )
     return UsageOut(
-        token_budget=user.token_budget,
-        tokens_used=u["tokens"],
-        messages=u["messages"],
+        daily=UsageWindow(
+            used=windows["daily"],
+            limit=settings.DAILY_TOKEN_LIMIT,
+            resets_at=day_start + timedelta(days=1),
+        ),
+        weekly=UsageWindow(
+            used=windows["weekly"],
+            limit=settings.WEEKLY_TOKEN_LIMIT,
+            resets_at=week_start + timedelta(days=7),
+        ),
+        tokens_total=windows["all_time"],
+        messages=totals["messages"],
         conversations=conversations,
     )

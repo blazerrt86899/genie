@@ -61,9 +61,16 @@ export function getMe(token?: string | null): Promise<Me> {
   return apiFetch<Me>("/api/v1/users/me", { token });
 }
 
+export interface UsageWindow {
+  used: number;
+  limit: number;
+  resets_at: string; // ISO
+}
+
 export interface UsageInfo {
-  token_budget: number;
-  tokens_used: number;
+  daily: UsageWindow;
+  weekly: UsageWindow;
+  tokens_total: number;
   messages: number;
   conversations: number;
 }

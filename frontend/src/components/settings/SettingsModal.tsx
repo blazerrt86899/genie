@@ -170,19 +170,67 @@ function AccountPanel() {
 
 /* ── Usage ─────────────────────────────────────────────────────── */
 
+function resetsIn(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return "resetting now";
+  const hours = Math.round(ms / 3_600_000);
+  if (hours < 1) return `resets in ${Math.max(1, Math.round(ms / 60_000))} min`;
+  if (hours < 36) return `resets in ~${hours}h`;
+  return `resets in ${Math.round(hours / 24)} days`;
+}
+
+function resetsOn(iso: string): string {
+  return `resets ${new Date(iso).toLocaleDateString(undefined, { weekday: "long" })}`;
+}
+
+function LimitBar({
+  label,
+  window,
+  reset,
+}: {
+  label: string;
+  window: { used: number; limit: number; resets_at: string };
+  reset: string;
+}) {
+  const pct = window.limit > 0 ? (window.used / window.limit) * 100 : 0;
+  const shown = Math.min(100, Math.round(pct * 10) / 10); // 1 dp, never <0
+  const bar =
+    pct >= 100
+      ? "bg-red-500"
+      : pct >= 80
+        ? "bg-amber-500"
+        : "bg-gradient-to-r from-brand to-brand-2";
+
+  return (
+    <div className="rounded-2xl border border-border p-4">
+      <div className="flex items-baseline justify-between">
+        <span className="text-sm font-medium">{label}</span>
+        <span className="text-sm text-muted-foreground">
+          {shown < 1 && pct > 0 ? "<1" : shown}% used
+        </span>
+      </div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn("h-full rounded-full transition-all", bar)}
+          style={{ width: `${Math.max(pct > 0 ? 1.5 : 0, Math.min(100, pct))}%` }}
+        />
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        {window.used.toLocaleString()} / {window.limit.toLocaleString()} tokens ·{" "}
+        {reset}
+      </p>
+    </div>
+  );
+}
+
 function UsagePanel() {
   const { data, isPending, isError } = useUsage();
-
-  const pct =
-    data && data.token_budget > 0
-      ? Math.min(100, Math.round((data.tokens_used / data.token_budget) * 100))
-      : 0;
 
   return (
     <section>
       <h2 className="text-base font-semibold">Usage</h2>
       <p className="mt-1 text-xs text-muted-foreground">
-        Approximate, across all your chats.
+        Approximate token usage against your limits.
       </p>
 
       {isError ? (
@@ -190,8 +238,9 @@ function UsagePanel() {
           Couldn&apos;t load usage right now.
         </p>
       ) : isPending ? (
-        <div className="mt-6 space-y-4">
-          <div className="h-16 animate-pulse rounded-2xl bg-muted" />
+        <div className="mt-6 space-y-3">
+          <div className="h-24 animate-pulse rounded-2xl bg-muted" />
+          <div className="h-24 animate-pulse rounded-2xl bg-muted" />
           <div className="grid grid-cols-3 gap-3">
             {[0, 1, 2].map((i) => (
               <div key={i} className="h-20 animate-pulse rounded-2xl bg-muted" />
@@ -200,26 +249,23 @@ function UsagePanel() {
         </div>
       ) : (
         <>
-          <div className="mt-6 rounded-2xl border border-border p-4">
-            <div className="flex items-baseline justify-between text-sm">
-              <span className="font-medium">Tokens used</span>
-              <span className="text-muted-foreground">
-                {data.tokens_used.toLocaleString()} of{" "}
-                {data.token_budget.toLocaleString()} allowance
-              </span>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-brand to-brand-2"
-                style={{ width: `${pct}%` }}
-              />
-            </div>
+          <div className="mt-6 space-y-3">
+            <LimitBar
+              label="Daily limit"
+              window={data.daily}
+              reset={resetsIn(data.daily.resets_at)}
+            />
+            <LimitBar
+              label="Weekly limit"
+              window={data.weekly}
+              reset={resetsOn(data.weekly.resets_at)}
+            />
           </div>
 
           <div className="mt-3 grid grid-cols-3 gap-3">
             <Stat label="Conversations" value={data.conversations} />
             <Stat label="Messages" value={data.messages} />
-            <Stat label="Tokens" value={data.tokens_used} />
+            <Stat label="Tokens (all time)" value={data.tokens_total} />
           </div>
         </>
       )}

@@ -152,3 +152,30 @@ class MessageRepository(BaseRepository[Message]):
         tokens = await self.db.scalar(tok_q)
         messages = await self.db.scalar(msg_q)
         return {"tokens": int(tokens or 0), "messages": int(messages or 0)}
+
+    async def token_usage_windows(
+        self, user_id: uuid.UUID, day_start: datetime, week_start: datetime
+    ) -> dict:
+        """Estimated reply tokens in three windows, in one query."""
+        per_msg = func.coalesce(
+            Message.message_metadata["total_tokens"].as_integer(),
+            func.char_length(Message.content) / 4,
+        )
+        row = (
+            await self.db.execute(
+                select(
+                    func.coalesce(func.sum(per_msg), 0),
+                    func.coalesce(
+                        func.sum(per_msg).filter(Message.created_at >= day_start), 0
+                    ),
+                    func.coalesce(
+                        func.sum(per_msg).filter(Message.created_at >= week_start), 0
+                    ),
+                ).where(Message.user_id == user_id, Message.role == "assistant")
+            )
+        ).one()
+        return {
+            "all_time": int(row[0] or 0),
+            "daily": int(row[1] or 0),
+            "weekly": int(row[2] or 0),
+        }

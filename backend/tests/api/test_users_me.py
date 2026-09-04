@@ -152,14 +152,17 @@ async def test_usage(client, monkeypatch):
     class FakeMsgRepo:
         def __init__(self, _db): ...
 
+        async def token_usage_windows(self, user_id, day_start, week_start):
+            return {"all_time": 23905, "daily": 6330, "weekly": 23503}
+
         async def usage_totals(self, user_id, since=None):
-            return {"tokens": 4200, "messages": 12}
+            return {"tokens": 23905, "messages": 137}
 
     class FakeConvRepo:
         def __init__(self, _db): ...
 
         async def count_for_user(self, user_id):
-            return 3
+            return 21
 
     monkeypatch.setattr(users_ep, "MessageRepository", FakeMsgRepo)
     monkeypatch.setattr(users_ep, "ConversationRepository", FakeConvRepo)
@@ -170,9 +173,14 @@ async def test_usage(client, monkeypatch):
             headers={"Authorization": f"Bearer {_token('user_u1')}"},
         )
     assert resp.status_code == 200
-    assert resp.json() == {
-        "token_budget": 100000,
-        "tokens_used": 4200,
-        "messages": 12,
-        "conversations": 3,
-    }
+    body = resp.json()
+    assert body["daily"]["used"] == 6330 and body["daily"]["limit"] == 100_000
+    assert body["weekly"]["used"] == 23503 and body["weekly"]["limit"] == 700_000
+    assert body["tokens_total"] == 23905
+    assert body["messages"] == 137 and body["conversations"] == 21
+
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    assert now < datetime.fromisoformat(body["daily"]["resets_at"])
+    assert now < datetime.fromisoformat(body["weekly"]["resets_at"])
