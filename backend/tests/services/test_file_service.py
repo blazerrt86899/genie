@@ -56,6 +56,59 @@ def test_render_pdf_survives_smart_punctuation():
     assert data[:4] == b"%PDF"
 
 
+_TRICKY_MD = """\
+# Report Title – 2026
+
+**Bold claim** with *italic* emphasis and a bullet • aside.
+
+| Framework | Notes |
+| --- | --- |
+| React | 91%<br>86M downloads |
+| Vue | Growing |
+"""
+
+
+def _pdf_text(data: bytes) -> str:
+    import io as _io
+
+    from pdfminer.high_level import extract_text
+
+    return extract_text(_io.BytesIO(data))
+
+
+def test_render_pdf_has_no_leaked_markdown_or_html_markers():
+    text = _pdf_text(fs.render("pdf", _TRICKY_MD))
+    assert "**" not in text
+    assert "<br" not in text.lower()
+    assert "?" not in text  # no un-transliterated / un-encodable character survived
+    assert "React" in text and "91%" in text and "86M downloads" in text
+
+
+def test_render_pdf_table_is_a_real_bordered_grid_not_flat_text():
+    # a flat " | "-joined row would put "React | 91%..." on one text line;
+    # a real <table> lays each cell out separately.
+    text = _pdf_text(fs.render("pdf", _TRICKY_MD))
+    assert "React | 91%" not in text
+    assert "Framework" in text and "Notes" in text
+
+
+def test_render_docx_renders_real_bold_italic_and_splits_br_into_paragraphs():
+    import io as _io
+
+    from docx import Document
+
+    doc = Document(_io.BytesIO(fs.render("docx", _TRICKY_MD)))
+    body_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "**" not in body_text and "<br" not in body_text.lower()
+
+    bold_runs = [r for p in doc.paragraphs for r in p.runs if r.bold and r.text == "Bold claim"]
+    italic_runs = [r for p in doc.paragraphs for r in p.runs if r.italic and r.text == "italic"]
+    assert bold_runs and italic_runs
+
+    cell = doc.tables[0].rows[1].cells[1]  # React's "Notes" cell
+    assert [p.text for p in cell.paragraphs] == ["91%", "86M downloads"]
+
+
 def test_mime_for_known_and_code():
     assert fs.mime_for("pdf") == "application/pdf"
     assert fs.mime_for("code", "py") == "text/x-python"
