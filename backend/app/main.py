@@ -84,6 +84,8 @@ async def lifespan(app: FastAPI):
         langsmith_enabled=settings.langsmith_enabled,
         aws_configured=settings.aws_configured,
         ingestion_worker=settings.run_ingestion_worker,
+        loki_configured=bool(settings.LOKI_URL),
+        loki_url=settings.LOKI_URL,
     )
     log_registry()
 
