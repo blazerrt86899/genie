@@ -9,6 +9,7 @@ from app.api.v1.endpoints import (
     chat,
     conversations,
     documents,
+    files,
     messages,
     models,
     projects,
@@ -30,3 +31,4 @@ api_router.include_router(attachments.router)
 api_router.include_router(projects.router)
 api_router.include_router(tasks.router)
 api_router.include_router(documents.router)
+api_router.include_router(files.router)

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { PlanStepView } from "@/lib/sse";
+import type { MessageFileView, PlanStepView } from "@/lib/sse";
 
 export interface ChatMessage {
   id: string;
@@ -13,6 +13,10 @@ export interface ChatMessage {
   feedback?: "up" | "down" | null; // the user's 👍/👎 on an assistant message
   cached?: boolean; // assistant reply served from the response cache
   guardrail?: { redacted: string[]; flagged: string[]; message: string } | null; // on a user message
+  thinking?: string; // the reasoning trace behind this message (thinking-capable models)
+  thinkingMs?: number | null; // how long that reasoning took, once done
+  thinkingActive?: boolean; // a trace is currently streaming in
+  files?: MessageFileView[]; // generated, downloadable files produced this turn
 }
 
 export interface ProjectRef {
@@ -54,9 +58,12 @@ interface ChatState {
   addMessage: (message: ChatMessage) => void;
   setMessages: (messages: ChatMessage[]) => void;
   appendToken: (id: string, token: string) => void;
+  appendThinking: (id: string, delta: string) => void;
+  setThinkingDone: (id: string, ms: number) => void;
   setMessagePending: (id: string, pending: boolean) => void;
   setMessageAgents: (id: string, agents: string[]) => void;
   setMessageSources: (id: string, sources: { title: string; url: string }[]) => void;
+  setMessageFiles: (id: string, files: MessageFileView[]) => void;
   setMessageFeedback: (id: string, feedback: "up" | "down" | null) => void;
   updateMessageContent: (id: string, content: string) => void;
   truncateAfter: (id: string, opts?: { inclusive?: boolean }) => void;
@@ -115,6 +122,20 @@ export const useChatStore = create<ChatState>((set) => ({
         m.id === id ? { ...m, content: m.content + token } : m,
       ),
     })),
+  appendThinking: (id, delta) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id
+          ? { ...m, thinking: (m.thinking ?? "") + delta, thinkingActive: true }
+          : m,
+      ),
+    })),
+  setThinkingDone: (id, ms) =>
+    set((s) => ({
+      messages: s.messages.map((m) =>
+        m.id === id ? { ...m, thinkingMs: ms, thinkingActive: false } : m,
+      ),
+    })),
   setMessagePending: (id, pending) =>
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, pending } : m)),
@@ -126,6 +147,10 @@ export const useChatStore = create<ChatState>((set) => ({
   setMessageSources: (id, sources) =>
     set((s) => ({
       messages: s.messages.map((m) => (m.id === id ? { ...m, sources } : m)),
+    })),
+  setMessageFiles: (id, files) =>
+    set((s) => ({
+      messages: s.messages.map((m) => (m.id === id ? { ...m, files } : m)),
     })),
   setMessageFeedback: (id, feedback) =>
     set((s) => ({

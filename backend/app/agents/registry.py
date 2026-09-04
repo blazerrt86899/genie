@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import structlog
 
 from app.agents.base import AgentResult
+from app.agents.file_creator.agent import run_file_creator
 from app.agents.greeting.agent import run_greeting
 from app.agents.supervisor.state import GenieState, TaskRecord
 from app.agents.task_creator.agent import run_task_creator
@@ -66,6 +67,19 @@ AGENT_REGISTRY: dict[str, AgentSpec] = {
         ),
         runner=run_task_creator,
         stream=True,
+    ),
+    "file_creator": AgentSpec(
+        name="file_creator",
+        description=(
+            "Creates a real, downloadable file from this turn's content — Markdown, "
+            "plain text, CSV, JSON, source code, or a Word (.docx) / PDF / Excel "
+            "(.xlsx) document. Use for 'write this up as a report', 'make me a PDF', "
+            "'export this as a spreadsheet', 'save this as a Word doc', 'give me a "
+            "CSV of ...'. Does not search the web or manage tasks itself — if the "
+            "request also needs research, add a web_search step first and make this "
+            "step depend_on it so it gets those findings."
+        ),
+        runner=run_file_creator,
     ),
 }
 

@@ -212,6 +212,14 @@ export interface MessageSource {
   url: string;
 }
 
+export interface MessageFile {
+  id: string;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  summary: string | null;
+}
+
 export interface ConversationMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -223,6 +231,33 @@ export interface ConversationMessage {
   feedback?: "up" | "down" | null;
   cached?: boolean;
   guardrail?: { redacted: string[]; flagged: string[]; message: string } | null;
+  thinking?: string | null;
+  thinking_ms?: number | null;
+  files?: MessageFile[];
+}
+
+/** Download a generated file with the auth header a plain `<a href>` can't
+ * carry — fetch the bytes, then trigger the browser's save dialog. */
+export async function downloadFile(id: string, token?: string | null): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/files/${id}/download`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new ApiError(res.status, errorText(body, res.statusText));
+  }
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^"]+)"?/.exec(disposition);
+  const filename = match?.[1] ?? "download";
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 export interface ConversationSummary {

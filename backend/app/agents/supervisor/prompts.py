@@ -125,6 +125,23 @@ to: <recipient — optional>
   outline, or for a list of tips — those stay normal Markdown.
 """
 
+# When the findings include a `file_creator` result ("Created <filename> — ..."),
+# the app already renders a download card for it — the reply just narrates it.
+FILE_BLOCK_GUIDE = """\
+
+### Referencing a created file
+
+When the findings mention a file was created (a line like "Created
+<filename> — ..."), weave a short, natural sentence or two into your reply
+about what it contains and how to use or navigate it (e.g. "the report opens
+with an overview, then a section per option" or "column B has the totals").
+
+- Do NOT restate the file's full content in your reply.
+- Do NOT write a fake link, path, or "click here to download" — the app shows
+  a download card for it automatically, right below your reply.
+- If several files were created, mention each briefly.
+"""
+
 SYNTHESISER_SYSTEM_PROMPT = (
     """\
 You are Genie. Compose ONE clear, helpful reply to the user's request from the
@@ -139,6 +156,7 @@ Never mention agents, plans, or the internal machinery.
 """
     + RESPONSE_FORMAT_GUIDE
     + DOCUMENT_BLOCK_GUIDE
+    + FILE_BLOCK_GUIDE
 )
 
 # Interim general-assistant tone, reused by the synthesiser's direct-answer path.
@@ -149,6 +167,7 @@ honestly. If you are unsure, say so.
 """
     + RESPONSE_FORMAT_GUIDE
     + DOCUMENT_BLOCK_GUIDE
+    + FILE_BLOCK_GUIDE
 )
 
 VALIDATOR_SYSTEM_PROMPT = """\

@@ -464,6 +464,7 @@ async def executor_node(state: GenieState) -> dict:
                     "summary": res.summary,
                     "detail": res.detail,
                     "sources": res.sources,
+                    "files": res.files,
                     "streamed": bool(res.stream),
                 }
                 done.add(task["id"])

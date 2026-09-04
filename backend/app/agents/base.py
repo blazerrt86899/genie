@@ -22,9 +22,15 @@ class AgentResult:
     to the user the moment this step finishes (before later steps run) — the
     synthesiser then composes only the remaining, non-streamed findings and does
     not repeat it. Use for short, final outputs like a greeting.
+
+    ``files`` are downloadable files this step produced (the ``file_creator``
+    agent) — ``{"id", "filename", "mime_type", "byte_size", "summary"}`` dicts,
+    surfaced the same way ``sources`` are: collected across the turn and sent as
+    one SSE event before ``done``.
     """
 
     summary: str
     detail: str | None = None
     sources: list[dict] = field(default_factory=list)
+    files: list[dict] = field(default_factory=list)
     stream: bool = False

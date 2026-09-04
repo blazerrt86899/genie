@@ -13,14 +13,25 @@ export interface PlanStepView {
   error: string | null;
 }
 
+export interface MessageFileView {
+  id: string;
+  filename: string;
+  mime_type: string;
+  byte_size: number;
+  summary: string | null;
+}
+
 export type SseEvent =
   | { type: "agent_start"; agent: string; run_id: string }
   | { type: "token"; content: string }
+  | { type: "thinking"; content: string } // a reasoning-trace delta (thinking-capable models only)
+  | { type: "thinking_done"; duration_ms: number } // the trace closed — the answer starts next
   | { type: "agent_end"; agent: string; status: string }
   | { type: "plan"; steps: PlanStepView[] }
   | { type: "message_break" } // finalize the current assistant message, start a new one
   | { type: "message_agents"; agents: string[] } // which agents produce the current message
   | { type: "sources"; items: { title: string; url: string }[] }
+  | { type: "files"; items: MessageFileView[] } // generated, downloadable files this turn
   | { type: "guardrail"; types: string[]; redacted: boolean; message: string }
   | { type: "task_created"; task: Record<string, unknown> }
   | { type: "task_updated"; task: Record<string, unknown> }

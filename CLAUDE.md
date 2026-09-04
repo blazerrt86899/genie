@@ -70,6 +70,7 @@ User message → FastAPI → LangGraph Supervisor → [parallel specialist agent
 | Task Queue | AWS SQS (LocalStack local) | Standard queue, idempotent consumers. `core/aws.py` — `boto3`, endpoint-override for LocalStack |
 | Background Worker | `workers/ingestion_worker.py` | KB ingestion. Dev: in-process from the lifespan (`RUN_INGESTION_WORKER`). Prod: separate ECS service (`python -m`) |
 | Doc parsing | `pdfminer.six` (PDF) · `unstructured` (md/txt + `chunk_by_title`) · `pypdf` (attachments) | "fast" — no OCR / layout ML model |
+| Doc generation | `python-docx` (.docx) · `fpdf2` (.pdf) · `openpyxl` (.xlsx) | the `file_creator` agent — pure-Python, no system deps |
 | Auth | **Clerk** | Hosted auth, webhook sync to DB, JWKS-verified JWT in FastAPI |
 | Observability | LangSmith + AWS X-Ray | Trace every graph run |
 | LLM SDKs | `langchain-openai` · `langchain-anthropic` · `langchain-groq` | All via `agents/models.py` — no direct imports elsewhere |
@@ -202,7 +203,8 @@ genie/
 │       │       ├── models.py          ← GET /models (the composer's model-picker catalog)
 │       │       ├── attachments.py     ← POST/DELETE /attachments (composer "+" file uploads)
 │       │       ├── tasks.py           ← /tasks CRUD
-│       │       └── documents.py       ← /documents upload + list
+│       │       ├── documents.py       ← /documents upload + list
+│       │       └── files.py           ← GET /files/{id}/download — the file_creator agent's output
 │       │
 │       ├── agents/
 │       │   ├── base.py                ← AgentResult dataclass
@@ -241,6 +243,11 @@ genie/
 │       │   │   ├── prompts.py
 │       │   │   └── schemas.py         ← TaskOp / TaskOps structured output
 │       │   │
+│       │   ├── file_creator/          ← registered agent: real downloadable files (md/txt/csv/json/code/docx/pdf/xlsx)
+│       │   │   ├── agent.py           ← run_file_creator(state, task) → AgentResult(files=[...])
+│       │   │   ├── prompts.py
+│       │   │   └── schemas.py         ← FileSpec structured output (filename + format)
+│       │   │
 │       │   ├── guardrails/            ← input_guard_node (redact secrets/PII) + scrub_output (validator)
 │       │   └── events.py              ← emit(name, data) — agent custom events → SSE (§11)
 │       │
@@ -268,6 +275,7 @@ genie/
 │       │       ├── attachment_repo.py
 │       │       ├── document_repo.py         ← ✅ KB documents (status/phase/stats)
 │       │       ├── document_chunk_repo.py   ← ✅ bulk_insert chunks (embedding + fts)
+│       │       ├── generated_file_repo.py   ← ✅ file_creator's output (get_for_user/link_message)
 │       │       └── memory_repo.py
 │       │
 │       ├── services/
@@ -278,6 +286,7 @@ genie/
 │       │   ├── cache_service.py       ← semantic response cache (pgvector) — is_cacheable_query / lookup / store / sweep
 │       │   ├── memory_service.py      ← Memory consolidation logic
 │       │   ├── document_service.py    ← KB: validate → S3 put → row → SQS enqueue; list/get/chunks/delete
+│       │   ├── file_service.py        ← file_creator: Markdown→blocks parser, render() (docx/pdf/xlsx/text), S3 upload/download
 │       │   └── rag/
 │       │       ├── partition_service.py  ← pdf (pdfminer) / md·txt (unstructured) → typed Elements
 │       │       ├── chunk_service.py      ← chunk_by_title → Chunk[] (size/overlap from RagSettings)
@@ -344,6 +353,8 @@ genie/
 │       │   │   ├── CodeBlock.tsx      ← fenced-code chrome: language label + Copy button over the hljs-tokenised <pre>
 │       │   │   ├── DocumentCard.tsx   ← ```document fence → boxed draft (email/letter/application/memo…): kind header · Subject row · Copy
 │       │   │   ├── SourceCards.tsx    ← the `sources` SSE event / metadata → link cards (http(s)-only href on the public page)
+│       │   │   ├── ThinkingBlock.tsx  ← the `thinking`/`thinking_done` SSE events → "Thought for Ns ⌄" collapsible disclosure
+│       │   │   ├── FileCard.tsx       ← the `files` SSE event / metadata → download card(s) (authed blob fetch, no <a href>)
 │       │   │   ├── AgentActivity.tsx  ← tail pill for an unclaimed active agent
 │       │   │   ├── PlanStrip.tsx      ← the `plan` SSE event → numbered steps + status
 │       │   │   ├── ModelPicker.tsx    ← composer model dropdown (useModels + chatStore.model)
@@ -1291,9 +1302,10 @@ default 0.15).
 
 ### Event Types (strict — frontend parses by `type` field)
 
-> Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `message_break`,
-> `message_agents`, `sources`, `guardrail`, `task_created`, `task_updated`,
-> `tasks_archived`, `title`, `error`, `done` (see `core/streaming.py` + `lib/sse.ts`).
+> Implemented today: `agent_start`, `agent_end`, `plan`, `token`, `thinking`,
+> `thinking_done`, `message_break`, `message_agents`, `sources`, `files`,
+> `guardrail`, `task_created`, `task_updated`, `tasks_archived`, `title`,
+> `error`, `done` (see `core/streaming.py` + `lib/sse.ts`).
 > `guardrail` (`{types:[…], redacted:bool, message}`) fires once before the answer
 > when the input scan hid a secret / flagged PII (§4.9) — the UI shows an amber
 > note. A **response-cache hit** streams normal `token` frames + `message_agents:["cache"]`.
@@ -1302,6 +1314,23 @@ default 0.15).
 > `intermediate_results[*].sources` (web_search etc.); the frontend renders them
 > as link cards under the message and persists them to `messages.metadata.sources`
 > (the synthesiser is told to cite `[1]` inline but NOT print a Sources list).
+> `files` (`{items:[{id,filename,mime_type,byte_size,summary}]}`) is the same
+> collection pattern for `intermediate_results[*].files` (the `file_creator`
+> agent) — emitted once before `done`, persisted to `messages.metadata.files`,
+> and each file's `message_id` is linked once that message exists
+> (`GeneratedFileRepository.link_message`); the frontend renders a download card
+> per file (`GET /api/v1/files/{id}/download`, an authed blob fetch — a plain
+> `<a href>` can't carry the bearer token).
+> `thinking` (`{content}`) streams a thinking-capable model's (Claude
+> Opus 5/Sonnet 5, or a Groq gpt-oss/qwen3 model — `ModelSpec.thinking`, §3)
+> reasoning trace *before* its answer tokens; `thinking_done` (`{duration_ms}`)
+> closes it the moment the first answer token arrives. `chat_service._split_chunk`
+> pulls the delta out of whichever shape the synthesiser's streamed chunk takes
+> (Anthropic thinking-enabled content blocks, or Groq's
+> `additional_kwargs["reasoning_content"]`) — tracked per assistant-message-part
+> (reset on `message_break`) and persisted as `messages.metadata.thinking` /
+> `thinking_ms`. The frontend renders a collapsible "Thought for Ns ⌄" disclosure
+> (`ThinkingBlock.tsx`), collapsed by default, live while streaming.
 > `done` carries
 > `total_tokens`, `run_id`, `langsmith_run_id?`, `title?`. `interrupt` arrives
 > with its feature. The stream **always** ends with `done`, even after an
@@ -1323,11 +1352,14 @@ default 0.15).
 
 ```
 data: {"type": "agent_start",   "agent": "web_search", "run_id": "..."}
+data: {"type": "thinking",      "content": "Let me check the latest sources..."}
+data: {"type": "thinking_done", "duration_ms": 4200}
 data: {"type": "token",         "content": "Based on"}
 data: {"type": "agent_end",     "agent": "web_search", "status": "done"}
 data: {"type": "plan",          "steps": [{"id":"t1","agent":"web_search","status":"done", ...}]}
 data: {"type": "message_break"}
 data: {"type": "message_agents", "agents": ["web_search"]}
+data: {"type": "files",         "items": [{"id":"...","filename":"report.pdf","mime_type":"application/pdf","byte_size":48213,"summary":"..."}]}
 data: {"type": "title",         "conversation_id": "...", "title": "Learning ML"}
 data: {"type": "task_created",  "task": {"id": "...", "title": "...", "status": "todo", ...}}
 data: {"type": "task_updated",  "task": {"id": "...", "status": "in_progress", ...}}
@@ -1356,7 +1388,7 @@ publish SQS memory consolidation job
 ## 12. Agent Catalogue
 
 Registry agents are dispatched by the `executor` through `AGENT_REGISTRY`.
-`runner(state, task) -> AgentResult(summary, detail, sources, stream)`.
+`runner(state, task) -> AgentResult(summary, detail, sources, files, stream)`.
 `prompt_enhancer` is a **graph node**, not a registry agent.
 
 | Agent | File | Kind | Runs When | Output |
@@ -1365,6 +1397,7 @@ Registry agents are dispatched by the `executor` through `AGENT_REGISTRY`.
 | Greeting | `agents/greeting/` | ✅ registered | Message is a greeting / small talk | `AgentResult.summary` (time-of-day; `state.client_hour`), `stream=True` |
 | Web Search | `agents/web_search/` | ✅ registered | Current events, external facts | `intermediate_results` — Tavily results summarised + `sources` |
 | Task Creator | `agents/task_creator/` | ✅ registered | "add X to my todo", "start/finish the … task", **"summarise the … task"**, "archive done", "what's on my list" | `AgentResult.summary` (`stream=True`). Parses → `TaskOps` → runs each op via the **`genie-tasks` MCP**; emits `task_created` / `task_updated` / `tasks_archived`. `summarize` emits `agent_start`/`agent_end` for a synthetic `task_summary` agent (the "Summarising the task…" pill) |
+| File Creator | `agents/file_creator/` | ✅ registered | "write this up as a report/PDF/Word doc", "export as a spreadsheet", "give me a CSV/script of…" | `AgentResult.files` — a `FileSpec` structured-output call (utility model) picks filename + format (`md/txt/csv/json/docx/pdf/xlsx/code`), a chat-model call writes the Markdown body (reading `depends_on` findings — e.g. a `web_search` step — from `intermediate_results`), `services/file_service.py` renders it to bytes + uploads to S3 + a `generated_files` row. Surfaced the same way `sources` are (one `files` SSE event, `messages.metadata.files`); downloaded via `GET /files/{id}/download` |
 | RAG | `agents/rag/` | ⬜ stub | — | — |
 | Calendar | `agents/calendar/` | ⬜ stub | — | — |
 
@@ -1398,7 +1431,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 
 
 ### L2 — Supabase PostgreSQL (permanent)
-- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments` / **`total_tokens`** (the turn's usage, for Settings → Usage), **`feedback`** (`"up"`|`"down"` 👍/👎), **`cached`** (reply served from the response cache), **`guardrail`** (`{redacted, flagged, message}` — the input scrub note on a user message). All metadata-only, no migration. Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
+- `messages` — full conversation history. `metadata` JSONB carries `agents` / `sources` / `langsmith_run_id` / `attachments` / **`total_tokens`** (the turn's usage, for Settings → Usage), **`feedback`** (`"up"`|`"down"` 👍/👎), **`cached`** (reply served from the response cache), **`guardrail`** (`{redacted, flagged, message}` — the input scrub note on a user message), **`thinking`** + **`thinking_ms`** (a thinking-capable model's reasoning trace + how long it took), **`files`** (generated, downloadable files this message produced — `[{id,filename,mime_type,byte_size,summary}]`). All metadata-only, no migration. Regenerate/retry/edit hard-delete the tail (`message_repo.delete_after`).
 - `response_cache` — the semantic answer cache: `query_norm`, `query_embedding vector(1536)` (HNSW), `response`, `model`, `hit_count`, `last_hit_at`, per-`user_id`. Migration `b8e2f4a1c9d3`. Filled/read by `services/cache_service.py`; TTL sweep runs hourly from the lifespan.
 - `conversations` — `title`, `last_message_at`, `project_id`, **`model`** (picked chat-model id; NULL → server default), **`pinned`** (sorts to top of the sidebar), **`unread`** (manual flag; cleared by `GET /conversations/{id}`), **`share_token`** (unique; NULL = private) + **`shared_at`** (frozen message cutoff for the public view). Migrations `f6703a0bb868`, `f041f866790f`, `c3d9e1f4a7b2`.
 - `projects` — `instructions` + **`rag_settings`** JSONB (§10). Migration `883a87726339`.
@@ -1406,6 +1439,7 @@ Note: No JWT refresh tokens in Redis. Clerk manages sessions entirely.
 - `documents` — a project Knowledge-Base source (`kind`, `s3_key`, `status`, `phase`, `stats`, `processed_at`). Migration `883a87726339`.
 - `document_chunks` — one row per chunk: `content`, `embedding vector(1536)`, trigger-filled `fts_content`, `chunk_metadata`; `project_id` denormalized. HNSW + gin indexes (in the migration). Migration `883a87726339`.
 - `tasks` — the task board (`status` todo/in_progress/done/archived; `conversation_id` FK **`SET NULL`** → the chat it was discussed in; `source_agent`; `archived_at`). Migration `bed5223f2a47`.
+- `generated_files` — a downloadable file the `file_creator` agent made (`filename`, `format`, `mime_type`, `s3_key`, `byte_size`, `summary`; `message_id` FK **`SET NULL`**, linked once that assistant message persists). Genie's own output — distinct from both `attachments` (a user upload) and `documents` (a KB source). Migration `e4d1c7a3a02d`.
 - `user_memory` — extracted long-term facts (with embedding + fts_content)
 - `document_chunks` — user's document RAG store
 
@@ -1490,6 +1524,9 @@ GET    /api/v1/documents/{id}           → DocumentOut
 GET    /api/v1/documents/{id}/stream    → SSE  (live ingestion pipeline progress — relays redis doc_pipeline:{id})
 GET    /api/v1/documents/{id}/chunks    → [ChunkOut]  (chunk_index, content, token_count, metadata)
 DELETE /api/v1/documents/{id}           → 204 (S3 object + chunks + row)
+
+# ── Generated files (the file_creator agent) ─────────────────────────────────
+GET    /api/v1/files/{id}/download      → the file's bytes, streamed (Content-Disposition: attachment); ownership-checked, 404 otherwise
 ```
 
 **No `/auth/login`, `/auth/refresh`, `/auth/logout` routes.** Clerk handles all of this on the frontend. The backend only verifies JWTs — it never issues them.
@@ -1702,7 +1739,7 @@ brand-new chat; `/memory` lets the user see and remove what Genie knows.
 
 ### Unit Tests (per agent, per service)
 ```
-tests/  (≈90 tests, all green)
+tests/  (≈110 tests, all green)
 ├── agents/
 │   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing, attachment + KB helpers, retriever gate
 │   ├── test_registry.py        ← registry integrity
@@ -1711,6 +1748,7 @@ tests/  (≈90 tests, all green)
 │   ├── test_greeting.py        ← time buckets + LLM/template fallback
 │   ├── test_web_search.py      ← Tavily mocked, summary + sources
 │   ├── test_task_creator.py    ← create / move / summarise (task_summary pill) / archive
+│   ├── test_file_creator.py    ← FileSpec decision, dependency-findings context, empty-content guard
 │   ├── test_guardrails_nodes.py ← input_guard redact/flag/fail-open · scrub_output
 │   ├── test_rag.py / test_calendar.py  ← Phase 2/3
 ├── mcp/
@@ -1719,13 +1757,14 @@ tests/  (≈90 tests, all green)
 │   ├── test_guardrails.py      ← scan() per kind · Luhn · redact · overlap · summarize
 │   └── test_usage.py           ← enforce_token_limits: under / daily / weekly-first / disabled
 ├── services/
-│   ├── test_chat_service.py    ← SSE framing, message splitting, cache-hit stream
+│   ├── test_chat_service.py    ← SSE framing, message splitting, cache-hit stream, thinking split, files collection/link
 │   ├── test_cache_service.py   ← is_cacheable_query · lookup hit/miss · store + per-user cap
 │   ├── test_task_service.py    ← create / move / archive_done / summarise
 │   ├── test_attachment_service.py ← parse_upload: txt/md/pdf, reject bad type / oversize / empty
 │   ├── test_partition_service.py  ← md/txt/pdf → typed elements + stats
 │   ├── test_chunk_service.py      ← chunk index/tokens/metadata; size affects count
 │   ├── test_document_service.py   ← create_and_enqueue: S3 put + SQS send; reject bad type/oversize
+│   ├── test_file_service.py       ← render() per format (docx/pdf/xlsx magic bytes, md/txt/csv/json passthrough); upload/download S3 roundtrip
 │   └── test_retrieval_service.py  ← strategy dispatch (vector/hybrid/multi-query) + RRF fusion
 ├── schemas/
 │   └── test_rag_settings.py    ← defaults / clamping / enum / resolve
@@ -1734,9 +1773,9 @@ tests/  (≈90 tests, all green)
 ├── memory/
 │   └── test_short_term.py      ← rate limiting (window + user isolation)
 └── api/
-    ├── test_webhooks.py · test_users_me.py (+ usage) · test_conversations.py (+ PATCH project, + search) · test_sharing.py · test_chat_regenerate.py · test_messages.py
+    ├── test_webhooks.py · test_users_me.py (+ usage) · test_conversations.py (+ PATCH project, + search, + thinking/files passthrough) · test_sharing.py · test_chat_regenerate.py · test_messages.py
     ├── test_projects.py (+ rag_settings merge/409) · test_tasks.py · test_health.py
-    ├── test_models_endpoint.py · test_attachments.py · test_documents.py
+    ├── test_models_endpoint.py · test_attachments.py · test_documents.py · test_files.py (download: 200 + headers / 404 unknown / 404 another user's)
 ```
 
 ### Key Test Assertions
@@ -1842,6 +1881,8 @@ _Also 2026-09-04 — **Settings modal (General · Account · Usage)**: `componen
 
 _Also 2026-09-04 — **usage-limit enforcement**: `core/usage.py` — `window_bounds()` (shared with `GET /users/me/usage`) + `enforce_token_limits(db, user_id)` → `HTTPException(429)` with a reset hint ("resets in ~Nh" / "resets Friday") once the daily or weekly reply-token window is exhausted (weekly checked first). Wired into both `POST /chat` routes (`create_chat_run`, `regenerate_chat_run`) right after the rate-limit check. Config `USAGE_LIMITS_ENFORCED` (default `true`) toggles it. `message_repo.token_usage_windows` reused for the counts. Frontend: `hooks/useUsage.ts` (`["usage"]` query, `staleTime 60s`), invalidated in `useChat`'s `finally` after every turn; `ChatView` computes `overLimit`/`limitLabel`, blocks `handleSend`, and passes `blocked`/`blockedLabel` to `Composer` → disabled textarea + PlusMenu + ModelPicker + send, amber "token limit reached" banner. `lib/api.ts` gains an `errorText()` helper that surfaces the 429 `detail` string. `tests/core/test_usage.py` (4). 182 backend tests, ruff + build/lint clean._
 
+_Also 2026-09-05 — **live thinking display + downloadable generated files**. **Thinking**: `ModelSpec.thinking` (`agents/models.py`) flags Claude Opus 5/Sonnet 5 and the Groq gpt-oss/qwen3 rows; `_build()` passes Anthropic `thinking={"type":"adaptive"}` only for the synthesiser's streamed, user-facing call (`streaming=True and thinking`) — Haiku 4.5 and both OpenAI rows stay off (no confirmed/no visible reasoning trace). `chat_service._split_chunk()` pulls `(thinking_delta, text_delta)` out of whatever shape a streamed chunk takes (Anthropic's list-of-blocks, Groq's `additional_kwargs["reasoning_content"]`, or a bare string — defensively, so the existing plain-string test fixtures are untouched) and the `_generate` loop tracks it per assistant-message-part (parallel to `parts`/`part_agents`, reset on `message_break`); new `thinking` / `thinking_done` SSE events, persisted as `messages.metadata.thinking` / `thinking_ms`. Frontend `ThinkingBlock.tsx` — a collapsed-by-default disclosure ("Thinking…" live → "Thought for Ns ⌄"), rendered from history identically. **File creation**: new registered agent `agents/file_creator/` — a `FileSpec` structured-output call (utility model) picks filename + format from the request (`md/txt/csv/json/docx/pdf/xlsx/code`), a chat-model call writes the Markdown body (folding in any `depends_on` step's findings, e.g. a `web_search` result), `services/file_service.py` renders it (a small internal Markdown→blocks parser feeds `python-docx`/`fpdf2`/`openpyxl`; md/txt/csv/json/code pass through as-is) and uploads to S3, `generated_files` table (migration `e4d1c7a3a02d`) + `GeneratedFileRepository`. Surfaced exactly like `sources` — `AgentResult.files` → `executor_node` → one `files` SSE event + `messages.metadata.files`, each file's `message_id` linked once that message is persisted. New `GET /api/v1/files/{id}/download` (ownership-checked, streams bytes with `Content-Disposition`). `FILE_BLOCK_GUIDE` (`supervisor/prompts.py`) tells the synthesiser to narrate what the file contains / how to navigate it, never fake a link. Frontend `FileCard.tsx` — a download card per file; `lib/api.ts:downloadFile()` does an authed `fetch` → `blob()` → `<a download>` click (a plain `<a href>` can't carry the bearer token). `tests/services/test_file_service.py`, `tests/agents/test_file_creator.py`, `tests/api/test_files.py`, plus thinking/files coverage added to `test_chat_service.py` + `test_conversations.py`. 204 backend tests, ruff + frontend build/lint clean._
+
 _Also 2026-09-03 — **premium light-mode + pill sidebar polish**: retuned the light palette (soft tinted-white ground `228 44% 98.5%`, warmer neutrals, bluer `--accent`, softer `--border`) and added a **`--sidebar`** surface token (light + dark) + `sidebar` Tailwind colour so the sidebar reads distinct from the content. `Sidebar` nav items (`NAV_CLS`), the "New chat" button, chat rows (`ConversationRow`), the rename input, section headers, and `SearchChatsModal` rows are all `rounded-full` pills now (`bg-accent` hover/active, `px-3.5`). `AuroraBackdrop` gained a `.aurora-center` — a slow-pulsing soft blue halo directly behind the greeting + composer on the empty chat (the Gemini-style glow); drift blobs dialled down. Composer is `rounded-[28px]` on `bg-card` with a brand-tinted glow shadow, round send button. Light `--glow` violet / `--glow-2` blue. Verified: build + lint clean._
 
 _Also 2026-09-03 — **"Nebula" palette + moving aurora backdrop**: retuned every `globals.css` token (light + dark) to a deep space-navy base with a **violet `--brand` + cyan `--brand-2`** identity — every brand gradient (`Wordmark`, `Button variant="brand"`, `Hero` heading) is now violet→cyan. New `--glow-2` (cyan) token + `glow-2` Tailwind colour. `components/chat/AuroraBackdrop.tsx` — three pure-CSS `blur(80px)` radial blobs drifting on 26/34/42 s loops (`globals.css` `.aurora-*`), rendered once in `ChatView` (`subtle={!isEmpty}` → full on the empty chat, barely-there behind a conversation), `-z-10` inside an `isolate` root, a `.aurora-veil` fades it into the page so text stays crisp; `prefers-reduced-motion` freezes the blobs. `Hero` backdrop gained a cyan companion glow. No JS, bundle unchanged. Verified: build + lint clean._
@@ -1892,7 +1933,9 @@ _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `c
 - ✅ **Validator** (`nodes.validator_node`) — reject if empty; else, **only when agents produced findings**, an LLM grounding check (`get_utility_model().with_structured_output(Validation)`) → off-topic / refusal / contradiction → `route_after_validator` re-plans (capped at `SUPERVISOR_MAX_TURNS`). Pure model answers skip the check.
 - ✅ **Rate limiting** — `memory/short_term.check_rate_limit(redis, user_id, per_min)` (fixed-window INCR/EXPIRE) enforced in `POST /chat` → 429 (`RATE_LIMIT_REQUESTS_PER_MINUTE`, default 60).
 - ✅ **Usage limits** — `core/usage.enforce_token_limits` in both `POST /chat` routes → 429 once the daily (`DAILY_TOKEN_LIMIT`) or weekly (`WEEKLY_TOKEN_LIMIT`) reply-token window is spent; `USAGE_LIMITS_ENFORCED` toggles. Frontend `useUsage` disables the composer + shows an amber banner.
-- ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
+- ✅ **Agents** — `greeting` (time-of-day, `stream=True`), `web_search` (Tavily → grounded summary + sources), `task_creator` (`stream=True`, MCP), `file_creator` (writes + uploads a real downloadable file — `AgentResult.files`). `app/agents/events.py:emit()` is the shared custom-event helper. `rag`/`calendar` remain stubs.
+- ✅ **Live thinking** — `ModelSpec.thinking` flags Claude Opus 5/Sonnet 5 + the Groq reasoning rows; the synthesiser's streamed call requests it (`thinking={"type":"adaptive"}` on Anthropic, native on Groq); `chat_service._split_chunk()` + new `thinking`/`thinking_done` SSE events relay it live, persisted as `messages.metadata.thinking`/`thinking_ms`.
+- ✅ **Generated files** — `services/file_service.py` (Markdown→blocks parser + `python-docx`/`fpdf2`/`openpyxl` renderers + S3 upload/download), `generated_files` table + `GeneratedFileRepository`, `GET /files/{id}/download`. Surfaced via a `files` SSE event exactly like `sources`.
 - ✅ **MCP layer** (§22) — `fastmcp>=3`. `app/mcp/tasks_server.py` = `FastMCP("genie-tasks")` with 8 tools — `create_task` · `list_tasks` · `find_task` · `set_task_status` · `update_task` · `delete_task` · **`summarize_task`** (3-4 line LLM recap of the task's linked chat → its description) · `archive_done_tasks` (each opens its own session → `services/task_service.py`); `app/mcp/client.py` calls them **in-process** (in-memory transport). `uv run python -m app.mcp.tasks_server` serves streamable-HTTP on `TASKS_MCP_HOST:PORT` (8765) for external clients later.
 - ✅ **Tasks** — `models/task.py` (`bed5223f2a47`), `task_repo`, `services/task_service.py` (the one code path — REST + MCP + tests; includes `summarize_task` → a 3-4 line LLM recap of the task's chat), `/tasks` REST (`list`, `get`, `create`, `patch` status/details, `{id}/summarize`, `archive-done`, `delete`). `conversation_id` FK `SET NULL`; `create` drops a stale link rather than failing; `task_repo.update` only sets `title` when given (NOT NULL) but sets `description` whenever the key is passed (so it can be cleared).
 - ✅ **Conversations**: `GET /conversations` (pinned first, then recency via `conversations.last_message_at`, bumped every message), `GET /conversations/{id}` (clears `unread`; carries `share`), `PATCH /conversations/{id}` (`title` / `project_id` move-or-detach / `pinned` / `unread` — only fields present are touched), `DELETE /conversations/{id}` (cascade + `checkpointer.adelete_thread`), **`{id}/share` GET/POST/DELETE** (public-link control — `conversation_repo.set_share` / `clear_share`, token `secrets.token_urlsafe(16)`, `shared_at` frozen at first share). Auto-title after the first exchange (`services/title_service.py` → `get_utility_model()` / `ainvoke`, so it follows `LLM_PROVIDER`) → persisted + SSE `title` event.
@@ -1972,8 +2015,11 @@ short turns (the enhancer runs an LLM call on every "hi").
 | Tune token budget | `MAX_TOKENS_PER_RUN` env var + check in `supervisor/nodes.py` |
 | Switch LLM provider | `LLM_PROVIDER=openai\|groq` env var — the fallback chat model + the fixed utility model (embeddings stay OpenAI) |
 | Add a model to the picker | `MODEL_CATALOG` in `agents/models.py` (one `ModelSpec` row) — no other change; `GET /models` filters by which provider keys are set |
+| Turn on live thinking for a model | `ModelSpec.thinking = True` in `MODEL_CATALOG` (`agents/models.py`) — only meaningful for a model that actually streams a reasoning trace |
 | Support a new attachment file type | `attachment_service._KINDS` + a parse branch in `parse_upload` |
 | Support a new KB file type | `document_service._KIND` + `Document.DOCUMENT_KINDS` + a branch in `partition_service.partition` |
+| Add a downloadable file format | `file_service._MIME` + a `render()` branch (+ `FileSpec.format` in `agents/file_creator/schemas.py`) |
+| Tune what the synthesiser says about a created file | `FILE_BLOCK_GUIDE` in `agents/supervisor/prompts.py` |
 | Tune project retrieval | `projects.rag_settings` (via `PATCH /projects/{id}`) — `schemas/rag.py:RagSettings` |
 | Add an ingestion pipeline phase | `Document.DOCUMENT_PHASES` + a step in `ingestion_worker.ingest_document` + a `_publish` |
 | Add logging / redaction rule | `core/logging.py` (`redact_processor`, `_SECRET_KEYS`, `preview`) — see §21 |

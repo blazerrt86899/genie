@@ -174,6 +174,89 @@ def patch_client(monkeypatch):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test"), conv, proj_id
 
 
+# ─── GET /conversations/{id} — message metadata passthrough ──────────────────
+
+
+@pytest.fixture
+def get_client(monkeypatch):
+    conv = SimpleNamespace(
+        id=uuid.uuid4(), title="X", project_id=None, model=None, pinned=False,
+        unread=False, share_token=None, shared_at=None,
+        created_at=_NOW, last_message_at=_NOW,
+    )
+    msg = SimpleNamespace(
+        id=uuid.uuid4(),
+        role="assistant",
+        content="Here's your report.",
+        created_at=_NOW,
+        message_metadata={
+            "agents": ["file_creator"],
+            "thinking": "Let me plan the report structure first.",
+            "thinking_ms": 4200,
+            "files": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "filename": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "byte_size": 5000,
+                    "summary": "A short report",
+                }
+            ],
+        },
+    )
+
+    class FakeConvRepo3:
+        def __init__(self, _db): ...
+
+        async def get_for_user(self, cid, uid):
+            return conv if cid == conv.id else None
+
+        async def mark_read(self, cid, uid):
+            conv.unread = False
+
+    class FakeMsgRepo:
+        def __init__(self, _db): ...
+
+        async def list_for_conversation(self, cid):
+            return [msg]
+
+    monkeypatch.setattr(conv_ep, "ConversationRepository", FakeConvRepo3)
+    monkeypatch.setattr(conv_ep, "MessageRepository", FakeMsgRepo)
+
+    def _fake_db():
+        yield None
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _fake_db
+    app.dependency_overrides[get_current_user] = lambda: _USER
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test"), conv, msg
+
+
+async def test_get_conversation_message_carries_thinking_and_files(get_client):
+    client, conv, msg = get_client
+    async with client as c:
+        resp = await c.get(f"/api/v1/conversations/{conv.id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["messages"]) == 1
+    m = body["messages"][0]
+    assert m["thinking"] == "Let me plan the report structure first."
+    assert m["thinking_ms"] == 4200
+    assert m["files"][0]["filename"] == "report.pdf"
+    assert m["files"][0]["id"] == msg.message_metadata["files"][0]["id"]
+
+
+async def test_get_conversation_message_defaults_when_absent(get_client):
+    client, conv, msg = get_client
+    msg.message_metadata = {}
+    async with client as c:
+        resp = await c.get(f"/api/v1/conversations/{conv.id}")
+    m = resp.json()["messages"][0]
+    assert m["thinking"] is None
+    assert m["thinking_ms"] is None
+    assert m["files"] == []
+
+
 async def test_patch_moves_into_project(patch_client):
     client, conv, proj_id = patch_client
     async with client as c:

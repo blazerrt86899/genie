@@ -97,6 +97,15 @@ class FakeDocRepo:
         return 0
 
 
+class FakeGeneratedFileRepo:
+    linked: list[tuple[str, str]] = []
+
+    def __init__(self, _db) -> None: ...
+
+    async def link_message(self, file_id, message_id):
+        FakeGeneratedFileRepo.linked.append((str(file_id), str(message_id)))
+
+
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
     FakeMsgRepo.added = []
@@ -106,10 +115,12 @@ def _patch(monkeypatch):
     FakeConvRepo.model_set = None
     FakeConvRepo.conv = _conv()
     FakeProjectRepo.instructions = None
+    FakeGeneratedFileRepo.linked = []
     monkeypatch.setattr(chat_service, "ConversationRepository", FakeConvRepo)
     monkeypatch.setattr(chat_service, "MessageRepository", FakeMsgRepo)
     monkeypatch.setattr(chat_service, "ProjectRepository", FakeProjectRepo)
     monkeypatch.setattr(chat_service, "DocumentRepository", FakeDocRepo)
+    monkeypatch.setattr(chat_service, "GeneratedFileRepository", FakeGeneratedFileRepo)
     monkeypatch.setattr(
         chat_service,
         "settings",
@@ -349,3 +360,149 @@ async def test_cache_hit_streams_stored_answer(monkeypatch):
     # a cache hit is never re-stored
     assert stored == []
     assert ("assistant", "A cached explanation of bloom filters.") in FakeMsgRepo.added
+
+
+async def test_thinking_chunks_emit_thinking_then_done_then_token(monkeypatch):
+    """An Anthropic-thinking-shaped chunk stream: content is a list of
+    {"type": "thinking"|"text"} blocks — `_split_chunk` must separate them, and
+    the trace's duration + text must persist on the message metadata."""
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="explain recursion", conversation_id=None
+    )
+
+    async def fake_events(_state, config, version):  # noqa: ARG001
+        yield {"event": "on_chain_start", "run_id": "trace-1", "parent_ids": [], "data": {}}
+        for block in (
+            {"type": "thinking", "thinking": "First, "},
+            {"type": "thinking", "thinking": "let me think."},
+            {"type": "text", "text": "Recursion is "},
+            {"type": "text", "text": "self-reference."},
+        ):
+            yield {
+                "event": "on_chat_model_stream",
+                "parent_ids": ["trace-1"],
+                "metadata": {"langgraph_node": "synthesiser"},
+                "data": {"chunk": SimpleNamespace(content=[block])},
+            }
+
+    async def fake_get_state(_config):
+        final = SimpleNamespace(content="Recursion is self-reference.")
+        return SimpleNamespace(values={"messages": [final]})
+
+    monkeypatch.setattr(
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
+    )
+
+    frames = [
+        json.loads(f[6:])
+        async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
+    ]
+    kinds = [f["type"] for f in frames]
+    assert kinds.index("thinking") < kinds.index("thinking_done") < kinds.index("token")
+    thinking_text = "".join(f["content"] for f in frames if f["type"] == "thinking")
+    token_text = "".join(f["content"] for f in frames if f["type"] == "token")
+    assert thinking_text == "First, let me think."
+    assert next(f for f in frames if f["type"] == "thinking_done")["duration_ms"] >= 0
+    assert token_text == "Recursion is self-reference."
+
+    _, _, meta = FakeMsgRepo.added_full[-1]
+    assert meta is not None
+    assert meta["thinking"] == "First, let me think."
+    assert meta["thinking_ms"] >= 0
+
+
+async def test_plain_string_chunks_produce_no_thinking(monkeypatch):
+    """Non-reasoning models (the existing test fixtures) must be unaffected —
+    a bare string chunk with no `additional_kwargs` at all."""
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="hi", conversation_id=None
+    )
+
+    async def fake_events(_state, config, version):  # noqa: ARG001
+        yield {
+            "event": "on_chat_model_stream",
+            "parent_ids": [],
+            "metadata": {"langgraph_node": "synthesiser"},
+            "data": {"chunk": SimpleNamespace(content="Hello there")},
+        }
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(values={"messages": [SimpleNamespace(content="Hello there")]})
+
+    monkeypatch.setattr(
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
+    )
+
+    frames = [
+        json.loads(f[6:])
+        async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
+    ]
+    kinds = [f["type"] for f in frames]
+    assert "thinking" not in kinds and "thinking_done" not in kinds
+    _, _, meta = FakeMsgRepo.added_full[-1]
+    assert meta is not None
+    assert "thinking" not in meta
+
+
+async def test_generated_files_collected_persisted_and_linked(monkeypatch):
+    redis = FakeRedis()
+    user = _user()
+    run_id, conversation_id = await chat_service.create_turn(
+        db=None, redis=redis, user=user, message="write me a report", conversation_id=None
+    )
+    file_id = str(uuid.uuid4())
+
+    async def fake_events(_state, config, version):  # noqa: ARG001
+        yield {
+            "event": "on_chat_model_stream",
+            "parent_ids": [],
+            "metadata": {"langgraph_node": "synthesiser"},
+            "data": {"chunk": SimpleNamespace(content="Here's your report.")},
+        }
+
+    async def fake_get_state(_config):
+        return SimpleNamespace(
+            values={
+                "messages": [SimpleNamespace(content="Here's your report.")],
+                "intermediate_results": {
+                    "t1": {
+                        "agent": "file_creator",
+                        "files": [
+                            {
+                                "id": file_id,
+                                "filename": "report.pdf",
+                                "mime_type": "application/pdf",
+                                "byte_size": 1234,
+                                "summary": "A short report",
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        chat_service,
+        "get_runtime_graph",
+        lambda: SimpleNamespace(astream_events=fake_events, aget_state=fake_get_state),
+    )
+
+    frames = [
+        json.loads(f[6:])
+        async for f in chat_service.stream_turn(None, redis, user, conversation_id, run_id)
+    ]
+    files_frame = next(f for f in frames if f["type"] == "files")
+    assert files_frame["items"][0]["filename"] == "report.pdf"
+
+    _, _, meta = FakeMsgRepo.added_full[-1]
+    assert meta is not None
+    assert meta["files"][0]["id"] == file_id
+    assert FakeGeneratedFileRepo.linked and FakeGeneratedFileRepo.linked[0][0] == file_id

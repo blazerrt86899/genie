@@ -9,9 +9,11 @@ messages (e.g. a greeting, then the answer) — split on ``message_break`` frame
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage
@@ -25,6 +27,7 @@ from app.core.streaming import format_sse_event, sse_done, sse_error
 from app.db.models.user import User
 from app.db.repositories.conversation_repo import ConversationRepository
 from app.db.repositories.document_repo import DocumentRepository
+from app.db.repositories.generated_file_repo import GeneratedFileRepository
 from app.db.repositories.message_repo import MessageRepository
 from app.db.repositories.project_repo import ProjectRepository
 from app.services import attachment_service
@@ -37,6 +40,33 @@ _RUN_TTL_SECONDS = 300
 
 def _run_key(run_id: str) -> str:
     return f"run:{run_id}"
+
+
+def _split_chunk(chunk: Any) -> tuple[str, str]:
+    """``(thinking_delta, text_delta)`` from one streamed ``AIMessageChunk``.
+
+    Defensive against every shape a synthesiser chunk can take: Anthropic
+    thinking-enabled content is a list of ``{"type": "thinking"|"text", ...}``
+    blocks; Groq's gpt-oss/qwen3 reasoning arrives as plain-string content plus
+    ``additional_kwargs["reasoning_content"]``; every other model (and the test
+    fixtures) is a bare string with no ``additional_kwargs`` at all.
+    """
+    thinking = text = ""
+    content = chunk.content
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "thinking":
+                thinking += block.get("thinking", "")
+            elif block.get("type") == "text":
+                text += block.get("text", "")
+    elif isinstance(content, str):
+        text = content
+    thinking += (getattr(chunk, "additional_kwargs", None) or {}).get(
+        "reasoning_content", ""
+    )
+    return thinking, text
 
 
 async def create_turn(
@@ -415,6 +445,9 @@ async def _generate(
     langsmith_run_id: str | None = None
     parts: list[str] = [""]  # one entry per assistant message this turn
     part_agents: list[list[str]] = [[]]  # agents that produced each part
+    thinking_parts: list[str] = [""]  # the reasoning trace behind each part
+    thinking_ms: list[int | None] = [None]  # how long that reasoning took
+    thinking_started_at: float | None = None  # set while a part's trace is open
     async for event in graph.astream_events(state, config=config, version="v2"):
         # The first event with no parent is the root graph run — its id is the
         # LangSmith trace id (when tracing is enabled).
@@ -427,11 +460,22 @@ async def _generate(
             # supervisor and the agents also call models, silently.
             if (event.get("metadata") or {}).get("langgraph_node") != "synthesiser":
                 continue
-            chunk = event["data"]["chunk"].content
-            if chunk:
-                parts[-1] += chunk
+            thinking_delta, text_delta = _split_chunk(event["data"]["chunk"])
+            if thinking_delta:
+                if thinking_started_at is None:
+                    thinking_started_at = time.perf_counter()
+                thinking_parts[-1] += thinking_delta
+                yield format_sse_event("thinking", content=thinking_delta), None
+            if text_delta:
+                if thinking_started_at is not None:
+                    ms = round((time.perf_counter() - thinking_started_at) * 1000)
+                    thinking_ms[-1] = ms
+                    thinking_started_at = None
+                    logger.debug("chat_thinking_done", run_id=run_id, duration_ms=ms)
+                    yield format_sse_event("thinking_done", duration_ms=ms), None
+                parts[-1] += text_delta
                 token_frames += 1
-                yield format_sse_event("token", content=chunk), None
+                yield format_sse_event("token", content=text_delta), None
         elif kind == "on_chat_model_end":
             usage = getattr(event["data"].get("output"), "usage_metadata", None)
             if usage:
@@ -492,6 +536,9 @@ async def _generate(
                 # start a new assistant message
                 parts.append("")
                 part_agents.append([])
+                thinking_parts.append("")
+                thinking_ms.append(None)
+                thinking_started_at = None
                 logger.debug("chat_message_break", run_id=run_id, message_index=len(parts) - 1)
                 yield format_sse_event("message_break"), None
             elif name == "message_agents":
@@ -521,7 +568,11 @@ async def _generate(
                     )
                     yield format_sse_event("token", content=seg), None
 
-    pairs = [(p.strip(), a) for p, a in zip(parts, part_agents, strict=False) if p.strip()]
+    pairs = [
+        (p.strip(), a, t.strip(), ms)
+        for p, a, t, ms in zip(parts, part_agents, thinking_parts, thinking_ms, strict=False)
+        if p.strip()
+    ]
     graph_snapshot = None
     cached_hit: dict | None = None
     if not pairs:
@@ -539,9 +590,9 @@ async def _generate(
                 yield format_sse_event("message_agents", agents=["cache"]), None
                 for i in range(0, len(text), 24):  # a light typing feel
                     yield format_sse_event("token", content=text[i : i + 24]), None
-                pairs = [(text, ["cache"])]
+                pairs = [(text, ["cache"], "", None)]
             elif text:
-                pairs = [(text, [])]
+                pairs = [(text, [], "", None)]
                 yield format_sse_event("token", content=text), None
         except Exception:  # noqa: BLE001
             logger.warning("chat_state_fetch_failed", run_id=run_id)
@@ -565,6 +616,17 @@ async def _generate(
     if sources:
         yield format_sse_event("sources", items=sources), None
 
+    # Generated, downloadable files (file_creator) — same collection pattern
+    # as sources: gathered from every step's result, sent once before `done`.
+    files: list[dict] = []
+    try:
+        for r in (snap_values.get("intermediate_results") or {}).values():
+            files.extend(r.get("files") or [])
+    except Exception:  # noqa: BLE001
+        logger.warning("chat_files_fetch_failed", run_id=run_id)
+    if files:
+        yield format_sse_event("files", items=files), None
+
     # The graph nodes accumulate `token_usage.total` via `models.bump_tokens`
     # (prompt_enhancer + supervisor + synthesiser + validator) — that's the
     # authoritative count; the streamed-event sum is a fallback.
@@ -575,30 +637,36 @@ async def _generate(
         "chat_graph_done",
         run_id=run_id,
         messages=len(pairs),
-        message_agents=[a for _, a in pairs],
+        message_agents=[a for _, a, _, _ in pairs],
         streamed_token_frames=token_frames,
         total_tokens=total_tokens,
         graph_tokens=graph_tokens,
         sources=len(sources),
     )
-    answer = "\n\n".join(p for p, _ in pairs)
+    answer = "\n\n".join(p for p, _, _, _ in pairs)
     title: str | None = None
     if pairs:
         now = datetime.now(UTC)
         last = len(pairs) - 1
-        for i, (part, agents) in enumerate(pairs):
+        for i, (part, agents, thinking_text, thinking_dur_ms) in enumerate(pairs):
             meta: dict = {}
             if agents:
                 meta["agents"] = agents
             if "cache" in agents:
                 meta["cached"] = True
+            if thinking_text:
+                meta["thinking"] = thinking_text
+                if thinking_dur_ms is not None:
+                    meta["thinking_ms"] = thinking_dur_ms
             if sources and i == last:
                 meta["sources"] = sources
+            if files and i == last:
+                meta["files"] = files
             if langsmith_run_id and i == last:
                 meta["langsmith_run_id"] = langsmith_run_id
             if total_tokens and i == last:
                 meta["total_tokens"] = total_tokens
-            await MessageRepository(db).add_message(
+            saved = await MessageRepository(db).add_message(
                 conversation.id,
                 user.id,
                 "assistant",
@@ -606,6 +674,13 @@ async def _generate(
                 metadata=meta,
                 created_at=now + timedelta(milliseconds=10 * i),
             )
+            if files and i == last:
+                file_repo = GeneratedFileRepository(db)
+                for f in files:
+                    try:
+                        await file_repo.link_message(uuid.UUID(f["id"]), saved.id)
+                    except Exception:  # noqa: BLE001 — an orphan file row is harmless
+                        logger.warning("generated_file_link_failed", file_id=f.get("id"))
         await conv_repo.touch(conversation.id)
 
         # Cache a pure-knowledge answer for the next near-identical question:

@@ -54,19 +54,22 @@ class ModelSpec:
     provider: Provider
     model: str
     hint: str
+    # True → this model's user-facing (streaming) call requests a visible
+    # reasoning trace — relayed as `thinking` SSE frames (CLAUDE.md §11).
+    thinking: bool = False
 
 
 MODEL_CATALOG: tuple[ModelSpec, ...] = tuple(
     ModelSpec(*row)
     for row in (
-        ("gpt-4o", "GPT-4o", "openai", "gpt-4o-2024-08-06", "Balanced"),
-        ("gpt-4o-mini", "GPT-4o mini", "openai", "gpt-4o-mini", "Fast & cheap"),
-        ("claude-opus", "Claude Opus 5", "anthropic", "claude-opus-5", "Most capable"),
-        ("claude-sonnet", "Claude Sonnet 5", "anthropic", "claude-sonnet-5", "Balanced"),
-        ("claude-haiku", "Claude Haiku 4.5", "anthropic", "claude-haiku-4-5", "Fast"),
-        ("groq-oss-120b", "GPT-OSS 120B", "groq", "openai/gpt-oss-120b", "Very fast"),
-        ("groq-oss-20b", "GPT-OSS 20B", "groq", "openai/gpt-oss-20b", "Fastest"),
-        ("groq-qwen3-27b", "Qwen3 27B", "groq", "qwen/qwen3.8-27b", "Fast"),
+        ("gpt-4o", "GPT-4o", "openai", "gpt-4o-2024-08-06", "Balanced", False),
+        ("gpt-4o-mini", "GPT-4o mini", "openai", "gpt-4o-mini", "Fast & cheap", False),
+        ("claude-opus", "Claude Opus 5", "anthropic", "claude-opus-5", "Most capable", True),
+        ("claude-sonnet", "Claude Sonnet 5", "anthropic", "claude-sonnet-5", "Balanced", True),
+        ("claude-haiku", "Claude Haiku 4.5", "anthropic", "claude-haiku-4-5", "Fast", False),
+        ("groq-oss-120b", "GPT-OSS 120B", "groq", "openai/gpt-oss-120b", "Very fast", True),
+        ("groq-oss-20b", "GPT-OSS 20B", "groq", "openai/gpt-oss-20b", "Fastest", True),
+        ("groq-qwen3-27b", "Qwen3 27B", "groq", "qwen/qwen3.8-27b", "Fast", True),
     )
 )
 
@@ -168,6 +171,7 @@ def _build(
     temperature: float,
     max_tokens: int | None,
     light: bool = False,
+    thinking: bool = False,
 ) -> BaseChatModel:
     max_retries = 2 if streaming else 0  # streaming keeps langchain's own retry
 
@@ -179,6 +183,9 @@ def _build(
             effort = _groq_light_reasoning(model)
             if effort:
                 kwargs["reasoning_effort"] = effort
+        # gpt-oss/qwen3 already emit a visible reasoning trace by default
+        # (additional_kwargs["reasoning_content"] on each streamed chunk) unless
+        # quieted by `light` above — nothing extra to request here.
         # Groq streams a final usage chunk automatically → usage_metadata is set.
         return ChatGroq(
             model=model,
@@ -196,6 +203,12 @@ def _build(
         headers: dict[str, str] = {}
         if settings.ANTHROPIC_WORKSPACE_ID:  # identity-linked keys need this
             headers["anthropic-workspace-id"] = settings.ANTHROPIC_WORKSPACE_ID
+        anthropic_kwargs: dict[str, Any] = {}
+        # Only the synthesiser's streamed, user-facing call requests a visible
+        # reasoning trace (relayed as `thinking` SSE frames — CLAUDE.md §11).
+        # No `budget_tokens` — rejected (400) on the Claude 5 tier.
+        if thinking and streaming:
+            anthropic_kwargs["thinking"] = {"type": "adaptive"}
         # NB: no ``temperature`` — claude-opus-5 / claude-sonnet-5 reject it (400).
         # Anthropic requires a max_tokens; give streamed answers real room.
         return ChatAnthropic(
@@ -205,6 +218,7 @@ def _build(
             max_retries=max_retries,
             api_key=settings.ANTHROPIC_API_KEY,
             default_headers=headers or None,
+            **anthropic_kwargs,
         )
 
     from langchain_openai import ChatOpenAI
@@ -238,9 +252,15 @@ def get_chat_model(
         model=spec.model,
         streaming=streaming,
         temperature=temperature,
+        thinking=spec.thinking,
     )
     return _build(
-        spec.provider, spec.model, streaming=streaming, temperature=temperature, max_tokens=None
+        spec.provider,
+        spec.model,
+        streaming=streaming,
+        temperature=temperature,
+        max_tokens=None,
+        thinking=spec.thinking,
     )
 
 

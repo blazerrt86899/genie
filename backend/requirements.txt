@@ -47,6 +47,11 @@ unstructured>=0.15            # md/txt element typing + chunk_by_title
 pgvector>=0.3                 # SQLAlchemy Vector type for document_chunks.embedding
 tiktoken>=0.8                 # chunk token counts
 
+# ─── Generated files (file_creator agent — CLAUDE.md §12) ───────────────────
+python-docx>=1.1             # .docx output
+fpdf2>=2.7                   # .pdf output — pure Python, no system deps
+openpyxl>=3.1                # .xlsx output
+
 # ─── MCP (centralized tool servers — CLAUDE.md §22) ─────────────────────────
 fastmcp>=3.0
 

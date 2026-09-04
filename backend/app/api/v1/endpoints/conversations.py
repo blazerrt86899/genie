@@ -53,6 +53,9 @@ class MessageOut(BaseModel):
     feedback: str | None = None  # "up" | "down" — the user's 👍/👎 on an assistant message
     cached: bool = False  # assistant reply served from the response cache
     guardrail: dict | None = None  # {redacted, flagged, message} — input scrub note (user msg)
+    thinking: str | None = None  # the reasoning trace behind this message (assistant only)
+    thinking_ms: int | None = None  # how long that reasoning took
+    files: list[dict] = []  # generated files attached to this message (assistant only)
 
 
 class ConversationPatch(BaseModel):
@@ -171,6 +174,9 @@ async def get_conversation(
                 feedback=(m.message_metadata or {}).get("feedback"),
                 cached=bool((m.message_metadata or {}).get("cached")),
                 guardrail=(m.message_metadata or {}).get("guardrail"),
+                thinking=(m.message_metadata or {}).get("thinking"),
+                thinking_ms=(m.message_metadata or {}).get("thinking_ms"),
+                files=list((m.message_metadata or {}).get("files", [])),
             )
             for m in messages
         ],

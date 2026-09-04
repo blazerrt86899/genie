@@ -33,6 +33,9 @@ function mapMessages(rows: ConversationMessage[]): ChatMessage[] {
     feedback: m.feedback ?? null,
     cached: m.cached ?? false,
     guardrail: m.guardrail ?? null,
+    thinking: m.thinking ?? undefined,
+    thinkingMs: m.thinking_ms ?? null,
+    files: m.files ?? [],
   }));
 }
 
@@ -106,6 +109,10 @@ export function useChat(conversationId?: string, projectId?: string | null) {
       await parseSseStream(res.body, (event) => {
         if (event.type === "token") {
           s.appendToken(currentId, event.content);
+        } else if (event.type === "thinking") {
+          s.appendThinking(currentId, event.content);
+        } else if (event.type === "thinking_done") {
+          s.setThinkingDone(currentId, event.duration_ms);
         } else if (event.type === "message_break") {
           s.setMessagePending(currentId, false);
           currentId = crypto.randomUUID();
@@ -119,6 +126,8 @@ export function useChat(conversationId?: string, projectId?: string | null) {
           s.setMessageAgents(currentId, event.agents);
         } else if (event.type === "sources") {
           s.setMessageSources(currentId, event.items);
+        } else if (event.type === "files") {
+          s.setMessageFiles(currentId, event.items);
         } else if (event.type === "guardrail") {
           s.setTurnGuardrail(event.message || "Sensitive data was hidden before sending.");
         } else if (event.type === "plan") {

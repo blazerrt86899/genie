@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/store/chatStore";
 import { StreamingDot } from "./StreamingDot";
 import { SourceCards } from "./SourceCards";
+import { FileCards } from "./FileCard";
+import { ThinkingBlock } from "./ThinkingBlock";
 import { Markdown } from "./Markdown";
 import { MessageActions } from "./MessageActions";
 
@@ -114,6 +116,14 @@ export function Message({
         <AgentTrail agents={message.agents} activeAgents={activeAgents} />
       )}
 
+      {!isUser && (
+        <ThinkingBlock
+          thinking={message.thinking}
+          thinkingMs={message.thinkingMs}
+          active={!!message.thinkingActive}
+        />
+      )}
+
       {isUser && (
         <span className="select-none px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
           {initials(userName)}
@@ -192,6 +202,10 @@ export function Message({
 
       {!isUser && message.sources && message.sources.length > 0 && (
         <SourceCards sources={message.sources} />
+      )}
+
+      {!isUser && message.files && message.files.length > 0 && (
+        <FileCards files={message.files} />
       )}
 
       {showActions && (
