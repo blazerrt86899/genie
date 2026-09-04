@@ -49,7 +49,7 @@ function Composer({
   }, [input]);
 
   return (
-    <div className="rounded-2xl border border-input bg-background shadow-sm transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring">
+    <div className="rounded-[28px] border border-border bg-card shadow-[0_2px_10px_-2px_hsl(226_40%_11%/0.06),0_12px_40px_-12px_hsl(var(--glow)/0.18)] transition-colors focus-within:border-brand/40 focus-within:ring-2 focus-within:ring-ring dark:shadow-[0_2px_24px_-6px_hsl(var(--glow)/0.2)]">
       <AttachmentChips />
       <textarea
         ref={taRef}
@@ -64,7 +64,7 @@ function Composer({
           }
         }}
         rows={2}
-        placeholder="Message Genie…"
+        placeholder="How can I help you today?"
         disabled={isStreaming}
         className="block max-h-52 min-h-[64px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/70 disabled:opacity-60"
       />
@@ -75,6 +75,7 @@ function Composer({
           <Button
             variant="brand"
             size="icon"
+            className="rounded-full"
             onClick={onSend}
             disabled={isStreaming || !input.trim()}
             aria-label="Send"

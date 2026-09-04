@@ -79,7 +79,7 @@ export function SearchChatsModal({
         role="dialog"
         aria-modal="true"
         aria-label="Search chats"
-        className="w-full max-w-xl overflow-hidden rounded-2xl border border-border bg-card shadow-2xl"
+        className="w-full max-w-xl overflow-hidden rounded-3xl border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={onKeyDown}
       >
@@ -119,7 +119,7 @@ export function SearchChatsModal({
                 onMouseMove={() => setActive(i)}
                 onClick={() => select(c.id)}
                 className={cn(
-                  "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left",
+                  "flex w-full items-center gap-3 rounded-full px-3.5 py-2 text-left",
                   i === active && "bg-accent",
                 )}
               >

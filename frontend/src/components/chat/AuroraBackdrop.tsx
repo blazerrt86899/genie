@@ -12,6 +12,7 @@ export function AuroraBackdrop({ subtle = false }: { subtle?: boolean }) {
       <div className="aurora-blob aurora-1" />
       <div className="aurora-blob aurora-2" />
       <div className="aurora-blob aurora-3" />
+      {!subtle && <div className="aurora-center" />}
       <div className="aurora-veil" />
     </div>
   );

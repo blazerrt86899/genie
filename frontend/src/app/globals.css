@@ -16,27 +16,28 @@
     color-scheme: light;
 
     /* Nebula palette — violet brand + a luminous cyan companion */
-    --background: 225 40% 99%;
-    --foreground: 226 40% 12%;
-    --muted: 225 32% 95%;
-    --muted-foreground: 224 14% 42%;
+    --background: 228 44% 98.5%;
+    --foreground: 226 42% 11%;
+    --muted: 228 32% 94.5%;
+    --muted-foreground: 226 12% 44%;
     --card: 0 0% 100%;
     --popover: 0 0% 100%;
-    --popover-foreground: 226 40% 12%;
-    --border: 224 30% 90%;
-    --input: 224 30% 90%;
-    --primary: 226 40% 12%;
+    --popover-foreground: 226 42% 11%;
+    --border: 226 24% 91%;
+    --input: 226 24% 89%;
+    --primary: 226 42% 11%;
     --primary-foreground: 0 0% 100%;
-    --accent: 225 40% 96%;
-    --accent-foreground: 226 40% 12%;
+    --accent: 232 44% 92.5%;
+    --accent-foreground: 232 45% 20%;
     --ring: 258 84% 60%;
+    --sidebar: 230 38% 96.5%;
 
     /* brand — violet → cyan "nebula" */
     --brand: 258 84% 60%;
     --brand-2: 190 82% 42%;
     --brand-foreground: 0 0% 100%;
-    --glow: 258 84% 62%;
-    --glow-2: 190 82% 50%;
+    --glow: 252 92% 68%;
+    --glow-2: 205 95% 60%;
 
     /* code blocks (Markdown renderer + highlight.js tokens) */
     --code-bg: 225 36% 97%;
@@ -66,15 +67,16 @@
     --input: 225 18% 17%;
     --primary: 220 22% 96%;
     --primary-foreground: 226 30% 7%;
-    --accent: 226 22% 15%;
+    --accent: 228 24% 17%;
     --accent-foreground: 220 22% 98%;
     --ring: 258 90% 68%;
+    --sidebar: 226 26% 7%;
 
     --brand: 258 90% 66%;
     --brand-2: 188 86% 55%;
     --brand-foreground: 226 30% 7%;
-    --glow: 260 90% 66%;
-    --glow-2: 189 90% 56%;
+    --glow: 258 92% 68%;
+    --glow-2: 194 92% 58%;
 
     --code-bg: 226 24% 11%;
     --code-fg: 220 16% 84%;
@@ -177,8 +179,44 @@
     position: absolute;
     border-radius: 9999px;
     filter: blur(80px);
-    opacity: 0.55;
+    opacity: 0.42;
     will-change: transform;
+  }
+  /* the soft glow that sits directly behind the greeting + composer */
+  .aurora-center {
+    position: absolute;
+    left: 50%;
+    top: 46%;
+    width: 92vw;
+    max-width: 1100px;
+    height: 62vh;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(
+      ellipse 50% 50% at 50% 50%,
+      hsl(var(--glow-2) / 0.26),
+      hsl(var(--glow) / 0.1) 45%,
+      transparent 72%
+    );
+    filter: blur(36px);
+    animation: aurora-pulse 12s ease-in-out infinite alternate;
+  }
+  :root:not(.dark) .aurora-center {
+    background: radial-gradient(
+      ellipse 50% 50% at 50% 50%,
+      hsl(var(--glow-2) / 0.16),
+      hsl(var(--glow) / 0.07) 45%,
+      transparent 70%
+    );
+  }
+  @keyframes aurora-pulse {
+    from {
+      transform: translate(-50%, -50%) scale(1);
+      opacity: 0.85;
+    }
+    to {
+      transform: translate(-50%, -50%) scale(1.08);
+      opacity: 1;
+    }
   }
   .aurora-1 {
     width: 62vw;
@@ -245,17 +283,18 @@
     }
   }
   :root:not(.dark) .aurora-blob {
-    opacity: 0.3;
-    filter: blur(96px);
+    opacity: 0.22;
+    filter: blur(100px);
   }
   .aurora--subtle .aurora-blob {
-    opacity: 0.18;
+    opacity: 0.16;
   }
   :root:not(.dark) .aurora--subtle .aurora-blob {
-    opacity: 0.14;
+    opacity: 0.12;
   }
   @media (prefers-reduced-motion: reduce) {
-    .aurora-blob {
+    .aurora-blob,
+    .aurora-center {
       animation: none;
     }
   }

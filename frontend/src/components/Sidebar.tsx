@@ -74,7 +74,7 @@ function ConversationRow({
           if (e.key === "Enter") commitRename();
           if (e.key === "Escape") setRenaming(false);
         }}
-        className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring"
+        className="w-full rounded-full border border-input bg-background px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-ring"
       />
     );
   }
@@ -82,14 +82,14 @@ function ConversationRow({
   return (
     <div
       className={cn(
-        "group relative flex items-center rounded-md transition-colors hover:bg-accent",
+        "group relative flex items-center rounded-full transition-colors hover:bg-accent",
         active && "bg-accent",
       )}
     >
       <Link
         href={`/chat/${conversation.id}`}
         className={cn(
-          "flex min-w-0 flex-1 items-center gap-1.5 truncate py-2 pl-2 pr-8 text-sm text-muted-foreground transition-colors group-hover:text-foreground",
+          "flex min-w-0 flex-1 items-center gap-2 truncate py-2 pl-3 pr-9 text-sm text-muted-foreground transition-colors group-hover:text-foreground",
           active && "font-medium text-foreground",
         )}
       >
@@ -209,9 +209,11 @@ function useSidebarWidth() {
 
 const NAV_CLS = (collapsed: boolean, active: boolean) =>
   cn(
-    "flex w-full items-center gap-2 rounded-md py-2 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-    collapsed ? "justify-center px-0" : "px-2",
-    active && "bg-accent font-medium text-foreground",
+    "flex items-center gap-3 rounded-full text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+    collapsed
+      ? "mx-auto h-10 w-10 justify-center"
+      : "w-full px-3.5 py-2.5",
+    active && "bg-accent text-foreground",
   );
 
 function NavItem({
@@ -298,7 +300,7 @@ export function Sidebar() {
       <aside
         style={{ width }}
         className={cn(
-          "relative z-30 flex shrink-0 flex-col overflow-hidden border-r border-border bg-card",
+          "relative z-30 flex shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar",
           // animate the collapse/expand, but not while the user is drag-resizing
           isDragging ? "shadow-2xl" : "transition-[width] duration-200 ease-out",
         )}
@@ -345,7 +347,7 @@ export function Sidebar() {
             onClick={toggleCollapsed}
             title={collapsed ? "Expand sidebar (⌘\\)" : "Collapse sidebar (⌘\\)"}
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
             {collapsed ? (
               <PanelLeftOpen className="h-4 w-4" />
@@ -361,7 +363,7 @@ export function Sidebar() {
             <Button
               variant="brand"
               size="icon"
-              className="w-full"
+              className="mx-auto rounded-full"
               onClick={startNew}
               title="New chat"
               aria-label="New chat"
@@ -371,7 +373,7 @@ export function Sidebar() {
           ) : (
             <Button
               variant="brand"
-              className="w-full justify-start gap-2"
+              className="h-11 w-full justify-start gap-3 rounded-full px-4 text-[0.95rem]"
               onClick={startNew}
             >
               <Plus className="h-4 w-4" />
@@ -408,14 +410,14 @@ export function Sidebar() {
             {isLoading ? (
               <div className="space-y-1 pt-2">
                 {[0, 1, 2].map((i) => (
-                  <div key={i} className="h-8 animate-pulse rounded-md bg-muted" />
+                  <div key={i} className="h-9 animate-pulse rounded-full bg-muted" />
                 ))}
               </div>
             ) : conversations && conversations.length > 0 ? (
               <>
                 {pinned.length > 0 && (
                   <>
-                    <p className="flex items-center gap-1 px-2 pb-1 pt-2 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
+                    <p className="flex items-center gap-1 px-3.5 pb-1 pt-2 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
                       <Pin className="h-3 w-3" />
                       Pinned
                     </p>
@@ -431,7 +433,7 @@ export function Sidebar() {
                     </div>
                   </>
                 )}
-                <p className="px-2 pb-1 pt-3 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
+                <p className="px-3.5 pb-1 pt-3 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
                   Chats
                 </p>
                 {rest.length > 0 ? (
@@ -446,13 +448,13 @@ export function Sidebar() {
                     ))}
                   </div>
                 ) : (
-                  <p className="px-2 py-2 text-xs text-muted-foreground">
+                  <p className="px-3.5 py-2 text-xs text-muted-foreground">
                     {pinned.length > 0 ? "No other chats." : "No conversations yet."}
                   </p>
                 )}
               </>
             ) : (
-              <p className="px-2 py-2 text-xs text-muted-foreground">
+              <p className="px-3.5 py-2 text-xs text-muted-foreground">
                 No conversations yet.
               </p>
             )}
@@ -474,7 +476,7 @@ export function Sidebar() {
                   type="button"
                   title="Sign in"
                   aria-label="Sign in"
-                  className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                  className="grid h-9 w-9 place-items-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground"
                 >
                   <LogIn className="h-4 w-4" />
                 </button>
