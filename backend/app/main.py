@@ -20,7 +20,7 @@ from app.api.v1.router import api_router
 from app.config import settings
 from app.core.clerk import DEV_CLERK_ID, DEV_USER_ID
 from app.core.exceptions import register_exception_handlers
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, shutdown_logging
 from app.core.middleware import RequestContextMiddleware
 from app.core.observability import configure_tracing
 from app.core.redis import close_redis, get_redis_client
@@ -155,6 +155,7 @@ async def lifespan(app: FastAPI):
     await close_redis()
     await dispose_engine()
     logger.info("shutdown_complete")
+    shutdown_logging()  # flush the Loki shipper last so the lines above ship too
 
 
 def create_app() -> FastAPI:

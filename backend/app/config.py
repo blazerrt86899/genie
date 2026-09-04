@@ -101,6 +101,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT"),
     )
 
+    # ─── Local log explorer (Loki + Grafana, docker-compose — CLAUDE.md §21) ─
+    LOKI_URL: str | None = None  # e.g. http://localhost:3100 — unset → no shipping
+    LOKI_FLUSH_INTERVAL_SECONDS: float = 2.0
+    LOKI_BATCH_SIZE: int = 200
+
     # ─── Search ────────────────────────────────────────────────────────────
     TAVILY_API_KEY: str | None = None
 

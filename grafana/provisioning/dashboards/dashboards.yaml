@@ -1,0 +1,14 @@
+# Tells Grafana to auto-load dashboard JSON from ./json on container start
+# (CLAUDE.md §21) — no manual "Import dashboard" click needed.
+apiVersion: 1
+
+providers:
+  - name: Genie
+    orgId: 1
+    folder: Genie
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

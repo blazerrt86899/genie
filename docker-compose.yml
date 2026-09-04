@@ -2,7 +2,7 @@
 # does NOT provide.
 #
 #   supabase start        # Postgres + pgvector on :54322, Studio on :54323
-#   docker compose up -d   # Redis + LocalStack (this file)
+#   docker compose up -d   # Redis + LocalStack + Loki + Grafana (this file)
 #
 # Production uses ElastiCache / Supabase Cloud / real AWS — see CLAUDE.md §3.
 
@@ -26,3 +26,36 @@ services:
       DEBUG: 0
     volumes:
       - "./.localstack:/var/lib/localstack"
+
+  # ─── Local log explorer (CLAUDE.md §21) ────────────────────────────────────
+  # The backend runs bare (uvicorn on the host, not in Docker) and ships its
+  # structlog events straight to Loki's push API (app/core/loki.py) when
+  # LOKI_URL is set — set LOKI_URL=http://localhost:3100 to enable it.
+  loki:
+    image: grafana/loki:3.3.2
+    ports:
+      - "3100:3100"
+    volumes:
+      - "loki-data:/loki"
+    # the image's baked-in /etc/loki/local-config.yaml is a working
+    # single-binary, filesystem-backed, no-auth config — nothing to mount
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3001:3000"  # :3000 is usually taken by the Next.js dev server
+    environment:
+      # Anonymous admin access — a local-only convenience. Never expose this
+      # port publicly with these settings.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "grafana-data:/var/lib/grafana"
+    depends_on:
+      - loki
+
+volumes:
+  loki-data:
+  grafana-data:

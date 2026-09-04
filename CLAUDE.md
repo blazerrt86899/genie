@@ -178,7 +178,8 @@ These are non-negotiable. Do not violate them. Do not find clever workarounds.
 genie/
 ├── CLAUDE.md                          ← You are here
 ├── .env.example                       ← Copy to .env, never commit .env
-├── docker-compose.yml                 ← Local dev: Redis, localstack
+├── docker-compose.yml                 ← Local dev: Redis, localstack, Loki + Grafana (§21.4)
+├── grafana/provisioning/              ← Loki datasource + the "Genie Logs" dashboard, auto-loaded
 │
 ├── backend/
 │   ├── pyproject.toml
@@ -307,6 +308,7 @@ genie/
 │           ├── streaming.py           ← SSE frame helpers (§11)
 │           ├── observability.py       ← configure_tracing() — LangSmith → os.environ
 │           ├── logging.py             ← structlog config + redact_processor + preview()/mask() (§21)
+│           ├── loki.py                ← ships every log event to the local Loki + Grafana explorer (§21.4)
 │           ├── middleware.py          ← request_id injection, timing
 │           └── exceptions.py          ← Custom HTTP exception classes
 │
@@ -479,6 +481,14 @@ LANGSMITH_TRACING=true
 LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=
 LANGSMITH_PROJECT=genie-prod  # or genie-dev
+
+# ─── Local log explorer (Loki + Grafana, docker-compose) ────────────────────
+# docker compose up -d loki grafana, then set this — every structlog event
+# ships to Loki (app/core/loki.py) and shows up in Grafana at :3001 (no login,
+# local dev only — §21.4). Unset → console/JSON logs only, no shipping.
+LOKI_URL=http://localhost:3100
+LOKI_FLUSH_INTERVAL_SECONDS=2.0
+LOKI_BATCH_SIZE=200
 
 # ─── Search ──────────────────────────────────────────────────────────────────
 TAVILY_API_KEY=
@@ -1739,7 +1749,7 @@ brand-new chat; `/memory` lets the user see and remove what Genie knows.
 
 ### Unit Tests (per agent, per service)
 ```
-tests/  (≈110 tests, all green)
+tests/  (≈115 tests, all green)
 ├── agents/
 │   ├── test_supervisor.py      ← plan validation, executor dep-order, validator, routing, attachment + KB helpers, retriever gate
 │   ├── test_registry.py        ← registry integrity
@@ -1755,7 +1765,8 @@ tests/  (≈110 tests, all green)
 │   └── test_tasks_server.py    ← in-memory Client, task_service faked
 ├── core/
 │   ├── test_guardrails.py      ← scan() per kind · Luhn · redact · overlap · summarize
-│   └── test_usage.py           ← enforce_token_limits: under / daily / weekly-first / disabled
+│   ├── test_usage.py           ← enforce_token_limits: under / daily / weekly-first / disabled
+│   └── test_loki.py            ← enqueue no-op without LOKI_URL · _flush groups by level · failure swallowed
 ├── services/
 │   ├── test_chat_service.py    ← SSE framing, message splitting, cache-hit stream, thinking split, files collection/link
 │   ├── test_cache_service.py   ← is_cacheable_query · lookup hit/miss · store + per-user cap
@@ -1885,6 +1896,8 @@ _Also 2026-09-05 — **live thinking display + downloadable generated files**. *
 
 _Also 2026-09-05 — **file_service PDF/DOCX quality pass** (the first PDF cut was a flat `multi_cell` text dump — no real tables, `**bold**`/`<br>` leaked as literal text, unmapped Unicode became `?`). `_render_pdf` now converts the parsed blocks to a small well-formed HTML subset (`_blocks_to_html`/`_inline_html`) and renders via fpdf2's `write_html` — real bordered `<table>` grids (not `" | "`-joined text), `<h1>`-`<h3>` with a `TextStyle` per level (size/colour/spacing), inline `<b>`/`<i>` for `**bold**`/`*italic*`, a literal `<br>` inside a cell becomes `"; "` (fpdf2 can't nest `<br>` in `<td>`). `_latin1_safe`'s transliteration map grew substantially (bullets, arrows, dash/hyphen variants, math symbols, odd spaces) plus an `unicodedata.normalize("NFKD", …)` + combining-mark strip pass, so accented Latin text degrades gracefully instead of turning into `?`. `_render_docx` gained matching real inline bold/italic runs (`_inline_tokens`/`_add_docx_runs`) and splits a `<br>`-bearing table cell into real multi-paragraph cells instead of printing the tag. `_render_xlsx` strips markdown/`<br>` per cell, bolds the header row, and sizes columns to content. `FILE_CONTENT_PROMPT` now asks the writer for plain ASCII punctuation and `;`-separated facts in a cell instead of a line break, to lean less on the fallback. New tests assert on the actual rendered output (`pdfminer.extract_text` for PDF, re-opened `python-docx` runs for DOCX) — no `**`, no leaked `<br>`, no stray `?`, a real bordered table. 207 backend tests, ruff clean._
 
+_Also 2026-09-05 — **local log explorer (Loki + Grafana)**: Datadog was the first idea but its free tier is a 14-day trial; replaced with a self-hosted, free-forever stack. Two new `docker-compose.yml` services — `loki` (`:3100`, the image's baked-in single-binary/filesystem/no-auth config, nothing to mount) and `grafana` (`:3001`, anonymous-admin auth — local dev only). `grafana/provisioning/` auto-registers the Loki datasource (`uid: loki`) and a **Genie Logs** dashboard (`json/genie-logs.json`, 8 panels built from this app's real structlog event vocabulary — log volume by level, errors over time, HTTP request rate, HTTP latency avg/p95 via LogQL `unwrap`, agent runs by agent, agent failures, recent errors, raw log stream) — zero manual clicking. New `app/core/loki.py`: since the backend runs bare `uvicorn` on the host (not in Docker) rather than tailing container stdout, it pushes straight to Loki's HTTP push API — a thread-safe queue + one daemon thread batching/flushing (`LOKI_BATCH_SIZE`/`LOKI_FLUSH_INTERVAL_SECONDS`) to `POST {LOKI_URL}/loki/api/v1/push`, grouped into a stream per `level` label; a push failure is swallowed (throttled `print`, never raised). `core/logging.py` gained a `_ship_to_loki` processor (after `redact_processor`, before the renderer — dev console output unaffected) and `shutdown_logging()` (flush on the `main.py` lifespan's teardown, called last so shutdown's own log lines ship too). New `LOKI_URL`/`LOKI_FLUSH_INTERVAL_SECONDS`/`LOKI_BATCH_SIZE` settings — unset `LOKI_URL` → `enqueue()` is a no-op, zero overhead. Verified live end-to-end: pushed events queried back out of Loki with the right labels/body, and Grafana's `/api/search` + `/api/dashboards/uid/genie-logs` confirmed the datasource and all 8 panels auto-provisioned. `tests/core/test_loki.py` (5). 212 backend tests, ruff clean._
+
 _Also 2026-09-03 — **premium light-mode + pill sidebar polish**: retuned the light palette (soft tinted-white ground `228 44% 98.5%`, warmer neutrals, bluer `--accent`, softer `--border`) and added a **`--sidebar`** surface token (light + dark) + `sidebar` Tailwind colour so the sidebar reads distinct from the content. `Sidebar` nav items (`NAV_CLS`), the "New chat" button, chat rows (`ConversationRow`), the rename input, section headers, and `SearchChatsModal` rows are all `rounded-full` pills now (`bg-accent` hover/active, `px-3.5`). `AuroraBackdrop` gained a `.aurora-center` — a slow-pulsing soft blue halo directly behind the greeting + composer on the empty chat (the Gemini-style glow); drift blobs dialled down. Composer is `rounded-[28px]` on `bg-card` with a brand-tinted glow shadow, round send button. Light `--glow` violet / `--glow-2` blue. Verified: build + lint clean._
 
 _Also 2026-09-03 — **"Nebula" palette + moving aurora backdrop**: retuned every `globals.css` token (light + dark) to a deep space-navy base with a **violet `--brand` + cyan `--brand-2`** identity — every brand gradient (`Wordmark`, `Button variant="brand"`, `Hero` heading) is now violet→cyan. New `--glow-2` (cyan) token + `glow-2` Tailwind colour. `components/chat/AuroraBackdrop.tsx` — three pure-CSS `blur(80px)` radial blobs drifting on 26/34/42 s loops (`globals.css` `.aurora-*`), rendered once in `ChatView` (`subtle={!isEmpty}` → full on the empty chat, barely-there behind a conversation), `-z-10` inside an `isolate` root, a `.aurora-veil` fades it into the page so text stays crisp; `prefers-reduced-motion` freezes the blobs. `Hero` backdrop gained a cyan companion glow. No JS, bundle unchanged. Verified: build + lint clean._
@@ -1918,7 +1931,7 @@ _Also 2026-09-02 — **pinned chats + read/unread**: `conversations.pinned` / `c
 **Backend** (`@clerk/…` n/a — FastAPI + uv; deps in `backend/requirements.txt`)
 - ✅ App factory + lifespan (`main.py`): Redis ping, DB `SELECT 1`, `AsyncPostgresSaver.setup()` (non-fatal in dev)
 - ✅ `config.py` (pydantic-settings, all §6 vars), `core/middleware.py` (`request_id` + request lifecycle logs), `core/exceptions.py`, `core/redis.py`, `core/streaming.py` (SSE frame helper)
-- ✅ **Application-wide logging** (§21) — `core/logging.py`: `structlog` (console in dev, JSON in prod), a `redact_processor` that scrubs secrets from every event, `preview()` for user content, noisy libs pinned to WARNING. Step logs across middleware, `core/clerk*`, `services/chat_service.py`, `agents/supervisor/nodes.py`, the greeting/web_search agents, `db/repositories/*`, `db/session.py`, and the `main.py` lifespan. **Datadog agent = pending.**
+- ✅ **Application-wide logging** (§21) — `core/logging.py`: `structlog` (console in dev, JSON in prod), a `redact_processor` that scrubs secrets from every event, `preview()` for user content, noisy libs pinned to WARNING. Step logs across middleware, `core/clerk*`, `services/chat_service.py`, `agents/supervisor/nodes.py`, the greeting/web_search agents, `db/repositories/*`, `db/session.py`, and the `main.py` lifespan. **Local log explorer** — `core/loki.py` ships every event to a `docker-compose` Loki + Grafana stack (§21.4) when `LOKI_URL` is set; a pre-built "Genie Logs" dashboard auto-provisions.
 - ✅ **LangSmith tracing** — `core/observability.py:configure_tracing()` (called first in the lifespan) copies `LANGSMITH_*` from Settings into `os.environ` so LangChain actually traces; each chat turn's root run id → `messages.metadata.langsmith_run_id` + the SSE `done` event.
 - ✅ `GET /health`, `GET /health/ready` (Redis + DB checks)
 - ✅ **Chat**: `POST /chat` (persist user msg + stash run — incl. `client_hour` — in Redis) → `GET /chat/{id}/stream` SSE. Runs the real **supervisor graph** (`build_graph`: `supervisor → executor → synthesiser → validator`, capped re-plan loop) compiled with a live `AsyncPostgresSaver` checkpointer held in the lifespan; `thread_id = conversation_id`. `chat_service._generate` streams only the synthesiser's tokens, relays `agent_start`/`agent_end`/`plan` custom events as SSE, accumulates token usage, and falls back to `graph.aget_state` for the greeting fast-path (no streamed tokens). Both messages persist to `messages`.
@@ -2030,9 +2043,18 @@ short turns (the enhancer runs an LLM call on every "hi").
 
 ## 21. Observability & Logging
 
-> **Datadog is the destination.** The Datadog agent will ship container stdout;
-> until it's wired, logs render to console (dev) / JSON (prod). Nothing about how
-> we log changes when Datadog lands — it just reads what's already emitted.
+> **Local log explorer: Loki + Grafana, self-hosted, free forever** — no
+> account, no trial, no quota (Datadog was considered; its free tier is a
+> 14-day trial only). `docker compose up -d loki grafana`, set `LOKI_URL`
+> (`.env.example`), and every structlog event ships there in addition to
+> rendering to console (dev) / JSON (prod) — nothing about how we log changes,
+> `core/loki.py` just also enqueues a copy. Open **http://localhost:3001**
+> (anonymous admin, no login — local dev only, never expose that port
+> publicly) → **Dashboards → Genie → Genie Logs** for the pre-built dashboard
+> (log volume by level, error rate, HTTP request rate/latency, agent runs by
+> agent, agent failures, recent errors, and a raw log stream), or **Explore**
+> for ad-hoc LogQL, e.g. `{service="genie-backend"} | json | level="error"`.
+> See §21.4.
 
 ### 21.1 The rule — log every step
 
@@ -2117,10 +2139,42 @@ able to reconstruct a request from the logs alone.
 
 ### 21.3 Still to wire
 
-Datadog agent + `ddtrace` (APM), log-based metrics/monitors, trace-id
-correlation with LangSmith, and structured logging in the Phase 2/3 stubs
-(`workers/*`, `memory/*`, `services/document_service.py`) as they are built.
-The MCP layer (§22) already logs each tool call in/out.
+APM (`ddtrace` or otherwise), log-based metrics/monitors, trace-id correlation
+with LangSmith, and structured logging in the Phase 2/3 stubs (`workers/*`,
+`memory/*`, `services/document_service.py`) as they are built. The MCP layer
+(§22) already logs each tool call in/out.
+
+### 21.4 Local log explorer (Loki + Grafana)
+
+Two extra `docker-compose.yml` services, `loki` (`:3100`) and `grafana`
+(`:3001`, mapped off `:3000` since that's usually the Next.js dev server).
+Grafana auto-provisions on start — no manual "Add data source" / "Import
+dashboard" clicking:
+- `grafana/provisioning/datasources/loki.yaml` — Loki (`uid: loki`) as the
+  default datasource.
+- `grafana/provisioning/dashboards/` — a **Genie** folder holding
+  **Genie Logs** (`json/genie-logs.json`), 8 panels built from this app's real
+  event vocabulary (§21.2): log volume by level, errors over time, HTTP
+  request rate, HTTP latency (avg/p95 via LogQL `unwrap duration_ms`), agent
+  runs by agent, agent failures (logs), recent errors (logs), raw log stream
+  (logs — the actual "explorer" view).
+
+**Shipping**: the backend isn't containerized for local dev (bare `uvicorn` on
+the host), so a Docker-log-tailing agent (Promtail) wouldn't see its stdout.
+Instead `core/loki.py` pushes directly to Loki's HTTP push API from inside the
+app: a `_ship_to_loki` structlog processor (`core/logging.py`, runs after
+`redact_processor` — never ships an unredacted secret, before the final
+renderer) enqueues every event into a thread-safe queue; one daemon background
+thread batches (`LOKI_BATCH_SIZE`) and flushes (`LOKI_FLUSH_INTERVAL_SECONDS`)
+to `POST {LOKI_URL}/loki/api/v1/push`, grouped into a Loki stream per `level`
+(`{service="genie-backend", env, level}` — low-cardinality labels; everything
+else stays in the JSON line body, queryable via LogQL's `| json`). Entirely
+off the request path — a Loki outage is swallowed (throttled to one `print`
+every 30s) rather than raised back into the app or spamming stdout. No API
+key: the local Loki container is unauthenticated. `configure_logging()` calls
+`loki.start()`; the FastAPI lifespan calls `shutdown_logging()` (`main.py`)
+last on teardown so the final shutdown log lines still ship. Unset `LOKI_URL`
+→ `enqueue()` is a no-op, zero overhead, console/JSON logging is unaffected.
 
 ---
 

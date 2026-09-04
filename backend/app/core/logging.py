@@ -1,11 +1,12 @@
 """Structured logging via structlog (CLAUDE.md §8, §21).
 
 Every module logs its steps through ``structlog.get_logger(__name__)``. Logs are
-structured (key/value) — console-rendered in dev, JSON in prod (ready for the
-Datadog agent to ship). A redaction processor scrubs secrets from EVERY event
-before it is rendered, so it is safe to pass tokens / URLs / payloads as fields;
-still, prefer ``preview()`` for user content and never log raw credentials on
-purpose.
+structured (key/value) — console-rendered in dev, JSON in prod. A redaction
+processor scrubs secrets from EVERY event before it is rendered, so it is safe
+to pass tokens / URLs / payloads as fields; still, prefer ``preview()`` for
+user content and never log raw credentials on purpose. When ``LOKI_URL`` is set
+(the local ``docker compose`` Loki + Grafana log explorer), every event is also
+shipped there — see ``core/loki.py``.
 """
 
 from __future__ import annotations
@@ -122,6 +123,17 @@ _NOISY_LOGGERS: dict[str, int] = {
 }
 
 
+def _ship_to_loki(_logger: Any, _name: str, event_dict: dict) -> dict:
+    """Enqueue a copy of the (already-redacted) event for the local log
+    explorer (CLAUDE.md §21, `core/loki.py`) — a no-op unless `LOKI_URL` is
+    set. Passes the dict through unchanged; dev's console output is
+    unaffected either way."""
+    from app.core import loki
+
+    loki.enqueue(event_dict)
+    return event_dict
+
+
 def configure_logging() -> None:
     """Call once at application startup."""
     level = logging.INFO if settings.is_production else logging.DEBUG
@@ -135,7 +147,8 @@ def configure_logging() -> None:
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
-        redact_processor,  # must run last, just before rendering
+        redact_processor,  # scrub secrets before anything downstream sees the event
+        _ship_to_loki,  # ships the redacted event; must run before the renderer
     ]
     processors.append(
         structlog.processors.JSONRenderer()
@@ -149,6 +162,18 @@ def configure_logging() -> None:
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
     )
+
+    from app.core import loki
+
+    loki.start()
+
+
+def shutdown_logging() -> None:
+    """Flush + stop the Loki shipper — call from the FastAPI lifespan's
+    teardown so the last few log lines of a shutdown aren't lost."""
+    from app.core import loki
+
+    loki.stop()
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
