@@ -16,7 +16,9 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
   const model = useChatStore((s) => s.model);
   const setModel = useChatStore((s) => s.setModel);
   const [open, setOpen] = useState(false);
+  const [dropUp, setDropUp] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -26,6 +28,17 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
   }, [open]);
+
+  function toggle() {
+    setOpen((v) => {
+      if (!v && btnRef.current) {
+        // Open downwards by default; flip up only when there isn't room below.
+        const below = window.innerHeight - btnRef.current.getBoundingClientRect().bottom;
+        setDropUp(below < 320);
+      }
+      return !v;
+    });
+  }
 
   const models = data?.models ?? [];
   if (models.length < 2) return null;
@@ -46,9 +59,10 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
   return (
     <div ref={ref} className="relative">
       <button
+        ref={btnRef}
         type="button"
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
       >
         <Sparkles className="h-3.5 w-3.5 text-brand" />
@@ -59,7 +73,10 @@ export function ModelPicker({ disabled }: { disabled?: boolean }) {
       {open && (
         <ul
           role="listbox"
-          className="absolute bottom-full right-0 z-20 mb-1.5 max-h-72 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg"
+          className={cn(
+            "absolute right-0 z-20 max-h-72 w-60 overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-lg",
+            dropUp ? "bottom-full mb-1.5" : "top-full mt-1.5",
+          )}
         >
           {models.map((m) => (
             <li key={m.id}>
